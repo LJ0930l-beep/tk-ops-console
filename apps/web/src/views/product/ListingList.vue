@@ -2,7 +2,7 @@
   <div>
     <ResourcePage
       ref="rp"
-      api="/products/listings"
+      api="/products/listing"
       title="店铺商品映射"
       :columns="columns"
       :search-fields="searchFields"
@@ -108,7 +108,7 @@ const skuOpts = ref<OptionDef[]>([]);
 
 async function loadSkus() {
   try {
-    const r = await apiGet<Paged<Record<string, unknown>>>('/products/skus', { page: 1, pageSize: 200 });
+    const r = await apiGet<Paged<Record<string, unknown>>>('/products/sku', { page: 1, pageSize: 200 });
     skuOpts.value = (r.list ?? []).map((s) => ({ value: Number(s.id), label: `${String(s.sku_code)}｜${String(s.spec ?? '')}｜${String(s.name_cn ?? '')}` }));
   } catch {
     skuOpts.value = [];
@@ -183,7 +183,7 @@ function openMatch() {
 async function doMatch() {
   matching.value = true;
   try {
-    const res = await apiPost<Record<string, unknown>>('/products/listings/auto-match', { shop_id: matchShop.value });
+    const res = await apiPost<Record<string, unknown>>('/products/listing/auto-match', { shop_id: matchShop.value });
     const matched = Number(res?.matched ?? res?.updated ?? res?.count ?? 0);
     const ambiguous = Number(res?.ambiguous ?? res?.multi ?? 0);
     ElMessage.success(`自动匹配完成：命中 ${matched} 条${ambiguous ? `，${ambiguous} 条多命中需人工绑定` : ''}`);
@@ -213,7 +213,7 @@ async function doBind() {
   if (!id) return;
   binding.value = true;
   try {
-    await apiPut(`/products/listings/${id}`, { sku_id: bindSkuId.value ?? null });
+    await apiPut(`/products/listing/${id}`, { sku_id: bindSkuId.value ?? null });
     ElMessage.success('已绑定内部 SKU');
     bindVisible.value = false;
     rp.value?.reload();

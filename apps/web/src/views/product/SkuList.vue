@@ -10,7 +10,7 @@
 
     <ResourcePage
       ref="rp"
-      api="/products/skus"
+      api="/products/sku"
       title="SKU"
       :columns="columns"
       :search-fields="searchFields"
@@ -62,7 +62,7 @@ const categoryOpts = ref<OptionDef[]>([]);
 
 async function loadSpus() {
   try {
-    const r = await apiGet<Paged<Record<string, unknown>>>('/products/spus', { page: 1, pageSize: 200 });
+    const r = await apiGet<Paged<Record<string, unknown>>>('/products/spu', { page: 1, pageSize: 200 });
     spuOpts.value = (r.list ?? []).map((s) => ({ value: Number(s.id), label: `${String(s.spu_code)}｜${String(s.name_cn ?? '')}` }));
   } catch {
     spuOpts.value = [];

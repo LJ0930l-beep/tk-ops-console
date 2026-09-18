@@ -10,7 +10,7 @@
 
     <ResourcePage
       ref="rp"
-      api="/products/spus"
+      api="/products/spu"
       title="商品 SPU"
       :columns="columns"
       :search-fields="searchFields"

@@ -11,7 +11,7 @@
         <el-tab-pane label="A. 未映射的店铺商品" name="listing">
           <ResourcePage
             ref="rpA"
-            api="/products/listings"
+            api="/products/listing"
             title="店铺商品映射"
             :columns="listingColumns"
             :search-fields="listingSearch"
@@ -146,7 +146,7 @@ onMounted(async () => {
 
 async function loadSkus() {
   try {
-    const r = await apiGet<Paged<Record<string, unknown>>>('/products/skus', { page: 1, pageSize: 200 });
+    const r = await apiGet<Paged<Record<string, unknown>>>('/products/sku', { page: 1, pageSize: 200 });
     skuOpts.value = (r.list ?? []).map((s) => ({ value: Number(s.id), label: `${String(s.sku_code)}｜${String(s.spec ?? '')}｜${String(s.name_cn ?? '')}` }));
   } catch {
     skuOpts.value = [];
@@ -193,7 +193,7 @@ async function loadOrderItems(resetPage?: number) {
   if (resetPage) oiPage.value = resetPage;
   oiLoading.value = true;
   try {
-    const data = await apiGet<Paged<Record<string, unknown>>>('/products/unmapped/order-items', {
+    const data = await apiGet<Paged<Record<string, unknown>>>('/orders/unmatched', {
       page: oiPage.value,
       pageSize: oiPageSize.value,
       ...Object.fromEntries(Object.entries(oiQuery).filter(([, v]) => v !== '' && v != null)),
@@ -251,7 +251,7 @@ async function doBind() {
   if (!bindListingId.value) return;
   binding.value = true;
   try {
-    await apiPut(`/products/listings/${bindListingId.value}`, { sku_id: bindSkuId.value ?? null });
+    await apiPut(`/products/listing/${bindListingId.value}`, { sku_id: bindSkuId.value ?? null });
     ElMessage.success('已绑定内部 SKU，利润将在下次汇总时纳入该成本');
     bindVisible.value = false;
     rpA.value?.reload();

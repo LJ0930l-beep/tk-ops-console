@@ -89,7 +89,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue';
-import { useRoute } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { Check, Plus } from '@element-plus/icons-vue';
 import { OUTREACH_RESULT } from '@tk/shared';
@@ -101,6 +101,7 @@ import { useAuthStore } from '@/stores/auth';
 type Row = Record<string, unknown>;
 
 const route = useRoute();
+const router = useRouter();
 const auth = useAuthStore();
 const rp = ref<InstanceType<typeof ResourcePage> | null>(null);
 const summaryRef = ref<unknown>(null);

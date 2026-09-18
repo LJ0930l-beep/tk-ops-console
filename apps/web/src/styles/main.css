@@ -1,0 +1,14 @@
+html, body, #app { height: 100%; margin: 0; }
+body { font-family: 'Helvetica Neue', Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif; background: #f5f7fa; }
+.page { padding: 16px; }
+.page-card { margin-bottom: 16px; }
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.chart-box { height: 300px; }
+.money-cny { color: #c45656; }
+.mask { color: #909399; }
+.el-table .unmapped-row { background: #fef0f0; }
+.todo-badge { margin-left: 4px; }
+@media (max-width: 768px) {
+  .stat-grid { grid-template-columns: 1fr 1fr; }
+  .page { padding: 8px; }
+}

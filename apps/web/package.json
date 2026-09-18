@@ -11,6 +11,7 @@
     "test:e2e": "vitest run --dir tests/unit"
   },
   "dependencies": {
+    "@element-plus/icons-vue": "^2.3.2",
     "@tk/shared": "*",
     "axios": "^1.13.2",
     "echarts": "^6.1.0",

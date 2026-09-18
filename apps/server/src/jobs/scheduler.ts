@@ -1,8 +1,10 @@
-import { all, get } from '../core/db.js';
-import { sendAlert } from '../core/oplog.js';
+import cron from 'node-cron';
+import { registerSyncJobs } from './syncJobs.js';
+import { registerCreatorJobs } from './creatorJobs.js';
 
-/** 定时任务：订单增量同步 / 结算同步 / 保护期回收 / 寄样超期 / 授权到期 / 汇总刷新 */
+/** 定时任务：订单/商品/售后/联盟增量同步 + 保护期回收 / 寄样超期 / 直播提醒 / 汇总刷新 */
 export function startScheduler(): void {
-  void all; void get; void sendAlert;
-  console.log('[jobs] scheduler 待接入（由 sync/content 模块提供具体任务）');
+  const sync = registerSyncJobs(cron).map((j) => `sync:${j.name} (${j.expr})`);
+  const creator = registerCreatorJobs(cron).map((j) => `creator:${j.name} (${j.expression})`);
+  for (const line of [...sync, ...creator]) console.log(`[jobs] 已注册 ${line}`);
 }

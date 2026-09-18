@@ -19,13 +19,15 @@ const mask = (v: unknown): boolean => v === '***';
 
 /** 种子账号 id（sys_user 插入顺序固定） */
 const USER = { boss: 1, limy: 2, wangqiang: 4, chenbd: 5, lubd: 6, hudm: 7, yinuo: 8, whzhao: 12 } as const;
-/** 种子达人：公海 4/6/8/9/11，chenbd 私海 1/3/5/7/12(黑名单)，lubd 私海 2/10 */
+/** 种子达人（bdUsers[i % 2]）：公海 4/6/8/9/11，chenbd 1(合作中)/3/5(合作中)/7，lubd 2/10 + 12(黑名单) */
 const CREATOR = { aisyah: 1, kevin: 2, mangbert: 3, cosy: 4, fitjay: 5, gadget: 6, lina: 7, tales: 8, deals: 9, nose: 10, finds: 11, glow: 12 } as const;
 
 const token: Record<string, string> = {};
 
 beforeAll(async () => {
   for (const [k, u] of Object.entries(ACCOUNTS)) token[k] = await login(http, u);
+  // helper.ACCOUNTS 未列 BD 主管：达人一组主管是 hudm（role_key=bd_manager，data_scope=2 本组）
+  token.bdManager = await login(http, 'hudm');
 });
 
 /** 建一个公海达人（老板建公海，供各用例独立认领） */
@@ -74,7 +76,8 @@ describe('达人库：列表范围 + 联系方式脱敏（方案 8.1 / 8.2）', 
   it('BD 只看公海 + 自己私海，看不到他人私海', async () => {
     const mine = pageOf((await http.get('/api/creators?scope=mine&pageSize=100').set(auth(token.bd))).body);
     expect(mine.list.every((c) => Number(c.owner_id) === USER.chenbd)).toBe(true);
-    expect(mine.total).toBe(5);
+    // PRD §7 TC-02 / §4.5 C：chenbd 拥有 ids 1,3,5,7 共 4 位（黑名单 glowwithme #12 归 lubd）
+    expect(mine.total).toBe(4);
 
     const pool = pageOf((await http.get('/api/creators?scope=pool&pageSize=100').set(auth(token.bd))).body);
     expect(pool.total).toBe(5);

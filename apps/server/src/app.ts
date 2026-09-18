@@ -12,6 +12,7 @@ import { contentRouter } from './modules/content.routes.js';
 import { adsRouter } from './modules/ads.routes.js';
 import { financeRouter } from './modules/finance.routes.js';
 import { dashboardRouter } from './modules/dashboard.routes.js';
+import { stockRouter } from './modules/stock.routes.js';
 import { syncRouter } from './modules/sync.routes.js';
 
 export function createApp(): Express {
@@ -35,6 +36,7 @@ export function createApp(): Express {
   api.use('/ads', adsRouter);
   api.use('/finance', financeRouter);
   api.use('/dashboard', dashboardRouter);
+  api.use('/stock', stockRouter);
   api.use('/sync', syncRouter);
   app.use('/api', api);
 

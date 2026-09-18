@@ -424,9 +424,11 @@ describe('表格导入兜底 + 导出（can_export）', () => {
 /* ==================================================================== */
 describe('列表筛选与关键字（前端表格联调用）', () => {
   it('SPU 筛选 category / keyword / shop_id，带 sku_count 与 listing_count', async () => {
-    const all3c = pageOf((await http.get('/api/products/spu?category=3C数码&pageSize=50').set(auth(token.boss))).body);
+    // import/spu 用例已导入 IMP-SPU-1（category=3C数码，默认 status=1 开发中），
+    // 叠加 §3.3 的 status 筛选取「在售」的 2 个种子款，同时验证两个筛选器组合生效
+    const all3c = pageOf((await http.get('/api/products/spu?category=3C数码&status=2&pageSize=50').set(auth(token.boss))).body);
     expect(all3c.total).toBe(2);
-    expect(all3c.list.every((p) => p.category === '3C数码')).toBe(true);
+    expect(all3c.list.every((p) => p.category === '3C数码' && Number(p.status) === 2)).toBe(true);
     const one = all3c.list[0] as Record<string, unknown>;
     expect(Number(one.sku_count)).toBeGreaterThan(0);
     expect(one.owner_name).toBe('王强');
@@ -441,9 +443,11 @@ describe('列表筛选与关键字（前端表格联调用）', () => {
   });
 
   it('SKU 列表筛选：spu_id / category / status / 分页参数', async () => {
-    const page1 = pageOf((await http.get('/api/products/sku?page=1&pageSize=3').set(auth(token.boss))).body);
+    // pageOf 只取 list/total；§3.0 响应契约 {list,total,page,pageSize} 需从原始体断言
+    const skuP1 = await http.get('/api/products/sku?page=1&pageSize=3').set(auth(token.boss));
+    const page1 = pageOf(skuP1.body);
     expect(page1.list.length).toBe(3);
-    expect(page1.pageSize).toBe(3);
+    expect(dataOf<{ page: number; pageSize: number }>(skuP1.body)).toMatchObject({ page: 1, pageSize: 3 });
     expect(page1.total).toBeGreaterThan(10);
     const page2 = pageOf((await http.get('/api/products/sku?page=2&pageSize=3').set(auth(token.boss))).body);
     expect(page2.list[0]?.id).not.toBe(page1.list[0]?.id);

@@ -74,7 +74,8 @@ const skuBody = z.object({
 
 const listingBody = z.object({
   shop_id: z.number().int().positive(),
-  sku_id: z.number().int().min(1).nullish(),
+  // 0 = 清空绑定（前端「解绑」按钮传法），落库归一为 null 并回落 map_status=2
+  sku_id: z.number().int().min(0).nullish(),
   tk_product_id: z.string().max(64).nullish(),
   tk_sku_id: z.string().max(64).nullish(),
   seller_sku: z.string().max(100).nullish(),
@@ -101,7 +102,7 @@ productRouter.use(requireMenu('product'));
 function spuListQ(req: Parameters<typeof current>[0]): { q: Q } {
   const user = current(req);
   const q = new Q('p.is_deleted = 0')
-    .like('p.spu_code LIKE ? OR p.name_cn LIKE ? OR p.name_en LIKE ?', qv(req, 'keyword'))
+    .like('(p.spu_code LIKE ? OR p.name_cn LIKE ? OR p.name_en LIKE ?)', qv(req, 'keyword'))
     .eq('p.category', qv(req, 'category'), false)
     .eq('p.status', qv(req, 'status'))
     .eq('p.owner_id', qv(req, 'owner_id'));
@@ -184,11 +185,12 @@ productRouter.put(
   wrap((req, res) => {
     const user = current(req);
     const id = Number(req.params.id);
-    const before = mustGetSpu(id);
     const body = parseBody(spuBody.partial(), req.body);
+    // 唯一性冲突先于存在性检查：即使目标行已软删，也要挡住「改成别人在用的款号」
     if (body.spu_code && get(`SELECT id FROM product_spu WHERE spu_code = ? AND id <> ? AND is_deleted = 0`, body.spu_code, id)) {
       throw badRequest(`款号 ${body.spu_code} 已被其他商品占用`);
     }
+    const before = mustGetSpu(id);
     if (body.owner_id && !get(`SELECT id FROM sys_user WHERE id = ? AND is_deleted = 0`, body.owner_id)) throw badRequest('负责人(owner_id)不存在');
     update('product_spu', id, rowOf(body));
     logIfChanged({
@@ -242,7 +244,7 @@ productRouter.get(
 function skuListQ(req: Parameters<typeof current>[0]): { q: Q; from: string } {
   const user = current(req);
   const q = new Q('k.is_deleted = 0')
-    .like('k.sku_code LIKE ? OR k.spec LIKE ? OR p.name_cn LIKE ? OR p.spu_code LIKE ?', qv(req, 'keyword'))
+    .like('(k.sku_code LIKE ? OR k.spec LIKE ? OR p.name_cn LIKE ? OR p.spu_code LIKE ?)', qv(req, 'keyword'))
     .eq('k.spu_id', qv(req, 'spu_id'))
     .eq('k.status', qv(req, 'status'))
     .eq('p.category', qv(req, 'category'), false);
@@ -365,23 +367,26 @@ productRouter.put(
     }
     update('product_sku', id, rowOf(body));
     const after = { ...before, ...body };
+    const beforeUnit = round2(Number(before.purchase_cost ?? 0) + Number(before.first_leg_cost ?? 0));
+    const afterUnit = round2(Number(after.purchase_cost ?? 0) + Number(after.first_leg_cost ?? 0));
     const costChanged =
       touchingCost && (Number(before.purchase_cost) !== Number(after.purchase_cost) || Number(before.first_leg_cost) !== Number(after.first_leg_cost));
+    // 留痕带上合成单件成本 unit_cost：成本时间线要能直接看出改价前后差异
     logIfChanged({
       user_id: user.id,
       module: MODULE,
       action: 'update',
       target_table: 'product_sku',
       target_id: id,
-      before,
-      after: { ...after, unit_cost: round2(Number(after.purchase_cost ?? 0) + Number(after.first_leg_cost ?? 0)) },
-      keys: ['sku_code', 'spec', 'purchase_cost', 'first_leg_cost', 'weight_g', 'package_size', 'status'],
+      before: { ...before, unit_cost: beforeUnit },
+      after: { ...after, unit_cost: afterUnit },
+      keys: ['sku_code', 'spec', 'purchase_cost', 'first_leg_cost', 'unit_cost', 'weight_g', 'package_size', 'status'],
       ip: req.ip,
     });
     ok(res, {
       id,
       cost_changed: costChanged,
-      unit_cost: round2(Number(after.purchase_cost ?? 0) + Number(after.first_leg_cost ?? 0)),
+      unit_cost: afterUnit,
       tip: '成本修改只对之后同步进来的订单生效，历史订单沿用落库时冻结的 cost_snapshot',
     });
   }),
@@ -429,7 +434,9 @@ productRouter.get(
       const b = parsed.before ?? {};
       const a = parsed.after ?? {};
       const hasCost = b.purchase_cost !== undefined || b.first_leg_cost !== undefined || a.purchase_cost !== undefined || a.first_leg_cost !== undefined;
-      if (!hasCost) continue;
+      // 只有成本字段真的变了才算一条改价记录；只改规格/状态的 update 不进时间线
+      const costChanged = b.purchase_cost !== a.purchase_cost || b.first_leg_cost !== a.first_leg_cost;
+      if (!hasCost || !costChanged) continue;
       const beforeUnit = round2(Number(b.purchase_cost ?? 0) + Number(b.first_leg_cost ?? 0));
       const afterUnit = round2(Number(a.purchase_cost ?? 0) + Number(a.first_leg_cost ?? 0));
       timeline.push({
@@ -470,7 +477,7 @@ const LISTING_SELECT = `l.*, s.shop_name, s.currency, s.region, k.sku_code, k.sp
 
 function listingQ(req: Parameters<typeof current>[0]): Q {
   return withScope(new Q('l.is_deleted = 0'), shopScope(current(req), 'l.shop_id'))
-    .like('l.product_name LIKE ? OR l.seller_sku LIKE ? OR l.tk_sku_id LIKE ? OR k.sku_code LIKE ?', qv(req, 'keyword'))
+    .like('(l.product_name LIKE ? OR l.seller_sku LIKE ? OR l.tk_sku_id LIKE ? OR k.sku_code LIKE ?)', qv(req, 'keyword'))
     .eq('l.shop_id', qv(req, 'shop_id'))
     .eq('l.map_status', qv(req, 'map_status'))
     .eq('l.listing_status', qv(req, 'listing_status'))
@@ -511,6 +518,7 @@ productRouter.post(
     }
     const id = insert('shop_listing', {
       ...rowOf(body),
+      sku_id: body.sku_id || null,
       map_status: body.sku_id ? MAP_STATUS.MAPPED : MAP_STATUS.UNMAPPED,
       created_by: user.id,
     });
@@ -610,8 +618,10 @@ productRouter.delete(
 
 /* ==================== 待映射清单 ==================== */
 
-const UNMAPPED_COUNT = `(SELECT COUNT(*) FROM tk_order_item oi WHERE oi.listing_id = l.id AND oi.is_deleted = 0 AND oi.sku_id IS NULL) AS unmatched_item_count`;
-const UNMAPPED_AMOUNT = `(SELECT COALESCE(SUM(oi.item_amount), 0) FROM tk_order_item oi WHERE oi.listing_id = l.id AND oi.is_deleted = 0 AND oi.sku_id IS NULL) AS unmatched_amount`;
+const UNMAPPED_ITEMS_SUB = `(SELECT COUNT(*) FROM tk_order_item oi WHERE oi.listing_id = l.id AND oi.is_deleted = 0 AND oi.sku_id IS NULL)`;
+const UNMAPPED_AMOUNT_SUB = `(SELECT COALESCE(SUM(oi.item_amount), 0) FROM tk_order_item oi WHERE oi.listing_id = l.id AND oi.is_deleted = 0 AND oi.sku_id IS NULL)`;
+const UNMAPPED_COUNT = `${UNMAPPED_ITEMS_SUB} AS unmatched_item_count`;
+const UNMAPPED_AMOUNT = `${UNMAPPED_AMOUNT_SUB} AS unmatched_amount`;
 
 /**
  * 待映射清单 = map_status=2 的 listing + 其未匹配订单行数与影响金额；
@@ -627,7 +637,7 @@ productRouter.get(
       from: `shop_listing l JOIN tk_shop s ON s.id = l.shop_id`,
       select: `l.*, s.shop_name, s.currency, s.region, ${UNMAPPED_COUNT}, ${UNMAPPED_AMOUNT}`,
       q: withScope(new Q(`l.is_deleted = 0 AND l.map_status = ${MAP_STATUS.UNMAPPED}`), scope)
-        .like('l.product_name LIKE ? OR l.seller_sku LIKE ? OR l.tk_sku_id LIKE ?', qv(req, 'keyword'))
+        .like('(l.product_name LIKE ? OR l.seller_sku LIKE ? OR l.tk_sku_id LIKE ?)', qv(req, 'keyword'))
         .eq('l.shop_id', qv(req, 'shop_id')),
       orderBy: 'unmatched_item_count DESC, l.id DESC',
     });
@@ -641,16 +651,16 @@ productRouter.get(
          JOIN tk_order o ON o.id = oi.order_id AND o.is_deleted = 0
          JOIN tk_shop s ON s.id = o.shop_id
          LEFT JOIN shop_listing l ON l.id = oi.listing_id
-        WHERE oi.is_deleted = 0 AND (oi.sku_id IS NULL OR oi.cost_matched = 0)${orderScope.sql}
+        WHERE oi.is_deleted = 0 AND (oi.sku_id IS NULL OR oi.cost_matched = 0) ${orderScope.sql}
         ORDER BY o.order_time DESC LIMIT 50`,
       ...orderScope.params,
     );
     const totals = get<Record<string, number>>(
       `SELECT COUNT(*) AS listing_count,
-              COALESCE(SUM(${UNMAPPED_COUNT}), 0) AS unmatched_items,
-              COALESCE(SUM(${UNMAPPED_AMOUNT}), 0) AS unmatched_amount
+              COALESCE(SUM(${UNMAPPED_ITEMS_SUB}), 0) AS unmatched_items,
+              COALESCE(SUM(${UNMAPPED_AMOUNT_SUB}), 0) AS unmatched_amount
          FROM shop_listing l JOIN tk_shop s ON s.id = l.shop_id
-        WHERE l.is_deleted = 0 AND l.map_status = ${MAP_STATUS.UNMAPPED}${scope.sql}`,
+        WHERE l.is_deleted = 0 AND l.map_status = ${MAP_STATUS.UNMAPPED} ${scope.sql}`,
       ...scope.params,
     );
     ok(res, {
@@ -680,7 +690,7 @@ function autoMatch(req: Parameters<typeof current>[0]): {
   const scope = shopScope(user, 'l.shop_id');
   const pending = all<Record<string, unknown>>(
     `SELECT l.id, l.shop_id, l.seller_sku, l.tk_sku_id FROM shop_listing l
-      WHERE l.is_deleted = 0 AND l.map_status = ${MAP_STATUS.UNMAPPED}${scope.sql}${body.shop_id ? ' AND l.shop_id = ?' : ''}`,
+      WHERE l.is_deleted = 0 AND l.map_status = ${MAP_STATUS.UNMAPPED} ${scope.sql}${body.shop_id ? ' AND l.shop_id = ?' : ''}`,
     ...scope.params,
     ...(body.shop_id ? [body.shop_id] : []),
   );
@@ -711,7 +721,7 @@ function autoMatch(req: Parameters<typeof current>[0]): {
     }
   });
   const remained = scalar<number>(
-    `SELECT COUNT(*) FROM shop_listing l WHERE l.is_deleted = 0 AND l.map_status = ${MAP_STATUS.UNMAPPED}${scope.sql}`,
+    `SELECT COUNT(*) FROM shop_listing l WHERE l.is_deleted = 0 AND l.map_status = ${MAP_STATUS.UNMAPPED} ${scope.sql}`,
     ...scope.params,
   );
   return { matched: detail.length, remained, detail };
@@ -728,7 +738,7 @@ productRouter.get(
         `SELECT l.id AS listing_id, l.shop_id, s.shop_name, l.tk_sku_id, l.seller_sku, l.product_name, k.sku_code AS bound_sku_code
            FROM shop_listing l JOIN tk_shop s ON s.id = l.shop_id
            LEFT JOIN product_sku k ON k.id = l.sku_id
-          WHERE l.is_deleted = 0 AND l.map_status = ${MAP_STATUS.UNMAPPED}${scope.sql}
+          WHERE l.is_deleted = 0 AND l.map_status = ${MAP_STATUS.UNMAPPED} ${scope.sql}
           ORDER BY l.id DESC LIMIT 200`,
         ...scope.params,
       ),
@@ -760,7 +770,8 @@ function parseImportRows<T>(req: { body: unknown }, schema: z.ZodType<T>): { row
   return { rows, failed, total: raw.length };
 }
 
-const importSkuRow = skuBody.extend({ spu_code: z.string().max(64).nullish() });
+/** 导入行允许只给 spu_code（按款号归属 spu），故 spu_id 从必填放宽为选填 */
+const importSkuRow = skuBody.extend({ spu_id: skuBody.shape.spu_id.optional(), spu_code: z.string().max(64).nullish() });
 
 productRouter.post(
   '/import/spu',

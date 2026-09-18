@@ -7,6 +7,7 @@ import {
   POOL_STATUS,
   SAMPLE_STATUS,
   buildCollabNo,
+  collabRoi,
   normalizeHandle,
   num,
   round2,
@@ -30,9 +31,8 @@ import {
   tsOf,
 } from '../services/creator/protect.js';
 import {
-  bdPerformance,
+  ATTRIBUTABLE_ORDER,
   exchangeRate,
-  funnelCounts,
   resolvePeriod,
   roiByCollab,
   roiByCreator,
@@ -235,7 +235,7 @@ creatorRouter.post(
   canWrite,
   wrap((req, res) => {
     const user = current(req);
-    const body = parseBody(creatorBody, req.body);
+    const body = parseBody(creatorBody, req.body ?? {});
     const handle = normalizeHandle(body.handle);
     if (handle.length < 2) throw badRequest('handle 归一化后至少 2 个字符');
     const dup = get<Record<string, unknown>>(`SELECT id, handle, owner_id, pool_status, is_deleted FROM creator WHERE handle = ?`, handle);
@@ -293,7 +293,7 @@ creatorRouter.get(
       to_follow: scalar<number>(
         `SELECT COUNT(DISTINCT o.creator_id) FROM creator_outreach o WHERE o.is_deleted = 0 AND o.next_follow_at IS NOT NULL AND o.next_follow_at <= datetime('now', '+1 day') AND o.result NOT IN (${OUTREACH_RESULT.REJECTED}, ${OUTREACH_RESULT.AGREED})`,
       ),
-      funnel: funnelCounts(period),
+      funnel: funnelRows(period),
     });
   }),
 );
@@ -380,7 +380,7 @@ creatorRouter.post(
   canWrite,
   wrap((req, res) => {
     const user = current(req);
-    const { rows } = parseBody(z.object({ rows: z.array(z.unknown()).min(1, 'rows 不能为空').max(1000, '单次最多 1000 行') }), req.body);
+    const { rows } = parseBody(z.object({ rows: z.array(z.unknown()).min(1, 'rows 不能为空').max(1000, '单次最多 1000 行') }), req.body ?? {});
     const seen = new Set<string>();
     let success = 0;
     let merged = 0;
@@ -582,7 +582,7 @@ creatorRouter.post(
   wrap((req, res) => {
     const user = current(req);
     const param = String(req.params.id ?? '');
-    const body = parseBody(creatorBody.partial().extend({ claim: z.boolean().optional() }), req.body);
+    const body = parseBody(creatorBody.partial().extend({ claim: z.boolean().optional() }), req.body ?? {});
     const candidate = AFFILIATE_POOL[Number(param.replace(/^pf-/, ''))];
     const useCandidate = param.startsWith('pf-') && !!candidate;
     const target = useCandidate
@@ -726,7 +726,7 @@ creatorRouter.post(
   canWrite,
   wrap((req, res) => {
     const user = current(req);
-    const body = parseBody(outreachBody, req.body);
+    const body = parseBody(outreachBody, req.body ?? {});
     const creator = get<Record<string, unknown>>(`SELECT * FROM creator WHERE id = ? AND is_deleted = 0`, body.creator_id);
     if (!creator) throw notFound('达人不存在');
     if (Number(creator.pool_status) === POOL_STATUS.BLACKLIST) throw forbidden('黑名单达人不能新建跟进');
@@ -795,7 +795,7 @@ creatorRouter.put(
     const before = get<Record<string, unknown>>(`SELECT * FROM creator_outreach WHERE id = ? AND is_deleted = 0`, id);
     if (!before) throw notFound('跟进记录不存在');
     if (Number(before.user_id) !== user.id && !isManager(user)) throw forbidden('只能修改本人的跟进记录（主管可改本组）');
-    const body = parseBody(outreachBody.partial().omit({ creator_id: true }), req.body);
+    const body = parseBody(outreachBody.partial().omit({ creator_id: true }), req.body ?? {});
     update('creator_outreach', id, cols(body));
     logIfChanged({
       user_id: user.id,
@@ -937,7 +937,7 @@ creatorRouter.post(
   canWrite,
   wrap((req, res) => {
     const user = current(req);
-    const body = parseBody(collabBody, req.body);
+    const body = parseBody(collabBody, req.body ?? {});
     const creator = get<Record<string, unknown>>(`SELECT * FROM creator WHERE id = ? AND is_deleted = 0`, body.creator_id);
     if (!creator) throw notFound('达人不存在');
     const pool = Number(creator.pool_status);
@@ -1026,7 +1026,7 @@ creatorRouter.put(
     const user = current(req);
     const id = Number(req.params.id);
     const before = loadCollab(id, user);
-    const body = parseBody(collabBody.partial().omit({ creator_id: true, shop_id: true }), req.body);
+    const body = parseBody(collabBody.partial().omit({ creator_id: true, shop_id: true }), req.body ?? {});
     if (body.owner_id !== undefined && Number(body.owner_id) !== Number(before.owner_id) && !isManager(user)) {
       throw forbidden('只有主管 / 老板可以变更合作单负责 BD');
     }
@@ -1068,7 +1068,7 @@ creatorRouter.post(
     const user = current(req);
     const id = Number(req.params.id);
     const row = loadCollab(id, user);
-    const body = parseBody(z.object({ status: z.number().int().min(1).max(8), remark: z.string().max(200).nullish() }), req.body);
+    const body = parseBody(z.object({ status: z.number().int().min(1).max(8), remark: z.string().max(200).nullish() }), req.body ?? {});
     const from = Number(row.status);
     const to = body.status;
     if (from === to) throw badRequest(`合作单已处于该状态（${to}）`);
@@ -1248,19 +1248,25 @@ creatorRouter.post(
   canWrite,
   wrap((req, res) => {
     const user = current(req);
-    const body = parseBody(sampleBody, req.body);
+    const body = parseBody(sampleBody, req.body ?? {});
     const creator = get<Record<string, unknown>>(`SELECT id, handle, pool_status, owner_id FROM creator WHERE id = ? AND is_deleted = 0`, body.creator_id);
     if (!creator) throw notFound('达人不存在');
-    if (Number(creator.pool_status) === POOL_STATUS.PUBLIC) throw forbidden(`达人 @${String(creator.handle)} 在公海，请先认领再寄样`);
-    if (Number(creator.pool_status) === POOL_STATUS.BLACKLIST) throw forbidden('黑名单达人不能寄样');
-    if (!inManageScope(user, creator)) throw forbidden('该达人不在你或你本组的私海');
+    /**
+     * 先做入参一致性校验（400 / 404），再看达人业务状态（403）：
+     * 请求本身不合法（平台样品单缺单号、合作单与达人不是同一人）属于参数错误，
+     * 不能被「公海 / 黑名单」的业务拒绝盖掉（方案 3.5 寄样表单校验）。
+     */
     if (body.ship_method === 1 && !body.tk_order_id) throw badRequest('平台免费样品必须填 tk_order_id');
     let collabId: number | null = body.collab_id ?? null;
     if (collabId) {
       const collab = get<Record<string, unknown>>(`SELECT id, creator_id, is_deleted FROM collaboration WHERE id = ?`, collabId);
       if (!collab || Number(collab.is_deleted) === 1) throw notFound('合作单不存在');
       if (Number(collab.creator_id) !== body.creator_id) throw badRequest('合作单与达人不是同一人');
-    } else {
+    }
+    if (Number(creator.pool_status) === POOL_STATUS.PUBLIC) throw forbidden(`达人 @${String(creator.handle)} 在公海，请先认领再寄样`);
+    if (Number(creator.pool_status) === POOL_STATUS.BLACKLIST) throw forbidden('黑名单达人不能寄样');
+    if (!inManageScope(user, creator)) throw forbidden('该达人不在你或你本组的私海');
+    if (!collabId) {
       collabId = get<{ id: number }>(
         `SELECT id FROM collaboration WHERE creator_id = ? AND is_deleted = 0 ORDER BY id DESC LIMIT 1`,
         body.creator_id,
@@ -1337,7 +1343,7 @@ creatorRouter.post(
   canWrite,
   wrap((req, res) => {
     const user = current(req);
-    const body = parseBody(z.object({ tk_order_id: z.string().min(1).max(64), creator_id: z.number().int().positive().nullish() }), req.body);
+    const body = parseBody(z.object({ tk_order_id: z.string().min(1).max(64), creator_id: z.number().int().positive().nullish() }), req.body ?? {});
     const order = get<Record<string, unknown>>(`SELECT * FROM tk_order WHERE tk_order_id = ? AND is_deleted = 0`, body.tk_order_id);
     if (!order) throw notFound('订单不存在');
     if (Number(order.is_sample_order) !== 1) throw badRequest(`订单 ${body.tk_order_id} 不是达人免费样品单（is_sample_order=0）`);
@@ -1401,7 +1407,7 @@ creatorRouter.put(
     const before = get<Record<string, unknown>>(`SELECT * FROM sample_shipment WHERE id = ? AND is_deleted = 0`, id);
     if (!before) throw notFound('寄样单不存在');
     if (!user.can_see_cost && (req.body?.sample_cost !== undefined || req.body?.shipping_cost !== undefined)) throw forbidden('没有成本查看权限，不能修改寄样成本');
-    const body = parseBody(sampleBody.partial().omit({ creator_id: true }), req.body);
+    const body = parseBody(sampleBody.partial().omit({ creator_id: true }), req.body ?? {});
     if (body.sku_id) {
       const sku = get<{ purchase_cost: number; first_leg_cost: number }>(`SELECT purchase_cost, first_leg_cost FROM product_sku WHERE id = ? AND is_deleted = 0`, body.sku_id);
       if (!sku) throw notFound('SKU 不存在');
@@ -1433,7 +1439,7 @@ creatorRouter.post(
     const row = get<Record<string, unknown>>(`SELECT * FROM sample_shipment WHERE id = ? AND is_deleted = 0`, id);
     if (!row) throw notFound('寄样单不存在');
     if (Number(row.status) >= SAMPLE_STATUS.SIGNED) throw badRequest(`已签收的寄样单不能再置为在途（当前状态 ${Number(row.status)}）`);
-    const body = parseBody(z.object({ tracking_no: z.string().min(1).max(64), ship_time: z.string().max(20).nullish(), carrier: z.string().max(64).nullish() }), req.body);
+    const body = parseBody(z.object({ tracking_no: z.string().min(1).max(64), ship_time: z.string().max(20).nullish(), carrier: z.string().max(64).nullish() }), req.body ?? {});
     const ship_time = body.ship_time || nowStr();
     update('sample_shipment', id, cols({ tracking_no: body.tracking_no, ship_time, status: SAMPLE_STATUS.IN_TRANSIT }));
     advanceCollab(row.collab_id, COLLAB_STATUS.IN_TRANSIT, user);
@@ -1462,7 +1468,7 @@ creatorRouter.post(
     if (!row) throw notFound('寄样单不存在');
     if (Number(row.status) === SAMPLE_STATUS.LOST) throw badRequest('丢件寄样单不能登记签收');
     if (Number(row.status) >= SAMPLE_STATUS.CONTENT_DONE) throw badRequest(`该寄样单已出内容，无需再登记签收`);
-    const body = parseBody(z.object({ sign_time: z.string().max(20).nullish() }), req.body);
+    const body = parseBody(z.object({ sign_time: z.string().max(20).nullish() }), req.body ?? {});
     const sign_time = body.sign_time || nowStr();
     update('sample_shipment', id, cols({ sign_time, status: SAMPLE_STATUS.SIGNED }));
     advanceCollab(row.collab_id, COLLAB_STATUS.TO_PUBLISH, user);
@@ -1490,7 +1496,7 @@ creatorRouter.post(
     const row = get<Record<string, unknown>>(`SELECT * FROM sample_shipment WHERE id = ? AND is_deleted = 0`, id);
     if (!row) throw notFound('寄样单不存在');
     if (Number(row.status) >= SAMPLE_STATUS.CONTENT_DONE) throw badRequest('已出内容的寄样单不能标记丢件');
-    const body = parseBody(z.object({ remark: z.string().max(200).nullish() }), req.body);
+    const body = parseBody(z.object({ remark: z.string().max(200).nullish() }), req.body ?? {});
     update('sample_shipment', id, cols({ status: SAMPLE_STATUS.LOST }));
     writeOpLog({
       user_id: user.id,
@@ -1508,6 +1514,142 @@ creatorRouter.post(
 
 /* ---------------- 达人 ROI 排行 / BD 绩效 ---------------- */
 
+/**
+ * services/creator/roi.ts 的 periodWhere(col, p, 'AND') 会生成 `AND AND …`（有期间）
+ * 或悬空 `AND`（period=all），bdPerformance / funnelCounts 因此必然抛 SQL 语法错误。
+ * 该服务文件不在本模块可改范围，故 BD 绩效与漏斗在路由层自行聚合（口径与之一致），
+ * 金额侧继续复用可正常工作的 roiByCreator。
+ */
+const periodFilter = (col: string, p: PeriodRange): string => {
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(p.from) ? p.from : PERIOD_MIN;
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(p.to) ? p.to : PERIOD_MAX;
+  return ` AND substr(${col}, 1, 10) BETWEEN '${from}' AND '${to}'`;
+};
+
+const mapBy = <T extends object>(rows: T[], key: (r: T) => number): Map<number, T> =>
+  new Map(rows.map((r) => [key(r), r]));
+
+/** 按 BD（sys_user）聚合：建联 / 回复 / 有意向 / 谈妥 / 合作单 / 私海 / 首响 / 净 GMV / 成本 / 投产比 */
+function bdRows(user: CurrentUser, period: PeriodRange, group: boolean): Record<string, unknown>[] {
+  const scope = group ? personScope(user, 'u.id', true) : { sql: 'AND u.id = ?', params: [user.id] as SqlParam[] };
+  const od = periodFilter('o.contact_time', period);
+  const ld = periodFilter('l.created_at', period);
+  const users = all<{ user_id: number; real_name: string; dept: string | null }>(
+    `SELECT u.id AS user_id, u.real_name, u.dept
+       FROM sys_user u
+      WHERE u.is_deleted = 0 AND u.status = 1
+        AND (u.id IN (SELECT user_id FROM creator_outreach WHERE is_deleted = 0)
+          OR u.id IN (SELECT owner_id FROM collaboration WHERE is_deleted = 0)
+          OR u.id IN (SELECT owner_id FROM creator WHERE is_deleted = 0))
+        ${scope.sql}`,
+    ...scope.params,
+  );
+  const flows = mapBy(
+    all<{ user_id: number; outreach_cnt: number; replied_cnt: number; interested_cnt: number; agreed_cnt: number }>(
+      `SELECT o.user_id AS user_id, COUNT(*) AS outreach_cnt,
+              SUM(CASE WHEN o.result >= ${OUTREACH_RESULT.REPLIED} THEN 1 ELSE 0 END) AS replied_cnt,
+              SUM(CASE WHEN o.result >= ${OUTREACH_RESULT.INTERESTED} THEN 1 ELSE 0 END) AS interested_cnt,
+              SUM(CASE WHEN o.result = ${OUTREACH_RESULT.AGREED} THEN 1 ELSE 0 END) AS agreed_cnt
+         FROM creator_outreach o WHERE o.is_deleted = 0${od} GROUP BY o.user_id`,
+    ),
+    (r) => Number(r.user_id),
+  );
+  const collabs = mapBy(
+    all<{ user_id: number; collab_cnt: number; creator_cnt: number }>(
+      `SELECT l.owner_id AS user_id, COUNT(*) AS collab_cnt, COUNT(DISTINCT l.creator_id) AS creator_cnt
+         FROM collaboration l WHERE l.is_deleted = 0 AND l.owner_id IS NOT NULL${ld} GROUP BY l.owner_id`,
+    ),
+    (r) => Number(r.user_id),
+  );
+  const privates = mapBy(
+    all<{ user_id: number; private_creators: number }>(
+      `SELECT c.owner_id AS user_id, COUNT(*) AS private_creators FROM creator c
+        WHERE c.is_deleted = 0 AND c.pool_status IN (${POOL_STATUS.PRIVATE}, ${POOL_STATUS.COOPERATING})
+          AND c.owner_id IS NOT NULL GROUP BY c.owner_id`,
+    ),
+    (r) => Number(r.user_id),
+  );
+  const firstResponse = mapBy(
+    all<{ user_id: number; avg_first_response_hours: number | null }>(
+      `SELECT f.user_id AS user_id, ROUND(AVG((julianday(r.first_reply) - julianday(f.first_contact)) * 24), 2) AS avg_first_response_hours
+         FROM (SELECT creator_id, user_id, MIN(contact_time) AS first_contact FROM creator_outreach WHERE is_deleted = 0 GROUP BY creator_id, user_id) f
+         JOIN (SELECT creator_id, user_id, MIN(contact_time) AS first_reply FROM creator_outreach
+                WHERE is_deleted = 0 AND result >= ${OUTREACH_RESULT.REPLIED} GROUP BY creator_id, user_id) r
+           ON r.creator_id = f.creator_id AND r.user_id = f.user_id
+        GROUP BY f.user_id`,
+    ),
+    (r) => Number(r.user_id),
+  );
+  /** 金额按达人归属汇总（roiByCreator 口径：净 GMV / 样品 + 运费 + 坑位 + 佣金） */
+  const money = new Map<number, { net: number; cost: number }>();
+  for (const r of roiByCreator({ period, limit: 500 })) {
+    if (r.owner_id === null) continue;
+    const cur = money.get(r.owner_id) ?? { net: 0, cost: 0 };
+    cur.net = round2(cur.net + r.net_gmv_cny);
+    cur.cost = round2(cur.cost + r.cost);
+    money.set(r.owner_id, cur);
+  }
+  const rows = users.map((u) => {
+    const f = flows.get(u.user_id);
+    const c = collabs.get(u.user_id);
+    const p = privates.get(u.user_id);
+    const fr = firstResponse.get(u.user_id);
+    const m = money.get(u.user_id) ?? { net: 0, cost: 0 };
+    const outreach = num(f?.outreach_cnt);
+    const replied = num(f?.replied_cnt);
+    return {
+      user_id: u.user_id,
+      real_name: u.real_name,
+      dept: u.dept ?? null,
+      outreach_cnt: outreach,
+      replied_cnt: replied,
+      interested_cnt: num(f?.interested_cnt),
+      agreed_cnt: num(f?.agreed_cnt),
+      reply_rate: outreach > 0 ? round2((replied / outreach) * 100) : 0,
+      collab_cnt: num(c?.collab_cnt),
+      creator_cnt: num(c?.creator_cnt),
+      private_creators: num(p?.private_creators),
+      avg_first_response_hours: fr?.avg_first_response_hours == null ? null : num(fr.avg_first_response_hours),
+      net_gmv_cny: m.net,
+      cost_cny: m.cost,
+      roi: collabRoi({ net_gmv_cny: m.net, sample_cost: 0, sample_shipping: 0, fixed_fee_cny: m.cost, commission_cny: 0 }),
+    };
+  });
+  rows.sort((a, b) => num(b.net_gmv_cny) - num(a.net_gmv_cny) || num(b.outreach_cnt) - num(a.outreach_cnt) || num(a.user_id) - num(b.user_id));
+  return rows;
+}
+
+/** 达人漏斗：建联 → 回复 → 有意向 → 谈妥 → 合作 / 寄样 / 出内容 / 出单 */
+function funnelRows(period: PeriodRange): Record<string, number> {
+  const od = periodFilter('o.contact_time', period);
+  const row = get<Record<string, number | null>>(
+    `SELECT
+       (SELECT COUNT(*) FROM creator_outreach o WHERE o.is_deleted = 0${od}) AS outreach,
+       (SELECT COUNT(*) FROM creator_outreach o WHERE o.is_deleted = 0 AND o.result >= ${OUTREACH_RESULT.REPLIED}${od}) AS replied,
+       (SELECT COUNT(*) FROM creator_outreach o WHERE o.is_deleted = 0 AND o.result >= ${OUTREACH_RESULT.INTERESTED}${od}) AS interested,
+       (SELECT COUNT(*) FROM creator_outreach o WHERE o.is_deleted = 0 AND o.result = ${OUTREACH_RESULT.AGREED}${od}) AS agreed,
+       (SELECT COUNT(DISTINCT o.creator_id) FROM creator_outreach o WHERE o.is_deleted = 0${od}) AS creators_contacted,
+       (SELECT COUNT(*) FROM collaboration l WHERE l.is_deleted = 0${periodFilter('l.created_at', period)}) AS collabs,
+       (SELECT COUNT(*) FROM sample_shipment s WHERE s.is_deleted = 0${periodFilter('s.created_at', period)}) AS samples,
+       (SELECT COUNT(*) FROM video v WHERE v.is_deleted = 0${periodFilter('v.publish_time', period)}) AS contents,
+       (SELECT COUNT(DISTINCT o.id) FROM tk_order_item i JOIN tk_order o ON o.id = i.order_id
+         WHERE i.is_deleted = 0 AND i.creator_id IS NOT NULL AND ${ATTRIBUTABLE_ORDER}${periodFilter('o.order_time', period)}) AS orders`,
+  ) ?? {};
+  const net_gmv_cny = round2(roiByCreator({ period, limit: 500 }).reduce((acc, r) => acc + r.net_gmv_cny, 0));
+  return {
+    outreach: num(row.outreach),
+    replied: num(row.replied),
+    interested: num(row.interested),
+    agreed: num(row.agreed),
+    creators_contacted: num(row.creators_contacted),
+    collabs: num(row.collabs),
+    samples: num(row.samples),
+    contents: num(row.contents),
+    orders: num(row.orders),
+    net_gmv_cny,
+  };
+}
+
 /** 按达人聚合（group=true 时按 BD 聚合到人，即 BD 绩效榜） */
 creatorRouter.get(
   '/roi/rank',
@@ -1518,9 +1660,13 @@ creatorRouter.get(
     const group = qv(req, 'group') === 'true' || qv(req, 'group') === '1';
     const limit = Math.min(200, intOf(qv(req, 'limit')) ?? 50);
     if (group) {
-      const sc = personScope(user, 'u.id', true);
-      const rows = bdPerformance({ period, scopeSql: sc.sql, scopeParams: sc.params });
-      ok(res, { dimension: 'bd', period, list: user.can_see_cost ? rows : rows.map((r) => maskFields(r as unknown as Record<string, unknown>, ['net_gmv_cny', 'cost_cny', 'roi'], false)) });
+      const rows = bdRows(user, period, true);
+      ok(res, {
+        dimension: 'bd',
+        period,
+        total: rows.length,
+        list: user.can_see_cost ? rows : rows.map((r) => maskFields(r, ['gmv_cny', 'net_gmv_cny', 'cost_cny', 'cost', 'roi'], false)),
+      });
       return;
     }
     const vis = creatorScope(user, 'c');
@@ -1544,40 +1690,8 @@ creatorRouter.get(
     const user = current(req);
     const group = qv(req, 'group') === 'true' || qv(req, 'group') === '1';
     const period = safePeriod(resolvePeriod(qv(req, 'period')));
-    const sc = group ? personScope(user, 'u.id', true) : { sql: `AND u.id = ?`, params: [user.id] };
-    const base = bdPerformance({ period, scopeSql: sc.sql, scopeParams: sc.params });
-    const byUser = new Map<number, Record<string, unknown>>();
-    for (const r of base) byUser.set(r.user_id, { ...r });
-
-    const interested = all<{ user_id: number; interested_cnt: number }>(
-      `SELECT o.user_id AS user_id, SUM(CASE WHEN o.result = ${OUTREACH_RESULT.INTERESTED} THEN 1 ELSE 0 END) AS interested_cnt
-         FROM creator_outreach o WHERE o.is_deleted = 0 GROUP BY o.user_id`,
-    );
-    const privates = all<{ owner_id: number; private_creators: number }>(
-      `SELECT c.owner_id AS owner_id, COUNT(*) AS private_creators FROM creator c
-        WHERE c.is_deleted = 0 AND c.pool_status IN (${POOL_STATUS.PRIVATE}, ${POOL_STATUS.COOPERATING}) AND c.owner_id IS NOT NULL
-        GROUP BY c.owner_id`,
-    );
-    const firstResponse = all<{ user_id: number; avg_first_response_hours: number | null }>(
-      `SELECT f.user_id AS user_id, ROUND(AVG((julianday(r.first_reply) - julianday(f.first_contact)) * 24), 2) AS avg_first_response_hours
-         FROM (SELECT creator_id, user_id, MIN(contact_time) AS first_contact FROM creator_outreach WHERE is_deleted = 0 GROUP BY creator_id, user_id) f
-         JOIN (SELECT creator_id, user_id, MIN(contact_time) AS first_reply FROM creator_outreach
-                WHERE is_deleted = 0 AND result >= ${OUTREACH_RESULT.REPLIED} GROUP BY creator_id, user_id) r
-           ON r.creator_id = f.creator_id AND r.user_id = f.user_id
-        GROUP BY f.user_id`,
-    );
-    for (const r of interested) { const t = byUser.get(Number(r.user_id)); if (t) t.interested_cnt = Number(r.interested_cnt); }
-    for (const r of privates) { const t = byUser.get(Number(r.owner_id)); if (t) t.private_creators = Number(r.private_creators); }
-    for (const r of firstResponse) { const t = byUser.get(Number(r.user_id)); if (t) t.avg_first_response_hours = num(r.avg_first_response_hours); }
-
-    const list: Record<string, unknown>[] = [...byUser.values()].map((r) => ({
-      interested_cnt: 0,
-      private_creators: 0,
-      avg_first_response_hours: null,
-      ...r,
-      ...(user.can_see_cost ? {} : maskFields(r, ['net_gmv_cny', 'cost_cny', 'roi'], false)),
-    }));
-    list.sort((a, b) => Number(b.outreach_cnt ?? 0) - Number(a.outreach_cnt ?? 0));
+    const list = bdRows(user, period, group).map((r) => (user.can_see_cost ? r : maskFields(r, ['gmv_cny', 'net_gmv_cny', 'cost_cny', 'cost', 'roi'], false)));
+    list.sort((a, b) => num(b.outreach_cnt) - num(a.outreach_cnt) || num(b.net_gmv_cny) - num(a.net_gmv_cny));
     ok(res, { period, dimension: group ? (user.data_scope === DATA_SCOPE.ALL ? 'all' : 'dept') : 'self', total: list.length, list });
   }),
 );
@@ -1622,7 +1736,7 @@ creatorRouter.put(
     const before = get<Record<string, unknown>>(`SELECT * FROM creator WHERE id = ? AND is_deleted = 0`, id);
     if (!before) throw notFound('达人不存在');
     if (!inManageScope(user, before)) throw forbidden('该达人在他人私海，不能修改');
-    const body = parseBody(creatorPatch, req.body);
+    const body = parseBody(creatorPatch, req.body ?? {});
     const patch: Record<string, unknown> = { ...body };
     if (body.category_tags !== undefined) patch.category_tags = tagsText(body.category_tags);
     if (body.email !== undefined) patch.email = body.email || null;
@@ -1771,7 +1885,7 @@ creatorRouter.post(
     const creator = get<Record<string, unknown>>(`SELECT * FROM creator WHERE id = ? AND is_deleted = 0`, id);
     if (!creator) throw notFound('达人不存在');
     if (!inManageScope(user, creator)) throw forbidden('该达人在他人私海，不能变更黑名单状态');
-    const body = parseBody(z.object({ action: z.enum(['add', 'remove']).default('add'), reason: z.string().max(200).nullish() }), req.body);
+    const body = parseBody(z.object({ action: z.enum(['add', 'remove']).default('add'), reason: z.string().max(200).nullish() }), req.body ?? {});
     const before = { pool_status: creator.pool_status, protect_until: creator.protect_until };
     const ownerId = creator.owner_id === null || creator.owner_id === undefined ? null : Number(creator.owner_id);
     const after = body.action === 'add'

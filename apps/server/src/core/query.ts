@@ -48,7 +48,8 @@ export class Q {
     if (value === undefined || value === null || value === '') return this;
     const slots = Math.max(1, condTemplate.split('?').length - 1);
     const filled: SqlParam[] = Array.from({ length: slots }, () => `%${String(value)}%`);
-    return this.and(condTemplate, ...filled);
+    // 多占位模板通常含 OR：必须整体加括号，否则 SQL 优先级会吞掉其前的数据范围条件
+    return this.and(slots > 1 && !condTemplate.trimStart().startsWith('(') ? `(${condTemplate})` : condTemplate, ...filled);
   }
 
   eq(column: string, value: unknown, asNumber = true): this {

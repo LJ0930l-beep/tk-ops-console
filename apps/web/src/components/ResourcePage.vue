@@ -6,7 +6,7 @@
           <el-form-item :label="f.label">
             <el-input v-if="!f.type || f.type === 'text'" v-model="query[f.key]" clearable :placeholder="f.placeholder" style="width: 170px" @keyup.enter="reload(1)" />
             <el-select v-else-if="f.type === 'select'" v-model="query[f.key]" clearable placeholder="全部" style="width: 150px">
-              <el-option v-for="o in f.options ?? []" :key="String(o.value)" :label="o.label" :value="o.value" />
+              <el-option v-for="o in resolveOptions(f)" :key="String(o.value)" :label="o.label" :value="o.value" />
             </el-select>
             <el-date-picker v-else-if="f.type === 'date'" v-model="query[f.key]" type="date" value-format="YYYY-MM-DD" style="width: 150px" clearable />
             <el-date-picker
@@ -18,7 +18,7 @@
               end-placeholder="结束"
               style="width: 240px"
               clearable
-              @change="(v: [string, string] | null) => { query[`${f.key}_from`] = v?.[0]; query[`${f.key}_to`] = v?.[1]; reload(1); }"
+              @change="(v: [string, string] | null) => { const fk = f.fromKey ?? `${f.key}_from`; const tk = f.toKey ?? `${f.key}_to`; if (v) { query[fk] = v[0]; query[tk] = v[1]; } else { delete query[fk]; delete query[tk]; } reload(1); }"
             />
           </el-form-item>
         </template>
@@ -57,10 +57,12 @@
             :min-width="c.minWidth ?? defaultWidth(c.type)"
             :sortable="c.sortable ? 'custom' : false"
             :fixed="c.fixed"
+            :align="c.align ?? (c.type === 'money' || c.type === 'percent' ? 'right' : undefined)"
             show-overflow-tooltip
           >
             <template #default="{ row }">
-              <template v-if="c.type === 'money'"><span :class="{ 'money-cny': c.prop.includes('cny') || c.prop.includes('cost') }">{{ fmtMoney(cell(row, c)) }}</span></template>
+              <el-image v-if="c.type === 'image'" :src="String(cell(row, c) ?? '')" style="width: 36px; height: 36px; border-radius: 4px" fit="cover" preview-teleported :preview-src-list="cell(row, c) ? [String(cell(row, c))] : []" />
+              <template v-else-if="c.type === 'money'"><span :class="{ 'money-cny': c.prop.includes('cny') || c.prop.includes('cost') }">{{ fmtMoney(cell(row, c)) }}</span></template>
               <el-tag v-else-if="c.type === 'tag'" :type="tagType(cell(row, c), c.options)" size="small">{{ optionLabel(cell(row, c), c.options) }}</el-tag>
               <span v-else-if="c.type === 'datetime'">{{ fmtDateTime(cell(row, c)) }}</span>
               <span v-else-if="c.type === 'percent'">{{ cell(row, c) == null ? '-' : `${Number(cell(row, c)).toFixed(1)}%` }}</span>
@@ -129,7 +131,8 @@ export interface ColumnDef {
   label: string;
   width?: number | string;
   minWidth?: number | string;
-  type?: 'text' | 'money' | 'tag' | 'datetime' | 'date' | 'percent' | 'link';
+  type?: 'text' | 'money' | 'tag' | 'datetime' | 'date' | 'percent' | 'link' | 'image';
+  align?: 'left' | 'center' | 'right';
   options?: OptionDef[];
   dictType?: string;
   sortable?: boolean;
@@ -151,6 +154,8 @@ export interface SearchDef {
   options?: OptionDef[];
   dictType?: string;
   placeholder?: string;
+  fromKey?: string;
+  toKey?: string;
 }
 
 export interface FormFieldDef {

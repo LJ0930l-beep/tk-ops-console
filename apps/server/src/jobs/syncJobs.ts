@@ -128,10 +128,10 @@ export function normalizeListingStatus(v: string | number | undefined | null): n
   return 3;
 }
 
-/** 1 仅退款 2 退货退款 */
+/** 1 仅退款 2 退货退款（接口给英文枚举，卖家中心表格给中文，两边都要认） */
 export const normalizeReturnType = (v: string | number | undefined | null): number => {
   const s = String(v ?? '').toUpperCase();
-  if (s.includes('RETURN_AND_REFUND') || s.includes('REFUND_AND_RETURN') || s === '2') return 2;
+  if (s.includes('RETURN') || s.includes('退货') || s === '2') return 2;
   return 1;
 };
 

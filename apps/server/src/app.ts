@@ -14,6 +14,7 @@ import { financeRouter } from './modules/finance.routes.js';
 import { dashboardRouter } from './modules/dashboard.routes.js';
 import { stockRouter } from './modules/stock.routes.js';
 import { syncRouter } from './modules/sync.routes.js';
+import { importRouter } from './modules/import.routes.js';
 import { actionsRouter } from './modules/actions.routes.js';
 
 export function createApp(): Express {
@@ -28,6 +29,8 @@ export function createApp(): Express {
   const api = express.Router();
   api.use(authenticate);
   api.use('/system', systemRouter);
+  // 路径统一挂 /api/system/*；权限不按 system 菜单，而是逐表按目标菜单把关（见 import.routes.ts 注册表）
+  api.use('/system', importRouter);
   api.use('/shops', shopRouter);
   api.use('/accounts', accountRouter);
   api.use('/products', productRouter);

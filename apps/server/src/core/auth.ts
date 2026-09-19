@@ -119,12 +119,15 @@ export function optionalAuth(req: Request, _res: Response, next: NextFunction): 
 
 /* ---------- 菜单 / 按钮权限 ---------- */
 
+export const hasMenu = (user: CurrentUser, menu: MenuKey): boolean =>
+  user.menu_perms.includes(menu) || user.role_key === 'boss';
+
 export const requireMenu =
   (menu: MenuKey) =>
   (req: Request, _res: Response, next: NextFunction): void => {
     const user = (req as AuthedRequest).user;
     if (!user) return next(unauthorized());
-    if (!user.menu_perms.includes(menu) && user.role_key !== 'boss') return next(forbidden(`无权访问「${menu}」模块`));
+    if (!hasMenu(user, menu)) return next(forbidden(`无权访问「${menu}」模块`));
     next();
   };
 

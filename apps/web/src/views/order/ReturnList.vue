@@ -23,6 +23,9 @@
       :action-width="90"
       dialog-width="520px"
     >
+      <template #toolbar="{ reload }">
+        <ImportDialog table="tk_return" button-text="导入售后单" @done="() => reload()" />
+      </template>
       <template #actions="{ row }">
         <el-button link type="primary" size="small" @click="openFill(row)">补填责任</el-button>
       </template>
@@ -34,6 +37,7 @@
 import { computed, onMounted, ref } from 'vue';
 import { RESPONSIBILITY } from '@tk/shared';
 import ResourcePage from '@/components/ResourcePage.vue';
+import ImportDialog from '@/components/ImportDialog.vue';
 import type { ColumnDef, FormFieldDef, OptionDef, SearchDef } from '@/components/ResourcePage.vue';
 import { useDictStore } from '@/stores/dict';
 

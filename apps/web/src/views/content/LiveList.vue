@@ -32,6 +32,7 @@
         <el-form-item>
           <el-button type="primary" :icon="Search" @click="reload(1)">查询</el-button>
           <el-button :icon="RefreshLeft" @click="resetQuery">重置</el-button>
+          <ImportDialog table="live_session" button-text="导入直播数据" @done="() => reload()" />
         </el-form-item>
       </el-form>
       <el-alert
@@ -209,6 +210,7 @@ import * as echarts from 'echarts';
 import type { LiveSession, PageResult } from '@tk/shared';
 import { num, round2 } from '@tk/shared';
 import { apiGet, apiPut, errMsg } from '@/api/client';
+import ImportDialog from '@/components/ImportDialog.vue';
 import { useDictStore } from '@/stores/dict';
 
 type Row = LiveSession & Record<string, unknown>;

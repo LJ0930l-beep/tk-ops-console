@@ -24,11 +24,7 @@
       :action-width="150"
     >
       <template #toolbar-extra>
-        <el-tooltip content="批量导入（Excel）随联盟广场入库能力开放，本期后置">
-          <span>
-            <el-button :icon="Upload" disabled>批量导入</el-button>
-          </span>
-        </el-tooltip>
+        <ImportDialog table="creator" button-text="导入达人（表格/抓取）" @done="rp?.reload()" />
       </template>
       <template #actions="{ row, reload }">
         <el-button link type="primary" size="small" :loading="claiming === Number(row.id)" @click="claim(row, reload)">认领</el-button>
@@ -43,10 +39,10 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
 import { ElMessage } from 'element-plus';
-import { Upload } from '@element-plus/icons-vue';
 import { POOL_STATUS, normalizeHandle } from '@tk/shared';
 import { apiPost, errMsg } from '@/api/client';
 import ResourcePage from '@/components/ResourcePage.vue';
+import ImportDialog from '@/components/ImportDialog.vue';
 import type { ColumnDef, FormFieldDef, OptionDef, SearchDef } from '@/components/ResourcePage.vue';
 import { useDictStore } from '@/stores/dict';
 

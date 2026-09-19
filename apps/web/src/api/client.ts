@@ -28,5 +28,17 @@ export const apiPost = async <T>(url: string, body?: unknown) => payload(await h
 export const apiPut = async <T>(url: string, body?: unknown) => payload(await http.put<T, { data: ApiEnvelope<T> }>(url, body));
 export const apiDelete = async <T>(url: string) => payload(await http.delete<T, { data: ApiEnvelope<T> }>(url));
 
+/** 文件下载（模板 / 导出）：带鉴权头取 blob，文件名优先用服务端 Content-Disposition */
+export async function apiDownload(url: string, params: unknown, fallbackName: string): Promise<void> {
+  const res = await http.get<Blob>(url, { params, responseType: 'blob' });
+  const name = /filename="?([^";]+)"?/.exec(String(res.headers['content-disposition'] ?? ''))?.[1] ?? fallbackName;
+  const href = URL.createObjectURL(res.data);
+  const a = document.createElement('a');
+  a.href = href;
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(href);
+}
+
 export const errMsg = (e: unknown): string =>
   (e as { response?: { data?: { message?: string } } })?.response?.data?.message ?? (e as Error)?.message ?? '请求失败';

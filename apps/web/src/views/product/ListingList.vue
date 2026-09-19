@@ -16,6 +16,7 @@
       <template #toolbar-extra>
         <div class="toolbar">
           <el-button v-if="canWrite" :icon="MagicStick" :loading="matching" @click="openMatch">按 seller_sku 自动匹配</el-button>
+          <ImportDialog v-if="canWrite" table="shop_listing" button-text="导入店铺商品" @done="rp?.reload()" />
           <router-link to="/products/unmapped"><el-button :icon="Warning" plain type="danger" size="small">待映射清单</el-button></router-link>
           <span class="tip">本页待映射 {{ unmappedInPage }} 条；待映射行整行黄底，不参与成本与利润。</span>
         </div>
@@ -84,6 +85,7 @@ import { apiGet, apiPost, apiPut, errMsg, type Paged } from '@/api/client';
 import { useAuthStore } from '@/stores/auth';
 import { useDictStore } from '@/stores/dict';
 import ResourcePage, { type ColumnDef, type FormFieldDef, type OptionDef, type SearchDef } from '@/components/ResourcePage.vue';
+import ImportDialog from '@/components/ImportDialog.vue';
 
 const auth = useAuthStore();
 const dict = useDictStore();

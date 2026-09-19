@@ -10,6 +10,7 @@
   >
     <template #toolbar="{ reload }">
       <el-button :loading="filling" @click="fillMissing(reload)">补最近 7 天缺失</el-button>
+      <ImportDialog table="exchange_rate" button-text="导入汇率" @done="() => reload()" />
     </template>
     <template #toolbar-extra>
       <el-alert
@@ -27,6 +28,7 @@
 import { ref } from 'vue';
 import { ElMessage } from 'element-plus';
 import ResourcePage, { type ColumnDef, type FormFieldDef, type OptionDef, type SearchDef } from '@/components/ResourcePage.vue';
+import ImportDialog from '@/components/ImportDialog.vue';
 import { apiPost, errMsg } from '@/api/client';
 
 /** 站点常用币种（exchange_rate.currency） */

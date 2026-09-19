@@ -11,7 +11,7 @@ import { z } from 'zod';
 import { normalizeHandle, parseVideoId, type CurrentUser } from '@tk/shared';
 import { get, insert, update, type SqlParam } from '../core/db.js';
 import { badRequest, forbidden, ok, parseBody, qv, wrap } from '../core/http.js';
-import { hasMenu, type AuthedRequest } from '../core/auth.js';
+import { hasMenu, canAccessShop, type AuthedRequest } from '../core/auth.js';
 import {
   IMPORT_ROW_LIMIT,
   runImport,
@@ -79,6 +79,16 @@ function creatorIdOf(handle: unknown): number | null {
 /** 只回写表格里给了值的列（mapRow 已丢空单元格），所以重复导入不会把已有数据抹成空 */
 const picked = (row: Record<string, unknown>, cols: string[]): Record<string, SqlParam> =>
   Object.fromEntries(cols.filter((c) => row[c] !== undefined && c !== '__shop').map((c) => [c, row[c] as SqlParam]));
+
+/**
+ * 全局业务键（视频 ID、售后单号）的幂等更新有个越界口子：
+ * 行内店铺填的是自己范围内的店，被更新的那条记录却可能挂在别人名下，
+ * 所以命中已有记录时必须按「那条记录的店铺」再把关一次。
+ */
+function assertRowShop(ctx: ImportCtx, shopId: unknown, what: string): void {
+  const id = Number(shopId ?? 0);
+  if (id && !canAccessShop(ctx.user, id)) throw new Error(`${what} 已归属店铺 ${id}，不在你的数据范围内`);
+}
 
 /** 通用 upsert：findId 命中即更新，否则带 extra 落新行 */
 function upsertFn(
@@ -194,6 +204,7 @@ export const IMPORT_SPECS: ImportSpec[] = [
         ...(row.publish_time !== undefined ? { publish_time: String(row.publish_time) } : {}),
       };
       // 达人/店铺/商品只在缺失时补：抓取侧的空关系不该抹掉系统里已归因好的结果
+      assertRowShop(ctx, exist?.shop_id, `视频 ${vid}`);
       if (creator_id && !exist?.creator_id) data.creator_id = creator_id;
       if (ref && !exist?.shop_id) data.shop_id = ref.shop_id;
       if (spu && !exist?.spu_id) data.spu_id = spu.id;
@@ -315,7 +326,8 @@ export const IMPORT_SPECS: ImportSpec[] = [
       const data = picked(row, cols);
       if (row.return_type !== undefined) data.return_type = normalizeReturnType(String(row.return_type));
       if (row.__order_id !== undefined) data.order_id = Number(row.__order_id);
-      const exist = get<{ id: number }>(`SELECT id FROM tk_return WHERE is_deleted = 0 AND tk_return_id = ?`, rid);
+      const exist = get<{ id: number; shop_id: number }>(`SELECT id, shop_id FROM tk_return WHERE is_deleted = 0 AND tk_return_id = ?`, rid);
+      assertRowShop(ctx, exist?.shop_id, `售后单 ${rid}`);
       if (exist) {
         delete data.tk_return_id;
         if (Object.keys(data).length) update('tk_return', exist.id, data);

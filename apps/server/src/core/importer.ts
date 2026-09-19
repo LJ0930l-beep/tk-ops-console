@@ -25,14 +25,18 @@ const headKey = (s: unknown): string =>
     .toLowerCase()
     .replace(/[\s_\-():：.．%％()／]/g, '');
 
-const numOf = (v: unknown): number => {
-  const n = Number(String(v ?? '').replace(/[,¥$￥\s]/g, ''));
-  return Number.isFinite(n) ? n : 0;
-};
+/** 千分位与货币符号先清掉；解析不出来就报脏行，不能默认 0（0 是合法业务值） */
+const numOf = (v: unknown): number => Number(String(v ?? '').replace(/[,¥$￥\s]/g, ''));
 
 /** 卖家中心/罗面表格里的数字常带千分位与货币符号，先清一遍再进类型 */
-export const zNum = z.union([z.string(), z.number()]).transform((v) => numOf(v));
-export const zInt = z.union([z.string(), z.number()]).transform((v) => Math.round(numOf(v)));
+const NUM_HINT = '无法解析为数字：单元格里可能是 — / - / 「1.2万」这类文本，请填纯数字';
+const numCell = z.union([z.string(), z.number()]).transform((v, ctx) => {
+  const n = numOf(v);
+  if (!Number.isFinite(n)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: NUM_HINT });
+  return n;
+});
+export const zNum = numCell;
+export const zInt = numCell.transform((n) => Math.round(n));
 export const zText = z.union([z.string(), z.number()]).transform((v) => String(v).trim());
 export const zDay = zText.pipe(z.string().regex(/^\d{4}-\d{2}-\d{2}/, '日期需为 YYYY-MM-DD')).transform((v) => v.slice(0, 10));
 export const zYesNo = z.union([z.string(), z.number(), z.boolean()]).transform((v) => {
@@ -144,17 +148,36 @@ const isMissing = (i: ZodIssue): boolean =>
   (i.code === 'invalid_union' && (i.unionErrors ?? []).every((e) => e.issues.length > 0 && e.issues.every(isMissing)));
 
 /** 把 zod 报错翻成运营看得懂的话，别把 "Invalid input" 这类框架术语丢给人工 */
-function issueText(err: unknown): string {
+function issueText(err: unknown, columns: ImportColumn[]): string {
+  const labelOf = (key: string) => columns.find((c) => c.key === key)?.label ?? key;
   const issues = (err as { issues?: ZodIssue[] }).issues ?? [];
   return (
     issues
       .map((i) => {
-        const field = String(i.path.at(-1) ?? '行');
+        const field = labelOf(String(i.path.at(-1) ?? ''));
         if (isMissing(i)) return `${field}：必填，表格里没给这一列`;
-        return `${field}: ${i.message}`;
+        return `${field ? `${field}：` : ''}${i.message}`;
       })
       .join('; ') || '行格式错误'
   );
+}
+
+/** sqlite 的约束报错既难读又暴露表结构，一律翻成「哪儿不行 + 怎么办」 */
+const DB_TEXT = /constraint failed|SQLITE_|no such (table|column)|has no column named/i;
+const DB_HINTS: [RegExp, string][] = [
+  [/UNIQUE constraint failed/i, '系统里已有同键记录（可能躺在回收站里），请恢复原记录或改走更新'],
+  [/FOREIGN KEY constraint failed/i, '关联的主数据不存在，请先补齐对应档案'],
+  [/NOT NULL constraint failed/i, '必填字段没值'],
+  [/CHECK constraint failed/i, '取值不在允许范围内'],
+  [/has no column named|no such column/i, '字段与系统表结构不匹配'],
+];
+
+function rowReason(e: unknown): string {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (!DB_TEXT.test(msg)) return msg;
+  const col = /constraint failed: [\w."]+\.([\w."]+)/i.exec(msg)?.[1]?.replace(/"/g, '');
+  const hint = DB_HINTS.find(([re]) => re.test(msg))?.[1] ?? '数据无法落库';
+  return `${col ? `${col}：` : ''}${hint}`;
 }
 
 /* ==================== 执行 ==================== */
@@ -176,7 +199,7 @@ export function runImport(spec: ImportSpec, rawRows: Record<string, unknown>[], 
       data?: Record<string, unknown>;
       error?: unknown;
     };
-    if (!parsed.success || !parsed.data) return void errors.push({ row, reason: issueText(parsed.error) });
+    if (!parsed.success || !parsed.data) return void errors.push({ row, reason: issueText(parsed.error, spec.columns) });
     const data = parsed.data;
     if (spec.shopOf) {
       const ref = spec.shopOf(data);
@@ -205,7 +228,7 @@ export function runImport(spec: ImportSpec, rawRows: Record<string, unknown>[], 
       if (tx(() => spec.upsert(data, ctx)) === 'inserted') inserted += 1;
       else updated += 1;
     } catch (e) {
-      errors.push({ row, reason: e instanceof Error ? e.message : String(e) });
+      errors.push({ row, reason: rowReason(e) });
     }
   }
 

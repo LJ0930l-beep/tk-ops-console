@@ -1413,7 +1413,7 @@ const TODO_WHERE = {
   sample_overdue: `s.is_deleted = 0 AND s.status IN (3, 5) AND s.sign_time IS NOT NULL
                      AND date(s.sign_time, ?) <= date('now')`,
   auth_expiring: `is_deleted = 0 AND (auth_status IN (2, 3) OR (token_expire_at IS NOT NULL AND date(token_expire_at) <= date('now', '+7 days')))`,
-  sync_failed: `sl.is_deleted = 0 AND sl.id IN (SELECT MAX(id) FROM sync_log WHERE is_deleted = 0 GROUP BY shop_id, task_type) AND sl.status IN (2, 3)`,
+  sync_failed: `sl.is_deleted = 0 AND sl.task_type <> 'import' AND sl.id IN (SELECT MAX(id) FROM sync_log WHERE is_deleted = 0 AND task_type <> 'import' GROUP BY shop_id, task_type) AND sl.status IN (2, 3)`,
   live_today: `lv.is_deleted = 0 AND lv.status = 1 AND substr(lv.plan_start, 1, 10) = date('now')`,
 };
 

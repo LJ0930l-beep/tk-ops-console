@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { all, get } from '../src/core/db.js';
+import { all, get, run } from '../src/core/db.js';
 import { IMPORT_ROW_LIMIT } from '../src/core/importer.js';
 import { ACCOUNTS, auth, boot, dataOf, login } from './helper.js';
 
@@ -121,7 +121,7 @@ describe('导入中心：达人档案（幂等 + 表头兼容 + 逐行独立）'
     expect(first.status).toBe(200);
     const a = dataOf<ImportOut>(first.body);
     expect([a.inserted, a.updated, a.failed, a.status]).toEqual([2, 0, 1, 2]);
-    expect(a.errors).toEqual([{ row: 3, reason: expect.stringContaining('handle：必填') }]);
+    expect(a.errors).toEqual([{ row: 3, reason: expect.stringContaining('达人账号：必填') }]);
     expect(a.errors[0].reason).not.toMatch(/Invalid input|expected/i);
     expect(count('creator')).toBe(before + 2);
 
@@ -170,13 +170,13 @@ describe('导入中心：达人档案（幂等 + 表头兼容 + 逐行独立）'
     expect(payload.after).toMatchObject({ table: 'creator', source: 'web', inserted: 1, failed: 0 });
   });
 
-  it('脏行原因写进 sync_log.error_msg，同步健康页能直接看到第几行错', async () => {
+  it('脏行原因写进 sync_log.error_msg，同步日志页能直接看到第几行错', async () => {
     const res = await post(ACCOUNTS.bd, { table: 'creator', rows: [{ handle: 'import.reason', 粉丝数: '1' }, { 粉丝数: '2' }] });
     const out = dataOf<ImportOut>(res.body);
     const log = get<{ error_msg: string; status: number }>(`SELECT error_msg, status FROM sync_log WHERE id = ?`, out.log_id)!;
     expect(log.status).toBe(2);
     expect(log.error_msg).toContain('第 2 行');
-    expect(log.error_msg).toContain('handle');
+    expect(log.error_msg).toContain('达人账号');
   });
 });
 
@@ -283,7 +283,7 @@ describe('导入中心：在架商品与售后单（自动映射 + 关联校验�
     expect([out.inserted, out.failed]).toEqual([1, 2]);
     const reasons = out.errors.map((e) => e.reason).join('|');
     expect(reasons).toContain('不在系统里');
-    expect(reasons).toContain('tk_return_id');
+    expect(reasons).toContain('售后单号');
     const row001 = get<Record<string, unknown>>(`SELECT * FROM tk_return WHERE tk_return_id = 'RMA-IMPORT-001'`)!;
     expect([Number(row001.order_id), Number(row001.return_type), Number(row001.refund_amount)]).toEqual([orderOne.id, 2, 39.9]);
     expect(count('tk_return')).toBe(before + 1);
@@ -410,5 +410,68 @@ describe('导入中心：权限边界与入参校验', () => {
     expect(src(dataOf<ImportOut>(manual.body).log_id)).toBe('manual');
     const bad = await post(ACCOUNTS.bd, { table: 'creator', source: 'crawler', rows: [{ handle: 'import.source.bad' }] });
     expect(bad.status).toBe(400);
+  });
+});
+
+describe('导入中心：审验补强（跨店铺改写 / 报错文案 / 看板口径）', () => {
+  const todos = async (username: string) =>
+    Number(dataOf<{ sync_failed: number }>((await http.get('/api/dashboard/todos').set(await bearer(username))).body).sync_failed);
+
+  it('视频的业务键是全局 ID：不能借导入改写别人店铺那条视频的播放数', async () => {
+    const vid = '7771000000000009001';
+    const seed = await post(ACCOUNTS.boss, { table: 'video', source: 'web', rows: [{ 视频ID: vid, 播放量: '100', 店铺ID: shopTwo.id }] });
+    expect(dataOf<ImportOut>(seed.body).inserted).toBe(1);
+
+    const hijack = await post(ACCOUNTS.ops, { table: 'video', rows: [{ 视频ID: vid, 播放量: '999999', 店铺ID: shopOne.id }] });
+    const out = dataOf<ImportOut>(hijack.body);
+    expect(out.failed).toBe(1);
+    expect(out.errors[0].reason).toContain('不在你的数据范围内');
+    expect(Number(get<{ views: number }>(`SELECT views FROM video WHERE tk_video_id = ?`, vid)?.views)).toBe(100);
+  });
+
+  it('售后单号是全局键：拿自己店铺也覆盖不了别人店铺同一单的退款金额', async () => {
+    const rid = 'RMA-7771000001';
+    const seed = await post(ACCOUNTS.boss, { table: 'tk_return', rows: [{ 售后单号: rid, 退款金额: '39.9', 店铺ID: shopTwo.id }] });
+    expect(dataOf<ImportOut>(seed.body).inserted).toBe(1);
+
+    const hijack = await post(ACCOUNTS.ops, { table: 'tk_return', rows: [{ 售后单号: rid, 退款金额: '0.01', 店铺ID: shopOne.id }] });
+    const out = dataOf<ImportOut>(hijack.body);
+    expect(out.failed).toBe(1);
+    expect(out.errors[0].reason).toContain('不在你的数据范围内');
+    const still = get<{ refund_amount: number; shop_id: number }>(`SELECT refund_amount, shop_id FROM tk_return WHERE tk_return_id = ?`, rid)!;
+    expect([Number(still.shop_id), Number(still.refund_amount)]).toEqual([Number(shopTwo.id), 39.9]);
+  });
+
+  it('唯一键被回收站里的记录占着时给运营人话，不把 sqlite 原文甩进响应和日志', async () => {
+    const handle = 'import.clash.trash';
+    const first = await post(ACCOUNTS.bd, { table: 'creator', rows: [{ handle }] });
+    expect(dataOf<ImportOut>(first.body).inserted).toBe(1);
+    run(`UPDATE creator SET is_deleted = 1 WHERE handle = ?`, handle);
+
+    const again = await post(ACCOUNTS.bd, { table: 'creator', rows: [{ handle }] });
+    const out = dataOf<ImportOut>(again.body);
+    expect(out.failed).toBe(1);
+    expect(out.errors[0].reason).toContain('回收站');
+    expect(out.errors[0].reason).not.toMatch(/UNIQUE|constraint|no column|SQLITE/i);
+    const logged = String(get<{ error_msg: string }>(`SELECT error_msg FROM sync_log WHERE id = ?`, out.log_id)?.error_msg ?? '');
+    expect(logged).not.toMatch(/constraint failed/i);
+  });
+
+  it('表格里数字列写「—」不能静默变成 0：抓取侧占位符必须被拒而不是脏数据入库', async () => {
+    const out = dataOf<ImportOut>(
+      (await post(ACCOUNTS.boss, { table: 'video', rows: [{ 视频ID: '7771000000000009002', 播放量: '—', 点赞量: '1.2万' }] })).body,
+    );
+    expect(out.inserted).toBe(0);
+    expect(out.errors[0].reason).toContain('数字');
+    expect(Number(get<{ views: number }>(`SELECT views FROM video WHERE tk_video_id = ?`, '7771000000000009002')?.views ?? -1)).toBe(-1);
+  });
+
+  it('人工表格导入的失败不进「数据同步异常」待办，接口同步才算', async () => {
+    const before = await todos(ACCOUNTS.boss);
+    const dirty = await post(ACCOUNTS.boss, { table: 'exchange_rate', rows: [{ 日期: '2026/09/19', 币种: 'THB', 对人民币汇率: 'abc' }] });
+    const out = dataOf<ImportOut>(dirty.body);
+    expect([out.failed, out.status]).toEqual([1, 3]);
+    expect(Number(get<{ c: number }>(`SELECT COUNT(*) c FROM sync_log WHERE task_type = 'import' AND status = 3`)?.c ?? 0)).toBeGreaterThan(0);
+    expect(await todos(ACCOUNTS.boss)).toBe(before);
   });
 });

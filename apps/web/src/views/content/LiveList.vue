@@ -98,8 +98,11 @@
             <el-tag size="small" :type="statusType(row.status)">{{ statusLabel(row.status) }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="90" fixed="right">
+        <el-table-column label="操作" width="168" fixed="right">
           <template #default="{ row }">
+            <el-button link type="primary" size="small" :disabled="Number(row.status) !== 3" @click="openCurve(row)">
+              分钟曲线
+            </el-button>
             <el-button link type="primary" size="small" :disabled="Number(row.status) !== 3" @click="openReview(row)">
               填写复盘
             </el-button>
@@ -183,14 +186,26 @@
         <el-button type="primary" :loading="saving" @click="save">保存复盘</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="curveVisible" title="直播分钟曲线" width="860px" destroy-on-close @closed="disposeCurve">
+      <div v-loading="curveLoading">
+        <div class="curve-sub" v-if="curveRow">
+          {{ curveRow.shop_name }} · {{ dt(curveRow.plan_start) }} ~ {{ dt(curveRow.plan_end) }}
+          <span class="curve-tip">在线人数 / GMV / 付费流量占比（广告叠加层）按分钟还原</span>
+        </div>
+        <div ref="curveEl" class="curve-box" />
+        <el-empty v-if="!curveLoading && !curveRows.length" :image-size="60" description="该场次暂无分钟级数据（需同步或导入 analytics_live_minute）" />
+      </div>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { RefreshLeft, Search } from '@element-plus/icons-vue';
+import * as echarts from 'echarts';
 import type { LiveSession, PageResult } from '@tk/shared';
 import { num, round2 } from '@tk/shared';
 import { apiGet, apiPut, errMsg } from '@/api/client';
@@ -367,6 +382,76 @@ async function save(): Promise<void> {
   }
 }
 
+/* ---- 直播分钟曲线（§3.6 直播复盘：在线/GMV/付费流量叠加层，按分钟还原） ---- */
+interface MinuteRow {
+  minute_ts: string;
+  online_users: number;
+  product_click: number;
+  orders: number;
+  gmv: number;
+  paid_traffic_ratio: number;
+  source: string;
+}
+const curveVisible = ref(false);
+const curveLoading = ref(false);
+const curveRow = ref<Row | null>(null);
+const curveRows = ref<MinuteRow[]>([]);
+const curveEl = ref<HTMLDivElement>();
+let curveChart: echarts.ECharts | null = null;
+
+const hhmm = (ts: string): string => {
+  const d = parseUtc(ts);
+  return d ? `${pad(d.getHours())}:${pad(d.getMinutes())}` : String(ts).slice(11, 16);
+};
+
+function renderCurve(): void {
+  if (!curveEl.value) return;
+  if (!curveChart) curveChart = echarts.init(curveEl.value);
+  const rows = curveRows.value;
+  curveChart.setOption(
+    {
+      tooltip: { trigger: 'axis' },
+      legend: { data: ['在线人数', 'GMV', '付费流量占比'], bottom: 0 },
+      grid: { left: 56, right: 100, top: 24, bottom: 44 },
+      xAxis: { type: 'category', data: rows.map((r) => hhmm(r.minute_ts)) },
+      yAxis: [
+        { type: 'value', name: '在线', position: 'left' },
+        { type: 'value', name: 'GMV', position: 'right', splitLine: { show: false } },
+        { type: 'value', name: '付费%', position: 'right', offset: 54, min: 0, max: 100, axisLabel: { formatter: '{value}%' }, splitLine: { show: false } },
+      ],
+      series: [
+        { name: 'GMV', type: 'bar', yAxisIndex: 1, barMaxWidth: 12, itemStyle: { color: '#91cc75', opacity: 0.7 }, data: rows.map((r) => round2(num(r.gmv))) },
+        { name: '在线人数', type: 'line', yAxisIndex: 0, smooth: true, showSymbol: false, areaStyle: { opacity: 0.12 }, lineStyle: { color: '#409eff' }, itemStyle: { color: '#409eff' }, data: rows.map((r) => num(r.online_users)) },
+        { name: '付费流量占比', type: 'line', yAxisIndex: 2, smooth: true, showSymbol: false, lineStyle: { type: 'dashed', color: '#e6a23c' }, itemStyle: { color: '#e6a23c' }, data: rows.map((r) => round2(num(r.paid_traffic_ratio) * 100)) },
+      ],
+    },
+    true,
+  );
+}
+
+async function openCurve(row: Row): Promise<void> {
+  curveRow.value = row;
+  curveRows.value = [];
+  curveVisible.value = true;
+  curveLoading.value = true;
+  try {
+    const d = await apiGet<{ list: MinuteRow[] }>(`/actions/analytics/live/${row.id}/minutes`);
+    curveRows.value = d.list ?? [];
+  } catch (e) {
+    ElMessage.error(errMsg(e));
+  } finally {
+    curveLoading.value = false;
+  }
+  await nextTick();
+  await nextTick();
+  if (curveRows.value.length) renderCurve();
+}
+
+function disposeCurve(): void {
+  curveChart?.dispose();
+  curveChart = null;
+}
+
 /** 合计行：本页汇总（全量汇总需服务端聚合，见接口缺口说明） */
 function summary({ columns: cols, data }: { columns: { property: string }[]; data: Row[] }): string[] {
   const sum = (f: (r: Row) => number) => round2(data.reduce((a, r) => a + f(r), 0));
@@ -406,10 +491,25 @@ onMounted(async () => {
   const target = id ? rows.value.find((r) => Number(r.id) === id) : undefined;
   if (target && Number(target.status) === 3) openReview(target);
 });
+
+onUnmounted(disposeCurve);
 </script>
 
 <style scoped>
 .el-table :deep(.unreviewed-row) {
   background: #fdf6ec;
+}
+.curve-box {
+  height: 360px;
+}
+.curve-sub {
+  font-size: 13px;
+  color: #606266;
+  margin-bottom: 8px;
+}
+.curve-tip {
+  color: #909399;
+  font-size: 12px;
+  margin-left: 8px;
 }
 </style>

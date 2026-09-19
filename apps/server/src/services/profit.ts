@@ -11,7 +11,8 @@
  *  4. cost_matched=0（未映射 SKU）的订单行不进利润统计（连 GMV 一起剔），只出 warn 计数 ——
  *     按 0 成本混进来会让利润虚高（要点 1）。
  *  5. 达人免费样品单 is_sample_order=1 不计 GMV；取消单 CANCELLED 不计 GMV 也不计成本。
- *  6. 切日：order_time 存 UTC，报表按店铺站点时区归自然日（shared statDate + REGION_TZ_OFFSET）。
+ *  6. 切日：order_time 存 UTC，报表按**店铺已保存的 IANA 时区**归自然日（shared statDateInZone，含夏令时）；
+ *     时区不可用时才退回 REGION_TZ_OFFSET 固定偏移。
  *  7. 分摊：广告费有 video_id/spu_id 的直接归到视频/商品（顺带到达人），归不到的按该店铺当日 GMV 占比摊；
  *     费用 shop_id 有值的进该店，shop_id 为空 = 公共费用按各店 GMV 占比摊。池子 100% 摊完不吞不增，
  *     所以「各维度利润之和 = 全局利润」（只剩四舍五入的分级误差）。
@@ -26,7 +27,7 @@ import {
   num,
   profitRate,
   round2,
-  statDate,
+  statDateInZone,
   type CurrentUser,
   type DashboardSummary,
   type ProfitRow,
@@ -81,11 +82,15 @@ export const AD_TYPE_LABEL: Record<number, string> = {
   4: '达人授权投放',
 };
 
-/** 报表自然日：UTC 时间 + 站点偏移（固定偏移，不处理夏令时，与 shared 同一套常量） */
+/**
+ * 报表自然日：order_time 存 UTC，按**店铺已保存的 IANA 时区**归日（含夏令时）。
+ * timezone 缺失或非法（脏数据/老库只填了 region）时退回站点固定偏移。
+ */
 export const siteDay = (
   utc: string | number | null | undefined,
-  region: string | number | null | undefined,
-): string => statDate(String(utc ?? ''), REGION_TZ_OFFSET[String(region ?? '')] ?? 0);
+  timezone: string | number | null | undefined,
+  region?: string | number | null,
+): string => statDateInZone(String(utc ?? ''), String(timezone ?? ''), REGION_TZ_OFFSET[String(region ?? '')] ?? 0);
 
 const addDays = (day: string, n: number): string => {
   const t = Date.parse(`${day}T00:00:00Z`);
@@ -136,15 +141,15 @@ export function resolveRange(f: ProfitFilter): { start: string; end: string; anc
   const norm = start <= end ? { start, end } : { start: end, end: start };
   if (f.start || f.end) return { ...norm, anchored: false };
   const scope = scopeSql(f.user, f.shopIds);
-  const latest = get<{ order_time: string | null; region: string | null }>(
-    `SELECT o.order_time AS order_time, s.region AS region
+  const latest = get<{ order_time: string | null; region: string | null; timezone: string | null }>(
+    `SELECT o.order_time AS order_time, s.region AS region, s.timezone AS timezone
        FROM tk_order o JOIN tk_shop s ON s.id = o.shop_id
       WHERE o.is_deleted = 0 AND o.order_time IS NOT NULL ${scope.sql}
       ORDER BY o.order_time DESC LIMIT 1`,
     ...scope.params,
   );
   if (!latest?.order_time) return { ...norm, anchored: false };
-  const lastDay = siteDay(latest.order_time, latest.region);
+  const lastDay = siteDay(latest.order_time, latest.timezone, latest.region);
   if (!lastDay || lastDay >= norm.end) return { ...norm, anchored: false };
   return { start: addDays(lastDay, -29), end: lastDay, anchored: true };
 }
@@ -290,7 +295,7 @@ export function loadFacts(f: ProfitFilter = {}): ProfitFacts {
   const map = new Map<number, OrderFact>();
 
   const rows = all<Record<string, number | string | null>>(
-    `SELECT o.id AS order_id, o.tk_order_id, o.shop_id, s.shop_name, s.region, o.currency, o.order_status,
+    `SELECT o.id AS order_id, o.tk_order_id, o.shop_id, s.shop_name, s.region, s.timezone, o.currency, o.order_status,
             o.is_sample_order, o.order_time, o.total_paid, o.shipping_fee,
             i.id AS item_id, i.sku_id, i.quantity, i.item_amount, i.cost_snapshot, i.cost_matched,
             i.creator_id, i.content_type, i.est_commission,
@@ -314,7 +319,7 @@ export function loadFacts(f: ProfitFilter = {}): ProfitFacts {
     const orderId = Number(r.order_id);
     let o = map.get(orderId);
     if (!o) {
-      const day = siteDay(r.order_time, r.region);
+      const day = siteDay(r.order_time, r.timezone, r.region);
       if (!day || day < range.start || day > range.end) continue;
       o = newOrderFact(r, day);
       map.set(orderId, o);
@@ -427,7 +432,7 @@ function attachRefunds(map: Map<number, OrderFact>, fallbackDay: string, scope: 
   if (!map.size) return;
   const conv = createRateConverter();
   const rows = all<Record<string, number | string | null>>(
-    `SELECT r.order_id AS order_id, r.refund_amount, r.currency, r.apply_time, s.region
+    `SELECT r.order_id AS order_id, r.refund_amount, r.currency, r.apply_time, s.region, s.timezone
        FROM tk_return r
        JOIN tk_order o ON o.id = r.order_id AND o.is_deleted = 0
        JOIN tk_shop s ON s.id = r.shop_id
@@ -438,7 +443,7 @@ function attachRefunds(map: Map<number, OrderFact>, fallbackDay: string, scope: 
     const o = map.get(Number(r.order_id));
     if (!o) continue;
     const cur = String(r.currency);
-    const day = siteDay(r.apply_time, r.region) || fallbackDay;
+    const day = siteDay(r.apply_time, r.timezone, r.region) || fallbackDay;
     o.refund_src = round2(o.refund_src + num(r.refund_amount));
     o.refund_cny = round2(o.refund_cny + num(r.refund_amount) * conv.rate(cur, day).rate);
   }
@@ -449,7 +454,7 @@ function attachSettlements(map: Map<number, OrderFact>, scope: { sql: string; pa
   if (!map.size) return;
   const conv = createRateConverter();
   const rows = all<Record<string, number | string | null>>(
-    `SELECT o.id AS order_id, t.txn_type, t.amount, t.currency, t.payment_status, t.statement_time, t.statement_id, s.region
+    `SELECT o.id AS order_id, t.txn_type, t.amount, t.currency, t.payment_status, t.statement_time, t.statement_id, s.region, s.timezone
        FROM settlement_txn t
        JOIN tk_order o ON o.tk_order_id = t.tk_order_id AND o.is_deleted = 0
        JOIN tk_shop s ON s.id = t.shop_id
@@ -459,7 +464,7 @@ function attachSettlements(map: Map<number, OrderFact>, scope: { sql: string; pa
   for (const r of rows) {
     const o = map.get(Number(r.order_id));
     if (!o) continue;
-    const day = siteDay(r.statement_time, r.region) || o.day;
+    const day = siteDay(r.statement_time, r.timezone, r.region) || o.day;
     const info = conv.rate(String(r.currency), day);
     const amount = num(r.amount);
     const cny = round2(amount * info.rate);
@@ -940,11 +945,11 @@ export interface OrderProfitBreakdown {
  */
 export function computeOrderProfit(orderId: number): OrderProfitBreakdown {
   const head = get<Record<string, number | string | null>>(
-    `SELECT o.id AS order_id, o.order_time, o.shop_id, s.region FROM tk_order o JOIN tk_shop s ON s.id = o.shop_id WHERE o.id = ? AND o.is_deleted = 0`,
+    `SELECT o.id AS order_id, o.order_time, o.shop_id, s.region, s.timezone FROM tk_order o JOIN tk_shop s ON s.id = o.shop_id WHERE o.id = ? AND o.is_deleted = 0`,
     orderId,
   );
   if (!head) throw notFound(`订单 ${orderId} 不存在`);
-  const day = siteDay(head.order_time, head.region);
+  const day = siteDay(head.order_time, head.timezone, head.region);
   const facts = loadFacts({ start: day, end: day, shopIds: [Number(head.shop_id)], includeSample: true });
   const o = [...facts.orders, ...facts.excluded].find((x) => x.order_id === orderId);
   if (!o) throw notFound(`订单 ${orderId} 无明细行`);

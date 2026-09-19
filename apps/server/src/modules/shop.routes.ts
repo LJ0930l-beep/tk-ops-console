@@ -4,10 +4,29 @@ import { SHOP_AUTH_STATUS, type CurrentUser } from '@tk/shared';
 import { get, insert, softDelete, update } from '../core/db.js';
 import { forbidden, notFound, ok, parseBody, wrap } from '../core/http.js';
 import { Q, queryList, queryPage } from '../core/query.js';
-import { encryptSecret, requireMenu, shopScope, type AuthedRequest } from '../core/auth.js';
+import { canAccessShop, encryptSecret, requireMenu, shopScope, type AuthedRequest } from '../core/auth.js';
 import { writeOpLog } from '../core/oplog.js';
 
 export const current = (req: object): CurrentUser => (req as AuthedRequest).user;
+
+/**
+ * tk_shop 对外字段白名单（D2）。凭证列 app_key_enc / app_secret_enc / access_token_enc 与
+ * shop_cipher 任何角色都不出接口，只回显「是否已配置」布尔；密钥轮换走 /:id/auth。
+ */
+const SHOP_COLUMNS = `s.id, s.shop_name, s.tk_shop_id, s.region, s.shop_type, s.currency, s.timezone,
+  s.auth_status, s.token_expire_at, s.owner_id, s.status, s.created_at, s.updated_at,
+  (s.app_key_enc IS NOT NULL AND s.app_key_enc <> '') AS has_credential,
+  (s.access_token_enc IS NOT NULL AND s.access_token_enc <> '') AS has_access_token,
+  (s.shop_cipher IS NOT NULL AND s.shop_cipher <> '') AS has_cipher`;
+
+/** 审计日志同样不能出现密文：写 before/after 前剔除凭证列（C5） */
+const CREDENTIAL_COLUMNS = ['app_key_enc', 'app_secret_enc', 'access_token_enc', 'shop_cipher'] as const;
+
+function stripCredentials(row: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...row };
+  for (const col of CREDENTIAL_COLUMNS) delete out[col];
+  return out;
+}
 
 /** 授权到期前 7 天自动标记「即将过期」（方案表 1 token_expire_at） */
 function withAuthExpiry<T extends Record<string, unknown>>(row: T): T {
@@ -24,7 +43,6 @@ export const shopRouter = Router();
 const shopBody = z.object({
   shop_name: z.string().min(1).max(100),
   tk_shop_id: z.string().max(64).nullish(),
-  shop_cipher: z.string().max(128).nullish(),
   region: z.string().min(2).max(8),
   shop_type: z.union([z.literal(1), z.literal(2)]).default(1),
   currency: z.string().length(3),
@@ -54,7 +72,7 @@ shopRouter.get(
     if (req.query.auth_status !== undefined && req.query.auth_status !== '') q.eq('s.auth_status', req.query.auth_status);
     const page = queryPage(req, {
       from: `tk_shop s LEFT JOIN sys_user ou ON ou.id = s.owner_id`,
-      select: 's.*, ou.real_name AS owner_name',
+      select: `${SHOP_COLUMNS}, ou.real_name AS owner_name`,
       q,
       orderBy: 's.id DESC',
     });
@@ -62,22 +80,17 @@ shopRouter.get(
   }),
 );
 
-shopRouter.get(
-  '/all',
-  wrap((_req, res) =>
-    ok(res, queryList({ from: 'tk_shop', q: new Q('is_deleted = 0'), select: 'id, shop_name, region, currency, timezone, auth_status', orderBy: 'shop_name ASC', limit: 200 })),
-  ),
-);
+/** 店铺下拉数据源：与 /mine 同字段同范围，必须带 shop 菜单并受数据范围约束（D2） */
+function shopOptions(req: object) {
+  const scope = shopScope(current(req), 's.id');
+  const q = new Q('s.is_deleted = 0').and(scope.sql || '', ...scope.params);
+  return queryList({ from: 'tk_shop s', select: SHOP_COLUMNS, q, orderBy: 's.shop_name ASC', limit: 200 }).map(withAuthExpiry);
+}
+
+shopRouter.get('/all', requireMenu('shop'), wrap((req, res) => ok(res, shopOptions(req))));
 
 /** 当前用户可见店铺（前端店铺下拉统一入口） */
-shopRouter.get(
-  '/mine',
-  wrap((req, res) => {
-    const scope = shopScope(current(req), 's.id');
-    const q = new Q('s.is_deleted = 0').and(scope.sql || '', ...scope.params);
-    ok(res, queryList({ from: 'tk_shop s', select: 's.id, s.shop_name, s.region, s.currency, s.timezone', q, orderBy: 's.shop_name ASC' }));
-  }),
-);
+shopRouter.get('/mine', wrap((req, res) => ok(res, shopOptions(req))));
 
 shopRouter.get(
   '/:id',
@@ -85,12 +98,11 @@ shopRouter.get(
   wrap((req, res) => {
     const id = Number(req.params.id);
     const row = get<Record<string, unknown>>(
-      `SELECT s.*, ou.real_name AS owner_name FROM tk_shop s LEFT JOIN sys_user ou ON ou.id = s.owner_id WHERE s.id = ? AND s.is_deleted = 0`,
+      `SELECT ${SHOP_COLUMNS}, ou.real_name AS owner_name FROM tk_shop s LEFT JOIN sys_user ou ON ou.id = s.owner_id WHERE s.id = ? AND s.is_deleted = 0`,
       id,
     );
     if (!row) throw notFound('店铺不存在');
-    const scope = shopScope(current(req), 's.id');
-    if (scope.sql && !scope.params.includes(id)) throw forbidden('该店铺不在你的数据范围内');
+    if (!canAccessShop(current(req), id)) throw forbidden('该店铺不在你的数据范围内');
     ok(res, withAuthExpiry(row));
   }),
 );
@@ -113,9 +125,11 @@ shopRouter.put(
     const id = Number(req.params.id);
     const before = get<Record<string, unknown>>(`SELECT * FROM tk_shop WHERE id = ? AND is_deleted = 0`, id);
     if (!before) throw notFound('店铺不存在');
+    if (!canAccessShop(current(req), id)) throw forbidden('该店铺不在你的数据范围内');
     const body = parseBody(shopBody.partial(), req.body);
     update('tk_shop', id, body as never);
-    writeOpLog({ user_id: current(req).id, module: '店铺与账号', action: 'update', target_table: 'tk_shop', target_id: id, before, after: { ...before, ...body }, ip: req.ip });
+    const beforeSafe = stripCredentials(before);
+    writeOpLog({ user_id: current(req).id, module: '店铺与账号', action: 'update', target_table: 'tk_shop', target_id: id, before: beforeSafe, after: { ...beforeSafe, ...body }, ip: req.ip });
     ok(res, { id });
   }),
 );
@@ -126,6 +140,7 @@ shopRouter.delete(
   wrap((req, res) => {
     const id = Number(req.params.id);
     if (!get(`SELECT id FROM tk_shop WHERE id = ? AND is_deleted = 0`, id)) throw notFound('店铺不存在');
+    if (!canAccessShop(current(req), id)) throw forbidden('该店铺不在你的数据范围内');
     if (get(`SELECT id FROM tk_order WHERE shop_id = ? AND is_deleted = 0 LIMIT 1`, id)) throw forbidden('该店铺已有订单，不能删除（可改为暂停/关店）');
     softDelete('tk_shop', id);
     writeOpLog({ user_id: current(req).id, module: '店铺与账号', action: 'delete', target_table: 'tk_shop', target_id: id, ip: req.ip });
@@ -134,24 +149,41 @@ shopRouter.delete(
 );
 
 /** 重新授权：接口凭证 AES-GCM 加密保存，明文不出现在页面与日志（方案 6.4） */
+const authBody = z.object({
+  app_key: z.string().min(1),
+  app_secret: z.string().min(1),
+  access_token: z.string().min(8).optional(),
+  shop_cipher: z.string().max(128).optional(),
+  token_expire_at: z.string().optional(),
+});
+
 shopRouter.post(
   '/:id/auth',
   requireMenu('shop'),
   wrap((req, res) => {
     const id = Number(req.params.id);
     if (!get(`SELECT id FROM tk_shop WHERE id = ? AND is_deleted = 0`, id)) throw notFound('店铺不存在');
-    const body = parseBody(
-      z.object({ app_key: z.string().min(1), app_secret: z.string().min(1), shop_cipher: z.string().optional(), token_expire_at: z.string().optional() }),
-      req.body,
-    );
-    update('tk_shop', id, {
+    if (!canAccessShop(current(req), id)) throw forbidden('该店铺不在你的数据范围内');
+    const body = parseBody(authBody, req.body);
+    // 只更新提交字段：未提交 access_token / shop_cipher 时不得清空原值
+    const payload: Record<string, string | number | null> = {
       app_key_enc: encryptSecret(body.app_key),
       app_secret_enc: encryptSecret(body.app_secret),
-      shop_cipher: body.shop_cipher ?? null,
       auth_status: SHOP_AUTH_STATUS.AUTHORIZED,
-      token_expire_at: body.token_expire_at ?? null,
-    } as never);
-    writeOpLog({ user_id: current(req).id, module: '店铺与账号', action: 'update', target_table: 'tk_shop', target_id: id, after: { auth: 'renewed' }, ip: req.ip });
+    };
+    if (body.access_token) payload.access_token_enc = encryptSecret(body.access_token);
+    if (body.shop_cipher) payload.shop_cipher = body.shop_cipher;
+    if (body.token_expire_at) payload.token_expire_at = body.token_expire_at;
+    update('tk_shop', id, payload as never);
+    writeOpLog({
+      user_id: current(req).id,
+      module: '店铺与账号',
+      action: 'update',
+      target_table: 'tk_shop',
+      target_id: id,
+      after: { auth: 'renewed', access_token_updated: !!body.access_token, token_expire_at: body.token_expire_at ?? null },
+      ip: req.ip,
+    });
     ok(res, { id });
   }),
 );

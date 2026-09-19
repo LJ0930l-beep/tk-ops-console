@@ -120,6 +120,7 @@ CREATE TABLE IF NOT EXISTS tk_shop (
   status        INTEGER NOT NULL DEFAULT 1,          -- 1运营中 2暂停 3已关店
   app_key_enc   TEXT,                                -- 加密保存的接口凭证（页面/日志不出现）
   app_secret_enc TEXT,
+  access_token_enc TEXT,                             -- 按店铺保存的授权 token 密文，real 模式必需
   created_by    INTEGER,
   created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
   updated_at    TEXT    NOT NULL DEFAULT (datetime('now')),

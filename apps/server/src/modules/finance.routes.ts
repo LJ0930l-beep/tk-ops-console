@@ -14,7 +14,7 @@ import { round2, type CurrentUser } from '@tk/shared';
 import { all, get, insert, softDelete, tx, update, type SqlParam } from '../core/db.js';
 import { badRequest, forbidden, notFound, ok, parseBody, paginate, qv, wrap } from '../core/http.js';
 import { Q, queryPage } from '../core/query.js';
-import { requireExport, requireMenu, shopScope, type AuthedRequest } from '../core/auth.js';
+import { canAccessShop, requireExport, requireMenu, shopScope, type AuthedRequest } from '../core/auth.js';
 import { logIfChanged, writeOpLog } from '../core/oplog.js';
 import {
   EXPENSE_TYPE_LABEL,
@@ -54,7 +54,7 @@ const shopFilter = (req: Request, col: string): { sql: string; params: number[] 
   const scope = shopScope(current(req), col);
   const picked = Number(qv(req, 'shop_id') ?? 0);
   if (!picked) return scope;
-  if (scope.sql && !scope.params.includes(picked)) return { sql: `AND 1 = 0`, params: [] };
+  if (picked && !canAccessShop(current(req), picked)) return { sql: `AND 1 = 0`, params: [] };
   return { sql: `AND ${col} = ?`, params: [picked] };
 };
 
@@ -283,7 +283,6 @@ financeRouter.post(
       z.object({ rows: z.array(settleImportRow).min(1).max(5000), overwrite: z.boolean().default(true) }),
       req.body,
     );
-    const scope = shopScope(user, 'id');
     const out = { total: body.rows.length, inserted: 0, updated: 0, skipped: 0, invalid: [] as { index: number; reason: string }[] };
     tx(() => {
       body.rows.forEach((r, index) => {
@@ -291,7 +290,7 @@ financeRouter.post(
           r.shop_id ??
           (r.tk_shop_id ? Number(get<{ id: number }>(`SELECT id FROM tk_shop WHERE is_deleted = 0 AND tk_shop_id = ?`, String(r.tk_shop_id))?.id ?? 0) : 0);
         if (!shopId) return void out.invalid.push({ index, reason: 'shop_id / tk_shop_id 无法定位店铺' });
-        if (scope.sql && !scope.params.includes(shopId)) return void out.invalid.push({ index, reason: `店铺 ${shopId} 不在你的数据范围内` });
+        if (!canAccessShop(user, shopId)) return void out.invalid.push({ index, reason: `店铺 ${shopId} 不在你的数据范围内` });
         if (!get(`SELECT id FROM tk_shop WHERE id = ? AND is_deleted = 0`, shopId)) return void out.invalid.push({ index, reason: `店铺 ${shopId} 不存在` });
         const exist = get<{ id: number }>(
           `SELECT id FROM settlement_txn WHERE is_deleted = 0 AND shop_id = ? AND IFNULL(statement_id, '') = ? AND IFNULL(tk_order_id, '') = ? AND txn_type = ?`,
@@ -1260,8 +1259,7 @@ financeRouter.get(
     const user = current(req);
     const row = get<{ shop_id: number }>(`SELECT shop_id FROM tk_order WHERE id = ? AND is_deleted = 0`, id);
     if (!row) throw notFound('订单不存在');
-    const scope = shopScope(user, 'id');
-    if (scope.sql && !scope.params.includes(row.shop_id)) throw forbidden('该店铺不在你的数据范围内');
+    if (!canAccessShop(user, Number(row.shop_id))) throw forbidden('该店铺不在你的数据范围内');
     ok(res, computeOrderProfit(id));
   }),
 );

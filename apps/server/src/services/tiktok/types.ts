@@ -15,7 +15,7 @@ export type PlatformMoney = string | number | null | undefined | { amount?: stri
 /** 平台时间：Unix 秒（int），0 或缺失表示「没有该节点」 */
 export type PlatformTime = number | string | null | undefined;
 
-/** 平台统一响应外层 */
+/** 平台统一响应外层（data 里的数组字段名随接口不同：orders / products / returns / list） */
 export interface PlatformEnvelope<T> {
   code?: number;
   message?: string;
@@ -25,6 +25,7 @@ export interface PlatformEnvelope<T> {
     total_count?: number;
     next_page_token?: string;
     has_more?: boolean;
+    [key: string]: unknown;
   } | null;
 }
 

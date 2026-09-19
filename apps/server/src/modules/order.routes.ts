@@ -20,7 +20,8 @@ import {
   RESPONSIBILITY,
   profitRate,
   round2,
-  statDate,
+  statDateInZone,
+  zoneDayStartUtc,
   type CurrentUser,
 } from '@tk/shared';
 import { all, get, scalar, update, type SqlParam } from '../core/db.js';
@@ -131,32 +132,34 @@ const AGGREGATE_SELECT = `
         ROUND(SUM(${SUM_COMMISSION} * ${RATE}), 2) AS commission_cny,
         ROUND(SUM(CASE WHEN ${COUNTABLE} THEN (${SUM_MATCHED_AMOUNT} - ${SUM_COMMISSION}) * ${RATE} - ${SUM_COST} ELSE 0 END), 2) AS est_profit_cny`;
 
-/** 按站点时区切自然日（与 ad_daily.stat_date 同口径）；此处独立实现，避免耦合他人正在改的 profit.ts */
-function tzExprFromRegion(col: string): string {
-  const whens = Object.entries(REGION_TZ_OFFSET)
-    .map(([r, off]) => `WHEN '${r}' THEN '${off >= 0 ? '+' : ''}${off} minutes'`)
-    .join(' ');
-  return `CASE ${col} ${whens} ELSE '+0 minutes' END`;
-}
+/** 按店铺 IANA 时区切自然日（含夏令时，tz_day 由 core/db.ts 注册，第三参是站点兜底偏移） */
+const tzDayExpr = (timeCol: string, tzCol: string, regionCol: string): string => `tz_day(${timeCol}, ${tzCol}, ${regionCol})`;
 
 const scopeOf = (req: Request, col: string): { sql: string; params: number[] } => shopScope(current(req), col);
 
 /** shopScope 返回 'AND xxx'，Q 内部自己拼 AND，并条件时要剥掉前缀 */
 const applyScope = (q: Q, scope: { sql: string; params: number[] }): Q => q.and(scope.sql.replace(/^\s*AND\s+/i, ''), ...scope.params);
 
-/** 站点时区自然日 */
-function siteDayOf(orderTime: unknown, region: unknown): string {
+/** 站点时区自然日（tz 为 tk_shop.timezone，缺失时退回站点固定偏移） */
+function siteDayOf(orderTime: unknown, timezone: unknown, region: unknown): string {
   const t = String(orderTime ?? '');
   if (!t) return '';
-  return statDate(`${t.replace(' ', 'T')}${t.includes('Z') ? '' : 'Z'}`, REGION_TZ_OFFSET[String(region ?? '')] ?? 0);
+  return statDateInZone(
+    `${t.replace(' ', 'T')}${t.includes('Z') ? '' : 'Z'}`,
+    String(timezone ?? ''),
+    REGION_TZ_OFFSET[String(region ?? '')] ?? 0,
+  );
 }
 
-/** 自然日 → UTC 时间窗（费用分摊取同店当日单量做分母用） */
-function dayWindowUtc(day: string, offsetMinutes: number): { from: string; to: string } {
-  const base = Date.parse(`${day}T00:00:00Z`);
-  if (!Number.isFinite(base)) return { from: '', to: '' };
-  const from = new Date(base - offsetMinutes * 60_000);
-  return { from: fmt(from), to: fmt(new Date(from.getTime() + 86_400_000)) };
+/** 自然日 → UTC 时间窗（费用分摊取同店当日单量做分母用），按店铺时区含夏令时 */
+function dayWindowUtc(day: string, timezone: unknown, region: unknown): { from: string; to: string } {
+  const start = zoneDayStartUtc(
+    day,
+    String(timezone ?? ''),
+    REGION_TZ_OFFSET[String(region ?? '')] ?? 0,
+  );
+  if (!Number.isFinite(start)) return { from: '', to: '' };
+  return { from: fmt(new Date(start)), to: fmt(new Date(start + 86_400_000)) };
 }
 
 /* ==================== 列表条件与视图 ==================== */
@@ -250,7 +253,7 @@ function orderView(user: CurrentUser) {
 function loadOrder(req: Request, id: number): Record<string, unknown> {
   const scope = scopeOf(req, 'o.shop_id');
   const row = get<Record<string, unknown>>(
-    `SELECT ${ORDER_SELECT} FROM ${ORDER_FROM} WHERE o.id = ? AND o.is_deleted = 0${scope.sql}`,
+    `SELECT ${ORDER_SELECT} FROM ${ORDER_FROM} WHERE o.id = ? AND o.is_deleted = 0 ${scope.sql}`,
     id,
     ...scope.params,
   );
@@ -297,7 +300,7 @@ orderRouter.get(
       ...params,
     );
     const byDay = all<Record<string, unknown>>(
-      `SELECT date(o.order_time, ${tzExprFromRegion('s.region')}) AS stat_date, ${AGGREGATE_SELECT}
+      `SELECT ${tzDayExpr('o.order_time', 's.timezone', 's.region')} AS stat_date, ${AGGREGATE_SELECT}
          FROM ${ORDER_FROM}${where}
         GROUP BY stat_date ORDER BY stat_date ASC LIMIT 400`,
       ...params,
@@ -597,7 +600,7 @@ orderRouter.put(
     const user = current(req);
     const id = Number(req.params.id);
     const scope = scopeOf(req, 'r.shop_id');
-    const before = get<Record<string, unknown>>(`SELECT r.* FROM tk_return r WHERE r.id = ? AND r.is_deleted = 0${scope.sql}`, id, ...scope.params);
+    const before = get<Record<string, unknown>>(`SELECT r.* FROM tk_return r WHERE r.id = ? AND r.is_deleted = 0 ${scope.sql}`, id, ...scope.params);
     if (!before) throw notFound('售后单不存在或不在你的数据范围内');
     const body = parseBody(returnUpdateBody, req.body);
     if (body.responsibility === undefined && body.is_restocked === undefined) throw badRequest('至少提交 responsibility / is_restocked 之一');
@@ -630,7 +633,7 @@ orderRouter.get(
   wrap((req, res) => {
     const scope = scopeOf(req, 'r.shop_id');
     const row = get<Record<string, unknown>>(
-      `SELECT ${RETURN_SELECT} FROM ${RETURN_FROM} WHERE r.id = ? AND r.is_deleted = 0${scope.sql}`,
+      `SELECT ${RETURN_SELECT} FROM ${RETURN_FROM} WHERE r.id = ? AND r.is_deleted = 0 ${scope.sql}`,
       Number(req.params.id),
       ...scope.params,
     );
@@ -745,6 +748,7 @@ orderRouter.get(
     const rateMissing = head.rate_to_cny === null || head.rate_to_cny === undefined;
     const shopId = num(head.shop_id);
     const region = String(head.region ?? '');
+    const timezone = String(head.timezone ?? '');
     const sample = num(head.is_sample_order) === 1;
     const cancelled = String(head.order_status) === 'CANCELLED';
     const counted = !sample && !cancelled;
@@ -772,8 +776,8 @@ orderRouter.get(
     );
     const refundCny = round2(returnRows.reduce((s, r) => s + num(r.refund_amount) * (String(r.currency) === 'CNY' ? 1 : rate), 0));
 
-    const day = siteDayOf(head.order_time, region);
-    const win = dayWindowUtc(day, REGION_TZ_OFFSET[region] ?? 0);
+    const day = siteDayOf(head.order_time, timezone, region);
+    const win = dayWindowUtc(day, timezone, region);
     const spendRows = day
       ? all<Record<string, unknown>>(
           `SELECT currency, COALESCE(SUM(spend), 0) AS spend FROM ad_daily WHERE is_deleted = 0 AND shop_id = ? AND stat_date = ? GROUP BY currency`,

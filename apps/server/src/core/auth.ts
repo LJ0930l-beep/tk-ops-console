@@ -23,7 +23,8 @@ export function verifyPassword(plain: string, stored: string): boolean {
 
 /* ---------- 接口凭证加密保存（方案 6.4：不出现在页面和日志里） ---------- */
 
-const key = crypto.createHash('sha256').update(config.jwtSecret).digest();
+/** 凭证加密密钥与 JWT 签名密钥分离：泄漏其一不至于同时能伪造令牌和解密凭证 */
+const key = crypto.createHash('sha256').update(config.credKey).digest();
 export function encryptSecret(plain: string): string {
   const iv = crypto.randomBytes(12);
   const c = crypto.createCipheriv('aes-256-gcm', key, iv);
@@ -47,9 +48,11 @@ export interface JwtPayload {
   username: string;
 }
 
-export const signToken = (u: JwtPayload): string => jwt.sign(u, config.jwtSecret, { expiresIn: config.jwtTtlSeconds });
+export const signToken = (u: JwtPayload): string => jwt.sign(u, config.jwtSecret, { expiresIn: config.jwtTtlSeconds, algorithm: 'HS256' });
 
-export const verifyToken = (token: string): JwtPayload => jwt.verify(token, config.jwtSecret) as unknown as JwtPayload;
+/** 显式限定算法：避免攻击者用 alg=none 或替换对称算法伪造令牌 */
+export const verifyToken = (token: string): JwtPayload =>
+  jwt.verify(token, config.jwtSecret, { algorithms: ['HS256'] }) as unknown as JwtPayload;
 
 export function loadUser(userId: number): CurrentUser | null {
   const row = get<Record<string, unknown>>(
@@ -137,6 +140,9 @@ export const requireExport = (req: Request, _res: Response, next: NextFunction):
 /**
  * 生成店铺维度的范围过滤条件。
  * @param col 店铺列表达式，如 't.shop_id' 或 's.id'
+ *
+ * 返回片段自带前导 AND 且**不含前导空格**：走 Q.and() 会自动剥离，
+ * 裸拼进模板字符串时必须自己留空格（`= 0${sql}` 会拼出 `0AND` 直接 500）。
  */
 export function shopScope(user: CurrentUser, col: string): { sql: string; params: number[] } {
   switch (user.data_scope) {
@@ -146,7 +152,8 @@ export function shopScope(user: CurrentUser, col: string): { sql: string; params
       if (!user.shop_ids.length) return { sql: `AND 1 = 0`, params: [] };
       return { sql: `AND ${col} IN (${user.shop_ids.map(() => '?').join(',')})`, params: user.shop_ids };
     case DATA_SCOPE.SELF:
-      return { sql: `AND ${col} IN (SELECT shop_id FROM tk_shop WHERE owner_id = ?)`, params: [user.id] };
+      // 本人负责店铺：tk_shop 的主键列叫 id，写成 shop_id 会直接 SQL 报错
+      return { sql: `AND ${col} IN (SELECT id FROM tk_shop WHERE owner_id = ?)`, params: [user.id] };
     case DATA_SCOPE.DEPT:
       return {
         sql: `AND ${col} IN (SELECT s.shop_id FROM sys_user_shop s JOIN sys_user m ON m.id = s.user_id WHERE m.dept = (SELECT dept FROM sys_user WHERE id = ?))`,
@@ -155,6 +162,19 @@ export function shopScope(user: CurrentUser, col: string): { sql: string; params
     default:
       return { sql: `AND 1 = 0`, params: [] };
   }
+}
+
+/**
+ * 单个店铺是否在该用户的数据范围内（写操作与详情接口的越权兜底判定）。
+ * 必须复用 shopScope 生成的条件：SELF/DEPT 下 scope.params 是 user.id，
+ * 直接 params.includes(shopId) 会把「用户 ID 恰好等于店铺 ID」误判为有权。
+ */
+export function canAccessShop(user: CurrentUser, shopId: number): boolean {
+  const id = Number(shopId);
+  if (!Number.isInteger(id) || id <= 0) return false;
+  const scope = shopScope(user, 'id');
+  if (!scope.sql) return true;
+  return !!get<{ id: number }>(`SELECT id FROM tk_shop WHERE is_deleted = 0 ${scope.sql} AND id = ?`, ...scope.params, id);
 }
 
 /** 人员维度（BD 私海、剪辑绩效等）：仅本人 / 本组 / 全部 */

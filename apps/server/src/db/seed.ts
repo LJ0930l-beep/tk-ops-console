@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
-import { DEFAULT_ROLES, buildCollabNo, round2, statDate, REGION_TZ_OFFSET } from '@tk/shared';
+import { DEFAULT_ROLES, REGION_TZ_OFFSET, buildCollabNo, round2, statDateInZone } from '@tk/shared';
 import { seedV2DemoData } from './seedV2.js';
+import { config } from '../config.js';
 import { hashPassword } from '../core/auth.js';
 import { insert, run, get, all } from '../core/db.js';
 import { migrate } from './migrate.js';
@@ -68,7 +69,7 @@ export function seedDemoData(opts: { reset?: boolean } = {}): void {
   for (const [username, real_name, role, dept] of users) {
     uid[username] = insert('sys_user', {
       username,
-      password_hash: hashPassword('Passw0rd!'),
+      password_hash: hashPassword(config.demoPassword),
       real_name,
       phone: `1380000${String(Object.keys(uid).length + 1000)}`,
       dept,
@@ -563,11 +564,12 @@ export function seedDemoData(opts: { reset?: boolean } = {}): void {
   const settledOrders = orderIds.filter((_, i) => i % 3 !== 2);
   for (const oid of settledOrders) {
     const o = get<Record<string, string | number>>(
-      `SELECT o.id, o.shop_id, o.tk_order_id, o.currency, o.total_paid, o.order_time FROM tk_order o WHERE o.id=?`,
+      `SELECT o.id, o.shop_id, o.tk_order_id, o.currency, o.total_paid, o.order_time, s.timezone, s.region
+         FROM tk_order o JOIN tk_shop s ON s.id = o.shop_id WHERE o.id=?`,
       oid,
     );
     if (!o) continue;
-    const statDay = statDate(String(o.order_time), REGION_TZ_OFFSET[String(o.currency) === 'MYR' ? 'MY' : 'US'] ?? -480).slice(0, 10);
+    const statDay = statDateInZone(String(o.order_time), String(o.timezone ?? ''), REGION_TZ_OFFSET[String(o.region ?? '')] ?? 0);
     const items = all<{ est_commission: number }>(`SELECT est_commission FROM tk_order_item WHERE order_id=?`, Number(o.id));
     const commission = round2(items.reduce((a, b) => a + Number(b.est_commission), 0));
     const stmt = `ST${statDay.replace(/-/g, '')}-${String(oid).padStart(5, '0')}`;

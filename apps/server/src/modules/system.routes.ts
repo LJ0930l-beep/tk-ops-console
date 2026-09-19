@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { MENU_KEYS, type CurrentUser, type MenuKey } from '@tk/shared';
 import { all, get, insert, run, softDelete, tx, update } from '../core/db.js';
-import { badRequest, notFound, ok, parseBody, wrap } from '../core/http.js';
+import { badRequest, forbidden, notFound, ok, parseBody, wrap } from '../core/http.js';
 import { Q, queryList, queryPage } from '../core/query.js';
 import { hashPassword, requireMenu, type AuthedRequest } from '../core/auth.js';
 import { writeOpLog } from '../core/oplog.js';
@@ -11,6 +11,30 @@ const current = (req: object): CurrentUser => (req as AuthedRequest).user;
 
 /** 系统设置菜单只有老板与持 system 权限的角色可写 */
 const sysOnly = requireMenu('system');
+
+/**
+ * 提权防线：`system` 菜单只决定「能否进入系统设置」，不代表能把权限发给任何人。
+ * 角色写入、给用户改角色/数据范围、停用高权限账号都必须 boss，
+ * 否则持 system 菜单的运营经理可以自建全权角色再挂到自己身上。
+ */
+function requireBoss(req: object, action: string): void {
+  if (current(req).role_key !== 'boss') throw forbidden(`仅老板（boss）可以${action}`);
+}
+
+/** 高危角色：老板、全店数据范围或持有 system 菜单 */
+function isPrivilegedRole(roleId: number): boolean {
+  return !!get<{ id: number }>(
+    `SELECT id FROM sys_role WHERE id = ? AND is_deleted = 0
+       AND (role_key = 'boss' OR data_scope = 1 OR menu_perms LIKE '%"system"%')`,
+    roleId,
+  );
+}
+
+/** 目标账号是否已持有高危权限 */
+function isPrivilegedUser(userId: number): boolean {
+  const row = get<{ role_id: number }>(`SELECT role_id FROM sys_user WHERE id = ? AND is_deleted = 0`, userId);
+  return !!row && isPrivilegedRole(Number(row.role_id));
+}
 
 /* ==================== 表 21 用户 sys_user ==================== */
 export const userRouter = Router();
@@ -53,6 +77,8 @@ userRouter.post(
   wrap((req, res) => {
     const body = parseBody(userBody, req.body);
     if (!body.password) throw badRequest('新建员工必须提供初始密码（至少 8 位）');
+    if (isPrivilegedRole(body.role_id)) requireBoss(req, '创建高权限角色员工');
+    if (body.shop_ids?.length) requireBoss(req, '绑定员工店铺范围');
     const id = tx(() => {
       const uid = insert('sys_user', {
         username: body.username,
@@ -79,6 +105,10 @@ userRouter.put(
     const before = get<Record<string, unknown>>(`SELECT * FROM sys_user WHERE id = ? AND is_deleted = 0`, id);
     if (!before) throw notFound('员工不存在');
     const body = parseBody(userBody.partial().omit({ username: true }), req.body);
+    if (body.shop_ids) requireBoss(req, '调整员工店铺范围');
+    if (body.role_id && Number(body.role_id) !== Number(before.role_id) && (isPrivilegedUser(id) || isPrivilegedRole(body.role_id))) requireBoss(req, '调整账号角色');
+    if (body.password && isPrivilegedUser(id)) requireBoss(req, '重置高权限账号密码');
+    if (body.status !== undefined && isPrivilegedUser(id)) requireBoss(req, '变更高权限账号状态');
     tx(() => {
       const { shop_ids, password, ...rest } = body;
       if (Object.keys(rest).length) update('sys_user', id, rest as never);
@@ -93,7 +123,8 @@ userRouter.put(
       }
       return id;
     });
-    writeOpLog({ user_id: current(req).id, module: '系统设置', action: 'update', target_table: 'sys_user', target_id: id, before, after: { ...body, password: '***' }, ip: req.ip });
+    const { password_hash: _ph, ...beforeSafe } = before;
+    writeOpLog({ user_id: current(req).id, module: '系统设置', action: 'update', target_table: 'sys_user', target_id: id, before: beforeSafe, after: { ...body, password: '***' }, ip: req.ip });
     ok(res, { id });
   }),
 );
@@ -104,6 +135,7 @@ userRouter.post(
   wrap((req, res) => {
     const id = Number(req.params.id);
     if (!get(`SELECT id FROM sys_user WHERE id = ? AND is_deleted = 0`, id)) throw notFound('员工不存在');
+    if (isPrivilegedUser(id)) requireBoss(req, '停用高权限账号');
     update('sys_user', id, { status: 0 } as never);
     writeOpLog({ user_id: current(req).id, module: '系统设置', action: 'update', target_table: 'sys_user', target_id: id, after: { status: 0 }, ip: req.ip });
     ok(res, { id });
@@ -136,6 +168,7 @@ roleRouter.get('/', wrap((_req, res) =>
 roleRouter.post(
   '/',
   wrap((req, res) => {
+    requireBoss(req, '新增角色');
     const body = parseBody(roleBody, req.body);
     const id = insert('sys_role', { ...body, menu_perms: JSON.stringify(body.menu_perms), created_by: current(req).id });
     writeOpLog({ user_id: current(req).id, module: '系统设置', action: 'create', target_table: 'sys_role', target_id: id, after: body, ip: req.ip });
@@ -146,6 +179,7 @@ roleRouter.post(
 roleRouter.put(
   '/:id',
   wrap((req, res) => {
+    requireBoss(req, '修改角色的菜单/数据范围/敏感开关');
     const id = Number(req.params.id);
     const before = get<Record<string, unknown>>(`SELECT * FROM sys_role WHERE id = ? AND is_deleted = 0`, id);
     if (!before) throw notFound('角色不存在');
@@ -167,6 +201,7 @@ dataScopeRouter.get('/:userId', wrap((req, res) =>
 dataScopeRouter.put(
   '/:userId',
   wrap((req, res) => {
+    requireBoss(req, '调整员工店铺范围');
     const userId = Number(req.params.userId);
     const { shop_ids } = parseBody(z.object({ shop_ids: z.array(z.number().int().positive()) }), req.body);
     tx(() => {

@@ -320,7 +320,7 @@ contentRouter.get(
     const scope = videoScope(user);
     const video = get<Record<string, unknown>>(`SELECT * FROM video WHERE id = ? AND is_deleted = 0`, id);
     if (!video) throw notFound('视频不存在');
-    if (scope.sql && !get(`SELECT v.id FROM video v WHERE v.id = ?${scope.sql}`, id, ...scope.params)) throw forbidden('该视频不在你的数据范围内');
+    if (scope.sql && !get(`SELECT v.id FROM video v WHERE v.id = ? ${scope.sql}`, id, ...scope.params)) throw forbidden('该视频不在你的数据范围内');
     const vid = String(video.tk_video_id ?? '');
     if (!vid) {
       ok(res, { video, list: [], total: 0, summary: { orders: 0, gmv_cny: 0, refund_cny: 0, net_gmv_cny: 0, commission_cny: 0 } });
@@ -381,7 +381,7 @@ contentRouter.get(
     const id = Number(req.params.id);
     const scope = videoScope(user);
     const row = get<Record<string, unknown>>(
-      `SELECT ${videoSelect} FROM ${videoFrom} WHERE v.id = ? AND v.is_deleted = 0${scope.sql}`, id, ...scope.params,
+      `SELECT ${videoSelect} FROM ${videoFrom} WHERE v.id = ? AND v.is_deleted = 0 ${scope.sql}`, id, ...scope.params,
     );
     if (!row) throw notFound('视频不存在或不在你的数据范围内');
     ok(res, decorateVideo(user, row));
@@ -659,7 +659,7 @@ contentRouter.post(
     // 主播 / 剪辑（仅本人范围）自己建的场次只能自己看到，允许选任意店铺；组 / 店铺范围角色必须落在范围内
     const boundToShops = user.data_scope === DATA_SCOPE.SHOPS || user.data_scope === DATA_SCOPE.DEPT;
     const scope = shopScope(user, 'x.id');
-    if (boundToShops && scope.sql && !get(`SELECT x.id FROM tk_shop x WHERE x.id = ?${scope.sql}`, shopId, ...scope.params)) {
+    if (boundToShops && scope.sql && !get(`SELECT x.id FROM tk_shop x WHERE x.id = ? ${scope.sql}`, shopId, ...scope.params)) {
       throw forbidden('该店铺不在你的数据范围内');
     }
     if (body.account_id) {
@@ -686,7 +686,7 @@ function loadLive(id: number, user: CurrentUser): Record<string, unknown> {
   const row = get<Record<string, unknown>>(`SELECT ${liveSelect} FROM ${liveFrom} WHERE l.id = ? AND l.is_deleted = 0`, id);
   if (!row) throw notFound('直播场次不存在');
   const scope = liveScope(user);
-  if (scope.sql && !get(`SELECT l.id FROM ${liveFrom} WHERE l.id = ? AND l.is_deleted = 0${scope.sql}`, id, ...scope.params)) {
+  if (scope.sql && !get(`SELECT l.id FROM ${liveFrom} WHERE l.id = ? AND l.is_deleted = 0 ${scope.sql}`, id, ...scope.params)) {
     throw forbidden('该场次不在你的数据范围内');
   }
   return row;

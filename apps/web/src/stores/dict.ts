@@ -24,7 +24,7 @@ export const useDictStore = defineStore('dict', {
       }
     },
     async shopOptions() {
-      if (!this.shops.length) this.shops = await apiGet('/shops/all');
+      if (!this.shops.length) this.shops = await apiGet('/shops/mine');
       return this.shops;
     },
     shopLabel(id: number) {

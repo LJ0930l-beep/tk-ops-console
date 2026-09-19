@@ -22,15 +22,20 @@ export class Q {
     if (initial) this.and(initial, ...params);
   }
 
-  /** cond 里用 ? 占位；任一参数为空则整条条件忽略 */
+  /**
+   * cond 里用 ? 占位；任一参数为空则整条条件忽略。
+   * 条件之间由 whereSql 用 AND 连接，因此这里容错剥掉 cond 自带的前导 AND
+   * （shopScope/personScope 返回的片段自带 AND，若不剥离会拼出 `AND AND` 直接 500）。
+   */
   and(cond: string, ...params: SqlParam[]): this {
-    if (!cond || !cond.trim()) return this;
+    const c = cond?.replace(/^\s*AND\s+/i, '').trim();
+    if (!c) return this;
     if (params.length === 0) {
-      this.parts.push(cond);
+      this.parts.push(c);
       return this;
     }
     if (params.some((p) => p === undefined || p === null || p === '')) return this;
-    this.parts.push(cond);
+    this.parts.push(c);
     this.args.push(...params);
     return this;
   }

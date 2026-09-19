@@ -115,7 +115,8 @@ import { apiGet, apiPost, apiPut, errMsg } from '@/api/client';
 import { useAuthStore } from '@/stores/auth';
 
 const auth = useAuthStore();
-const canWrite = computed(() => auth.roleKey === 'boss' || auth.menus.includes('system'));
+/** 角色定义即权限来源（菜单/数据范围/成本与导出开关），服务端收紧为 boss 专属；非 boss 只读 */
+const canWrite = computed(() => auth.roleKey === 'boss');
 
 /** GET /system/roles 返回数组（非分页体），故本页自定义表格 */
 const RoleRow = { id: 0, role_name: '', role_key: '', menu_perms: [] as string[], data_scope: 1, can_see_cost: 0, can_see_contact: 0, can_export: 0, user_count: 0 };

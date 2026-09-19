@@ -44,20 +44,26 @@ export function createApp(): Express {
 
   app.use('/api', (_req, res) => res.status(404).json({ code: 40400, message: '接口不存在', data: null }));
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    if (err instanceof AppError) {
-      res.status(err.status).json({ code: err.code, message: err.message, data: null });
-      return;
-    }
-    const msg = err instanceof Error ? err.message : String(err);
-    if (/UNIQUE constraint failed/i.test(msg)) {
-      res.status(409).json({ code: 40900, message: '编号/唯一标识重复，请检查后重试', data: null });
-      return;
-    }
-    console.error('[500]', msg);
-    res.status(500).json({ code: 50000, message: msg || '服务器内部错误', data: null });
-  });
+  app.use(errorHandler);
 
   return app;
+}
+
+/**
+ * 统一错误出口：AppError 按自身状态码返回；其它异常（含 SQL 原文、底层驱动报错）
+ * 只写服务端日志，客户端一律通用文案，避免泄漏表结构与列名。
+ */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction): void {
+  if (err instanceof AppError) {
+    res.status(err.status).json({ code: err.code, message: err.message, data: null });
+    return;
+  }
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/UNIQUE constraint failed|ER_DUP_ENTRY|Duplicate entry/i.test(msg)) {
+    res.status(409).json({ code: 40900, message: '编号/唯一标识重复，请检查后重试', data: null });
+    return;
+  }
+  console.error('[500]', err);
+  res.status(500).json({ code: 50000, message: '服务器内部错误，请联系管理员并查看服务端日志', data: null });
 }

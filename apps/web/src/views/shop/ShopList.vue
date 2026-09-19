@@ -28,14 +28,23 @@
 
     <el-dialog v-model="authVisible" :title="`重新授权 · ${authTarget?.shop_name ?? ''}`" width="520px" destroy-on-close>
       <el-alert type="warning" :closable="false" show-icon style="margin-bottom: 12px">
-        <template #default>提交后服务端加密保存 App Key / App Secret，明文不回显、不入日志；授权成功后 auth_status 置为「已授权」。</template>
+        <template #default>
+          服务端以 AES-256-GCM 加密保存 App Key / App Secret / Access Token，明文不回显、不入操作日志；授权成功后 auth_status 置为「已授权」。留空的字段保持原值不变。
+        </template>
       </el-alert>
+      <el-descriptions :column="1" size="small" border style="margin-bottom: 12px">
+        <el-descriptions-item label="当前凭证">{{ credentialHint(authTarget) }}</el-descriptions-item>
+        <el-descriptions-item label="令牌到期">{{ String(authTarget?.token_expire_at ?? '未填写') }}</el-descriptions-item>
+      </el-descriptions>
       <el-form ref="authFormRef" :model="authForm" :rules="authRules" label-width="120px">
         <el-form-item label="App Key" prop="app_key">
           <el-input v-model="authForm.app_key" placeholder="开放平台应用 Key" />
         </el-form-item>
         <el-form-item label="App Secret" prop="app_secret">
           <el-input v-model="authForm.app_secret" type="password" show-password placeholder="开放平台应用密钥" />
+        </el-form-item>
+        <el-form-item label="Access Token" prop="access_token">
+          <el-input v-model="authForm.access_token" type="password" show-password placeholder="店铺授权 token（real 模式必填，≥8 位）" />
         </el-form-item>
         <el-form-item label="Shop Cipher">
           <el-input v-model="authForm.shop_cipher" placeholder="店铺 Cipher（商品/订单接口必填）" maxlength="128" />
@@ -105,6 +114,7 @@ const columns = computed<ColumnDef[]>(() => [
   { prop: 'currency', label: '币种', width: 70 },
   { prop: 'timezone', label: '时区', width: 140 },
   { prop: 'auth_status', label: '授权状态', width: 100, type: 'tag', options: AUTH_STATUS },
+  { prop: 'credential_state', label: '接口凭证', width: 120 },
   { prop: 'expire_left', label: '授权剩余', width: 110 },
   { prop: 'token_expire_at', label: '令牌到期时间', width: 150, type: 'datetime', sortable: true },
   { prop: 'owner_name', label: '负责人', width: 100 },
@@ -128,14 +138,13 @@ const formFields = computed<FormFieldDef[]>(() => [
   { key: 'shop_type', label: '店铺类型', type: 'select', options: SHOP_TYPE, default: 1 },
   { key: 'currency', label: '币种', required: true, span: 12, placeholder: '3 位字母码，如 USD' },
   { key: 'timezone', label: '时区', span: 12, default: 'Asia/Shanghai', placeholder: '如 Asia/Shanghai' },
-  { key: 'shop_cipher', label: 'Shop Cipher', span: 24, placeholder: '商品/订单接口需要，≤128 字' },
   { key: 'auth_status', label: '授权状态', type: 'select', options: AUTH_STATUS, default: SHOP_AUTH_STATUS.UNAUTHORIZED },
   { key: 'token_expire_at', label: '令牌到期时间', type: 'datetime' },
   { key: 'owner_id', label: '负责人', type: 'select', options: ownerOptionsFn },
   { key: 'status', label: '经营状态', type: 'select', options: SHOP_STATUS, default: 1 },
 ]);
 
-/** 授权剩余天数（与后端 withAuthExpiry 同口径：小于 7 天视为即将过期） */
+/** 授权剩余天数（与后端 withAuthExpiry 同口径：小于 7 天视为即将过期）+ 凭证配置状态 */
 function mapRow(row: Record<string, unknown>): Record<string, unknown> {
   const raw = row.token_expire_at;
   let left = '-';
@@ -146,7 +155,15 @@ function mapRow(row: Record<string, unknown>): Record<string, unknown> {
       left = days < 0 ? `已失效 ${-days} 天` : `剩 ${days} 天`;
     }
   }
-  return { ...row, expire_left: left };
+  return { ...row, expire_left: left, credential_state: credentialHint(row) };
+}
+
+/** 密文不出接口，页面只能展示「是否已配置」 */
+function credentialHint(row: Record<string, unknown> | null | undefined): string {
+  if (!row) return '-';
+  const parts = [row.has_credential ? 'Key/Secret' : '无 Key/Secret', row.has_access_token ? 'Token' : '无 Token'];
+  if (!row.has_cipher) parts.push('无 Cipher');
+  return parts.join(' / ');
 }
 
 function rowClass({ row }: { row: Record<string, unknown> }): string {
@@ -161,7 +178,7 @@ const authVisible = ref(false);
 const authLoading = ref(false);
 const authTarget = ref<Record<string, unknown> | null>(null);
 const authFormRef = ref<FormInstance>();
-const authForm = reactive({ app_key: '', app_secret: '', shop_cipher: '', token_expire_at: '' });
+const authForm = reactive({ app_key: '', app_secret: '', access_token: '', shop_cipher: '', token_expire_at: '' });
 const authRules: FormRules = {
   app_key: [{ required: true, message: '请填写 App Key', trigger: 'blur' }],
   app_secret: [{ required: true, message: '请填写 App Secret', trigger: 'blur' }],
@@ -169,9 +186,11 @@ const authRules: FormRules = {
 
 function openAuth(row: Record<string, unknown>) {
   authTarget.value = row;
+  // 凭证只写不读：每次打开都从空表单开始，未填写的字段保留库内原值
   authForm.app_key = '';
   authForm.app_secret = '';
-  authForm.shop_cipher = String(row.shop_cipher ?? '');
+  authForm.access_token = '';
+  authForm.shop_cipher = '';
   authForm.token_expire_at = '';
   authVisible.value = true;
 }
@@ -186,6 +205,7 @@ async function submitAuth() {
     await apiPost(`/shops/${id}/auth`, {
       app_key: authForm.app_key,
       app_secret: authForm.app_secret,
+      access_token: authForm.access_token || undefined,
       shop_cipher: authForm.shop_cipher || undefined,
       token_expire_at: authForm.token_expire_at || undefined,
     });

@@ -15,7 +15,7 @@ import { adRoi, num, round2, type CurrentUser } from '@tk/shared';
 import { all, get, insert, tx, update } from '../core/db.js';
 import { badRequest, forbidden, notFound, ok, parseBody, paginate, qv, wrap } from '../core/http.js';
 import { Q, queryPage } from '../core/query.js';
-import { requireExport, requireMenu, shopScope, type AuthedRequest } from '../core/auth.js';
+import { canAccessShop, requireExport, requireMenu, shopScope, type AuthedRequest } from '../core/auth.js';
 import { writeOpLog } from '../core/oplog.js';
 import { AD_GROUP_DIMS, AD_TYPE_LABEL, adMetrics, resolveRange, type AdGroupDim } from '../services/profit.js';
 import { createRateConverter, rateDay, toCnySql } from '../services/rates.js';
@@ -72,7 +72,7 @@ function adQuery(req: Request): { q: Q; shopIds: number[] } {
     .filter((n) => Number.isFinite(n) && n > 0);
   const picked = Number(qv(req, 'shop_id') ?? 0);
   if (picked > 0 && !shopIds.includes(picked)) shopIds.push(picked);
-  if (shopIds.some((id) => scope.sql && !scope.params.includes(id))) throw forbidden('存在不在你的数据范围内的店铺');
+  if (shopIds.some((id) => !canAccessShop(user, id))) throw forbidden('存在不在你的数据范围内的店铺');
   const q = new Q('a.is_deleted = 0')
     .and(scope.sql || '', ...scope.params)
     .and(shopIds.length ? 'a.shop_id IN (' + shopIds.map(() => '?').join(',') + ')' : '', ...shopIds)
@@ -275,7 +275,8 @@ interface AdImportResult {
  * 同一 (shop_id, campaign_id, stat_date, ad_type) 命中 ux_ad_daily 时只更新指标，
  * 不产生第二条流水 —— 平台账单重跑不能把花费算两遍。
  */
-function applyAdRows(userId: number, shopIdsInScope: { sql: string; params: number[] }, rows: z.infer<typeof adImportRow>[], overwrite = true): AdImportResult & { rate_missing: string[] } {
+function applyAdRows(user: CurrentUser, rows: z.infer<typeof adImportRow>[], overwrite = true): AdImportResult & { rate_missing: string[] } {
+  const userId = user.id;
   const conv = createRateConverter();
   const out: AdImportResult = { total: rows.length, inserted: 0, updated: 0, skipped: 0, invalid: [], ids: [] };
   const missing = new Set<string>();
@@ -283,7 +284,7 @@ function applyAdRows(userId: number, shopIdsInScope: { sql: string; params: numb
     rows.forEach((r, index) => {
       const shopId = r.shop_id ?? findId(`SELECT id FROM tk_shop WHERE is_deleted = 0 AND tk_shop_id = ?`, r.tk_shop_id);
       if (!shopId) return void out.invalid.push({ index, reason: 'shop_id / tk_shop_id 无法定位店铺' });
-      if (shopIdsInScope.sql && !shopIdsInScope.params.includes(shopId)) return void out.invalid.push({ index, reason: `店铺 ${shopId} 不在你的数据范围内` });
+      if (!canAccessShop(user, Number(shopId))) return void out.invalid.push({ index, reason: `店铺 ${shopId} 不在你的数据范围内` });
       const statDate = rateDay(r.stat_date);
       if (!statDate) return void out.invalid.push({ index, reason: 'stat_date 不是合法日期' });
       const currency = r.currency ?? String(get<{ currency: string }>(`SELECT currency FROM tk_shop WHERE id = ?`, shopId)?.currency ?? 'USD');
@@ -336,7 +337,7 @@ adsRouter.post(
   wrap((req, res) => {
     const user = current(req);
     const body = parseBody(z.object({ rows: z.array(adImportRow).min(1).max(5000), overwrite: z.boolean().optional() }), req.body);
-    const out = applyAdRows(user.id, shopScope(user, 'id'), body.rows, body.overwrite ?? true);
+    const out = applyAdRows(user, body.rows, body.overwrite ?? true);
     writeOpLog({ user_id: user.id, module: '投放中心', action: 'create', target_table: 'ad_daily', after: { ...out, ids: undefined }, ip: req.ip });
     ok(res, out, importMessage(out));
   }),
@@ -349,7 +350,7 @@ adsRouter.post(
   wrap((req, res) => {
     const user = current(req);
     const row = parseBody(adImportRow, req.body);
-    const out = applyAdRows(user.id, shopScope(user, 'id'), [row]);
+    const out = applyAdRows(user, [row]);
     if (out.invalid.length) throw badRequest(out.invalid[0].reason);
     writeOpLog({ user_id: user.id, module: '投放中心', action: 'create', target_table: 'ad_daily', target_id: out.ids[0] ?? null, after: { ...row, inserted: out.inserted, updated: out.updated }, ip: req.ip });
     ok(res, { id: out.ids[0] ?? null, inserted: out.inserted, updated: out.updated, rate_missing: out.rate_missing }, out.inserted ? '已录入' : '已按唯一键更新既有记录');
@@ -365,8 +366,7 @@ adsRouter.put(
     const id = Number(req.params.id);
     const before = get<Record<string, string | number | null>>(`SELECT * FROM ad_daily WHERE id = ? AND is_deleted = 0`, id);
     if (!before) throw notFound('广告日报记录不存在');
-    const scope = shopScope(user, 'id');
-    if (scope.sql && !scope.params.includes(Number(before.shop_id))) throw forbidden('该店铺不在你的数据范围内');
+    if (!canAccessShop(user, Number(before.shop_id))) throw forbidden('该店铺不在你的数据范围内');
     const body = parseBody(adImportRow.partial(), req.body);
     const patch: Record<string, string | number | null> = {};
     for (const k of ['spend', 'impressions', 'clicks', 'conversions', 'gmv', 'currency', 'campaign_name', 'advertiser_id', 'spu_id', 'video_id'] as const) {

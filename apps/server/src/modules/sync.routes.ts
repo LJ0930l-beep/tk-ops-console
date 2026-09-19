@@ -47,12 +47,12 @@ const applyScope = (q: Q, scope: { sql: string; params: number[] }): Q => q.and(
 /** 范围内可见的店铺（同步只能对范围内的店下手） */
 function scopedShopIds(req: Request): number[] {
   const scope = scopeOf(req, 's.id');
-  return all<{ id: number }>(`SELECT s.id FROM tk_shop s WHERE s.is_deleted = 0 AND s.status = 1${scope.sql} ORDER BY s.id`, ...scope.params).map((r) => r.id);
+  return all<{ id: number }>(`SELECT s.id FROM tk_shop s WHERE s.is_deleted = 0 AND s.status = 1 ${scope.sql} ORDER BY s.id`, ...scope.params).map((r) => r.id);
 }
 
 function assertShopVisible(req: Request, shopId: number): void {
   const scope = scopeOf(req, 's.id');
-  const hit = get<{ id: number }>(`SELECT s.id FROM tk_shop s WHERE s.id = ? AND s.is_deleted = 0${scope.sql}`, shopId, ...scope.params);
+  const hit = get<{ id: number }>(`SELECT s.id FROM tk_shop s WHERE s.id = ? AND s.is_deleted = 0 ${scope.sql}`, shopId, ...scope.params);
   if (!hit) throw notFound('店铺不存在或不在你的数据范围内');
 }
 
@@ -232,7 +232,7 @@ syncRouter.get(
          CROSS JOIN (SELECT 'order' AS task_type UNION ALL SELECT 'listing' UNION ALL SELECT 'returns' UNION ALL SELECT 'affiliate_order') tk
          LEFT JOIN sync_log l ON l.shop_id = s.id AND l.task_type = tk.task_type AND l.is_deleted = 0
            AND l.id = (SELECT MAX(l2.id) FROM sync_log l2 WHERE l2.shop_id = s.id AND l2.task_type = tk.task_type AND l2.is_deleted = 0)
-        WHERE s.is_deleted = 0${scope.sql}
+        WHERE s.is_deleted = 0 ${scope.sql}
         ORDER BY s.id ASC, tk.task_type ASC`,
       ...scope.params,
     );
@@ -254,14 +254,14 @@ syncRouter.get(
     });
     const unmappedListings = Number(
       get<{ c: number }>(
-        `SELECT COUNT(*) AS c FROM shop_listing l WHERE l.is_deleted = 0 AND l.map_status = 2${scope.sql.replace(/s\.id/g, 'l.shop_id')}`,
+        `SELECT COUNT(*) AS c FROM shop_listing l WHERE l.is_deleted = 0 AND l.map_status = 2 ${scope.sql.replace(/s\.id/g, 'l.shop_id')}`,
         ...scope.params,
       )?.c ?? 0,
     );
     const unmappedItems = Number(
       get<{ c: number }>(
         `SELECT COUNT(*) AS c FROM tk_order_item i JOIN tk_order o ON o.id = i.order_id AND o.is_deleted = 0
-          WHERE i.is_deleted = 0 AND i.cost_matched = 0${scope.sql.replace(/s\.id/g, 'o.shop_id')}`,
+          WHERE i.is_deleted = 0 AND i.cost_matched = 0 ${scope.sql.replace(/s\.id/g, 'o.shop_id')}`,
         ...scope.params,
       )?.c ?? 0,
     );

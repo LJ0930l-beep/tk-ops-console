@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS tk_shop (
   status         TINYINT       NOT NULL DEFAULT 1,     -- 1运营中 2暂停 3已关店
   app_key_enc    TEXT,                                 -- AES-256-GCM 密文，页面/日志不回显
   app_secret_enc TEXT,
+  access_token_enc VARCHAR(512),                        -- 按店铺保存的授权 token 密文，real 模式必需
   created_by     BIGINT UNSIGNED,
   created_at     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,

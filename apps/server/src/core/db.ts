@@ -1,11 +1,27 @@
 import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
+import { REGION_TZ_OFFSET, statDateInZone } from '@tk/shared';
 import { config } from '../config.js';
 
 export type SqlParam = string | number | bigint | null | Uint8Array;
 
 let instance: DatabaseSync | null = null;
+
+/**
+ * SQLite 没有时区库：把切日能力注册为 SQL 函数 tz_day(utc_text, iana_zone, region)。
+ * 第三参是站点码（US/MY/…），时区列为空或脏数据时退回该站点固定偏移，
+ * 保证 SQL 聚合口径与 JS 侧 siteDay()/siteDayOf() 完全一致（同一个自然日）。
+ */
+function registerSqlFunctions(db: DatabaseSync): void {
+  db.function('tz_day', { deterministic: true }, (utc: unknown, tz: unknown, region: unknown) =>
+    statDateInZone(
+      utc === null || utc === undefined ? '' : String(utc),
+      tz === null || tz === undefined ? '' : String(tz),
+      REGION_TZ_OFFSET[region === null || region === undefined ? '' : String(region)] ?? 0,
+    ),
+  );
+}
 
 export function getDb(): DatabaseSync {
   if (instance) return instance;
@@ -14,17 +30,20 @@ export function getDb(): DatabaseSync {
   instance.exec('PRAGMA journal_mode = WAL');
   instance.exec('PRAGMA foreign_keys = ON');
   instance.exec('PRAGMA busy_timeout = 5000');
+  registerSqlFunctions(instance);
   return instance;
 }
 
 /** 测试注入：换成内存库 */
 export function setDb(db: DatabaseSync): void {
+  registerSqlFunctions(db);
   instance = db;
 }
 
 export function newMemoryDb(): DatabaseSync {
   const db = new DatabaseSync(':memory:');
   db.exec('PRAGMA foreign_keys = ON');
+  registerSqlFunctions(db);
   return db;
 }
 

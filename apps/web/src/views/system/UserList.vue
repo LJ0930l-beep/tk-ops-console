@@ -18,7 +18,7 @@
       </template>
 
       <template #actions="{ row }">
-        <el-button v-if="canWrite" link type="primary" size="small" @click="openShops(row)">分配店铺</el-button>
+        <el-button v-if="isBoss" link type="primary" size="small" @click="openShops(row)">分配店铺</el-button>
         <el-button v-if="canWrite" link type="warning" size="small" @click="resetPassword(row)">重置密码</el-button>
         <el-button v-if="canWrite && Number(row.status) === 1" link type="danger" size="small" @click="deactivate(row)">停用</el-button>
       </template>
@@ -53,6 +53,8 @@ const rp = ref();
 
 /** userRouter 整体 requireMenu('system')：无 system 菜单既看不到也写不了 */
 const canWrite = computed(() => auth.roleKey === 'boss' || auth.menus.includes('system'));
+/** 授权类写操作（改角色/店铺范围/停高权账号）服务端要求 boss，前端同步只给 boss */
+const isBoss = computed(() => auth.roleKey === 'boss');
 
 const USER_STATUS: OptionDef[] = [
   { value: 1, label: '在职', type: 'success' },
@@ -66,7 +68,12 @@ const allShops = ref<ShopRow[]>([]);
 onMounted(async () => {
   try {
     const roles = await apiGet<Record<string, unknown>[]>('/system/roles');
-    roleOpts.value = (roles ?? []).map((r) => ({ value: Number(r.id), label: `${String(r.role_name)}（${String(r.role_key)}）` }));
+    // 非 boss 不得派发高危角色（与服务端 isPrivilegedRole 同口径）
+    const privileged = (r: Record<string, unknown>) =>
+      String(r.role_key) === 'boss' || Number(r.data_scope) === 1 || (r.menu_perms as string[] | undefined)?.includes('system');
+    roleOpts.value = (roles ?? [])
+      .filter((r) => isBoss.value || !privileged(r))
+      .map((r) => ({ value: Number(r.id), label: `${String(r.role_name)}（${String(r.role_key)}）` }));
   } catch {
     roleOpts.value = [];
   }

@@ -58,7 +58,7 @@ async function doLogin() {
   try {
     await auth.login(form.username, form.password);
     ElMessage.success(`欢迎，${auth.user?.real_name}`);
-    router.push(String(route.query.redirect ?? '/dashboard'));
+    router.push(String(route.query.redirect ?? '/actions'));
   } catch (e) {
     ElMessage.error(errMsg(e));
   } finally {

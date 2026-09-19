@@ -6,5 +6,8 @@ dist/
 .env.local
 apps/server/data/*.db
 apps/server/data/*.db-*
+# 跟踪的演示库在 WAL 模式下会派生这两个临时文件，跑一次服务就会脏
+apps/data/*.db-wal
+apps/data/*.db-shm
 coverage/
 outputs/

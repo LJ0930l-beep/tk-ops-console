@@ -7,8 +7,10 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/',
     component: MainLayout,
-    redirect: '/dashboard',
+    redirect: '/actions',
     children: [
+      { path: 'actions', name: 'actions', component: () => import('@/views/ActionCenter.vue'), meta: { title: '今日行动中心', menu: 'dashboard' } },
+      { path: 'actions/results', name: 'action-results', component: () => import('@/views/ActionResults.vue'), meta: { title: '效果回看', menu: 'dashboard' } },
       { path: 'dashboard', name: 'dashboard', component: () => import('@/views/DashboardView.vue'), meta: { title: '经营看板', menu: 'dashboard' } },
 
       { path: 'shops', name: 'shops', component: () => import('@/views/shop/ShopList.vue'), meta: { title: '店铺管理', menu: 'shop' } },
@@ -18,6 +20,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'products/sku', name: 'sku', component: () => import('@/views/product/SkuList.vue'), meta: { title: 'SKU 与成本', menu: 'product' } },
       { path: 'products/listing', name: 'listing', component: () => import('@/views/product/ListingList.vue'), meta: { title: '店铺商品映射', menu: 'product' } },
       { path: 'products/unmapped', name: 'unmapped', component: () => import('@/views/product/UnmappedList.vue'), meta: { title: '待映射清单', menu: 'product' } },
+      { path: 'products/abc', name: 'product-abc', component: () => import('@/views/product/ProductAbc.vue'), meta: { title: 'ABC 分层与渠道', menu: 'product' } },
 
       { path: 'orders', name: 'orders', component: () => import('@/views/order/OrderList.vue'), meta: { title: '订单列表', menu: 'order' } },
       { path: 'orders/:id', name: 'order-detail', component: () => import('@/views/order/OrderDetail.vue'), meta: { title: '订单详情', menu: 'order' } },
@@ -50,9 +53,10 @@ const routes: RouteRecordRaw[] = [
       { path: 'system/oplog', name: 'oplog', component: () => import('@/views/system/OpLogList.vue'), meta: { title: '操作日志', menu: 'system' } },
       { path: 'system/synclog', name: 'synclog', component: () => import('@/views/system/SyncLogList.vue'), meta: { title: '同步监控', menu: 'system' } },
       { path: 'system/dict', name: 'dict', component: () => import('@/views/system/DictList.vue'), meta: { title: '数据字典', menu: 'system' } },
+      { path: 'system/rules', name: 'rules', component: () => import('@/views/system/RulesCenter.vue'), meta: { title: '规则中心', menu: 'system' } },
     ],
   },
-  { path: '/:pathMatch(.*)*', redirect: '/dashboard' },
+  { path: '/:pathMatch(.*)*', redirect: '/actions' },
 ];
 
 export const router = createRouter({ history: createWebHashHistory(), routes });

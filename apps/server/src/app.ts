@@ -14,6 +14,7 @@ import { financeRouter } from './modules/finance.routes.js';
 import { dashboardRouter } from './modules/dashboard.routes.js';
 import { stockRouter } from './modules/stock.routes.js';
 import { syncRouter } from './modules/sync.routes.js';
+import { actionsRouter } from './modules/actions.routes.js';
 
 export function createApp(): Express {
   const app = express();
@@ -38,6 +39,7 @@ export function createApp(): Express {
   api.use('/dashboard', dashboardRouter);
   api.use('/stock', stockRouter);
   api.use('/sync', syncRouter);
+  api.use('/actions', actionsRouter);
   app.use('/api', api);
 
   app.use('/api', (_req, res) => res.status(404).json({ code: 40400, message: '接口不存在', data: null }));

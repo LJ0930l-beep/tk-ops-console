@@ -19,7 +19,7 @@ export const MENU_KEYS = [
 export type MenuKey = (typeof MENU_KEYS)[number];
 
 export const MENUS: { key: MenuKey; title: string; icon: string; phase: 1 | 2 | 3; children: { key: string; title: string; path: string }[] }[] = [
-  { key: 'dashboard', title: '工作台', icon: 'Odometer', phase: 1, children: [{ key: 'dashboard:view', title: '经营看板', path: '/dashboard' }] },
+  { key: 'dashboard', title: '工作台', icon: 'Odometer', phase: 1, children: [{ key: 'action:center', title: '今日行动中心', path: '/actions' }, { key: 'dashboard:view', title: '经营看板', path: '/dashboard' }, { key: 'action:results', title: '效果回看', path: '/actions/results' }] },
   {
     key: 'shop', title: '店铺与账号', icon: 'Shop', phase: 1,
     children: [
@@ -34,6 +34,7 @@ export const MENUS: { key: MenuKey; title: string; icon: string; phase: 1 | 2 | 
       { key: 'product:sku', title: 'SKU 与成本', path: '/products/sku' },
       { key: 'product:listing', title: '店铺商品映射', path: '/products/listing' },
       { key: 'product:unmapped', title: '待映射清单', path: '/products/unmapped' },
+      { key: 'product:abc', title: 'ABC 分层与渠道', path: '/products/abc' },
     ],
   },
   {
@@ -89,6 +90,7 @@ export const MENUS: { key: MenuKey; title: string; icon: string; phase: 1 | 2 | 
       { key: 'oplog:list', title: '操作日志', path: '/system/oplog' },
       { key: 'synclog:list', title: '同步监控', path: '/system/synclog' },
       { key: 'dict:list', title: '数据字典', path: '/system/dict' },
+      { key: 'rule:center', title: '规则中心', path: '/system/rules' },
     ],
   },
 ];

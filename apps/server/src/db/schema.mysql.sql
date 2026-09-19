@@ -581,3 +581,191 @@ CREATE TABLE IF NOT EXISTS sys_dict (
   is_deleted TINYINT      NOT NULL DEFAULT 0,
   UNIQUE KEY ux_dict (dict_type, dict_value, is_deleted)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='表26 数据字典表';
+
+-- ============================================================
+-- V2.0 增补（§15.2 分析宽表 + §15.3 预警与动作闭环）
+-- 软删除唯一键沿用本文件约定：UNIQUE KEY 带 is_deleted 列；
+-- 同一对象多次删除时，删除方需把 is_deleted 置为主键 id 以避开唯一冲突。
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS analytics_shop_channel_daily (
+  id         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  stat_date  DATE          NOT NULL,
+  shop_id    BIGINT UNSIGNED NOT NULL,
+  channel    VARCHAR(20)   NOT NULL,                      -- product_card/live/video/affiliate/ads/organic
+  visitors   INT           NOT NULL DEFAULT 0,
+  orders     INT           NOT NULL DEFAULT 0,
+  gmv        DECIMAL(18,2) NOT NULL DEFAULT 0,            -- 毛 GMV（人民币）
+  refund     DECIMAL(18,2) NOT NULL DEFAULT 0,
+  net_gmv    DECIMAL(18,2) NOT NULL DEFAULT 0,
+  ad_spend   DECIMAL(18,2) NOT NULL DEFAULT 0,
+  source     VARCHAR(10)   NOT NULL DEFAULT 'fact',      -- fact/import/mock
+  created_by BIGINT UNSIGNED,
+  created_at DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  is_deleted TINYINT       NOT NULL DEFAULT 0,
+  UNIQUE KEY ux_ascd (stat_date, shop_id, channel, is_deleted),
+  CONSTRAINT fk_ascd_shop FOREIGN KEY (shop_id) REFERENCES tk_shop(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='V2 分析宽表：店铺x渠道x日';
+
+CREATE TABLE IF NOT EXISTS analytics_product_channel_daily (
+  id         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  stat_date  DATE          NOT NULL,
+  shop_id    BIGINT UNSIGNED NOT NULL,
+  spu_id     BIGINT UNSIGNED NOT NULL,
+  channel    VARCHAR(20)   NOT NULL,
+  impression INT           NOT NULL DEFAULT 0,
+  click      INT           NOT NULL DEFAULT 0,
+  add_cart   INT           NOT NULL DEFAULT 0,
+  orders     INT           NOT NULL DEFAULT 0,
+  gmv        DECIMAL(18,2) NOT NULL DEFAULT 0,
+  refund     DECIMAL(18,2) NOT NULL DEFAULT 0,
+  net_gmv    DECIMAL(18,2) NOT NULL DEFAULT 0,
+  source     VARCHAR(10)   NOT NULL DEFAULT 'fact',
+  created_by BIGINT UNSIGNED,
+  created_at DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  is_deleted TINYINT       NOT NULL DEFAULT 0,
+  UNIQUE KEY ux_apcd (stat_date, spu_id, channel, is_deleted),
+  CONSTRAINT fk_apcd_shop FOREIGN KEY (shop_id) REFERENCES tk_shop(id),
+  CONSTRAINT fk_apcd_spu FOREIGN KEY (spu_id) REFERENCES product_spu(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='V2 分析宽表：商品x渠道x日（ABC/漂移/漏斗）';
+
+CREATE TABLE IF NOT EXISTS analytics_creator_daily (
+  id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  stat_date   DATE          NOT NULL,
+  creator_id  BIGINT UNSIGNED NOT NULL,
+  shop_id     BIGINT UNSIGNED,
+  orders      INT           NOT NULL DEFAULT 0,
+  gmv         DECIMAL(18,2) NOT NULL DEFAULT 0,
+  refund      DECIMAL(18,2) NOT NULL DEFAULT 0,
+  net_gmv     DECIMAL(18,2) NOT NULL DEFAULT 0,
+  sample_cost DECIMAL(18,2) NOT NULL DEFAULT 0,
+  commission  DECIMAL(18,2) NOT NULL DEFAULT 0,
+  source      VARCHAR(10)   NOT NULL DEFAULT 'fact',
+  created_by  BIGINT UNSIGNED,
+  created_at  DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at  DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  is_deleted  TINYINT       NOT NULL DEFAULT 0,
+  UNIQUE KEY ux_acd (stat_date, creator_id, is_deleted),
+  CONSTRAINT fk_acd_creator FOREIGN KEY (creator_id) REFERENCES creator(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='V2 分析宽表：达人x日（效率与趋势）';
+
+CREATE TABLE IF NOT EXISTS analytics_video_daily (
+  id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  stat_date     DATE          NOT NULL,
+  video_id      BIGINT UNSIGNED NOT NULL,
+  views         INT           NOT NULL DEFAULT 0,
+  product_click INT           NOT NULL DEFAULT 0,
+  orders        INT           NOT NULL DEFAULT 0,
+  gmv           DECIMAL(18,2) NOT NULL DEFAULT 0,
+  refund        DECIMAL(18,2) NOT NULL DEFAULT 0,
+  net_gmv       DECIMAL(18,2) NOT NULL DEFAULT 0,
+  ad_spend      DECIMAL(18,2) NOT NULL DEFAULT 0,
+  source        VARCHAR(10)   NOT NULL DEFAULT 'fact',
+  created_by    BIGINT UNSIGNED,
+  created_at    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  is_deleted    TINYINT       NOT NULL DEFAULT 0,
+  UNIQUE KEY ux_avd (stat_date, video_id, is_deleted),
+  CONSTRAINT fk_avd_video FOREIGN KEY (video_id) REFERENCES video(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='V2 分析宽表：视频x日（生命周期/衰减）';
+
+CREATE TABLE IF NOT EXISTS analytics_live_minute (
+  id                 BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  live_session_id    BIGINT UNSIGNED NOT NULL,
+  minute_ts          DATETIME      NOT NULL,
+  online_users       INT           NOT NULL DEFAULT 0,
+  product_click      INT           NOT NULL DEFAULT 0,
+  orders             INT           NOT NULL DEFAULT 0,
+  gmv                DECIMAL(18,2) NOT NULL DEFAULT 0,
+  paid_traffic_ratio DECIMAL(5,4)  NOT NULL DEFAULT 0,
+  source             VARCHAR(10)   NOT NULL DEFAULT 'import',
+  created_by         BIGINT UNSIGNED,
+  created_at         DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at         DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  is_deleted         TINYINT       NOT NULL DEFAULT 0,
+  UNIQUE KEY ux_alm (live_session_id, minute_ts, is_deleted),
+  CONSTRAINT fk_alm_live FOREIGN KEY (live_session_id) REFERENCES live_session(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='V2 分析宽表：直播分钟曲线（接口不覆盖时导入）';
+
+CREATE TABLE IF NOT EXISTS alert_rule (
+  id             BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  rule_code      VARCHAR(50)   NOT NULL,
+  rule_name      VARCHAR(100)  NOT NULL,
+  target_type    VARCHAR(20)   NOT NULL,                  -- product/creator/video/live/sample/shop/ads
+  scope_json     JSON          NOT NULL,
+  metric         VARCHAR(50)   NOT NULL,
+  operator       VARCHAR(4)    NOT NULL DEFAULT '>',
+  threshold      DECIMAL(18,4) NOT NULL DEFAULT 0,
+  window_days    INT           NOT NULL DEFAULT 7,
+  priority       TINYINT       NOT NULL DEFAULT 1,        -- 0=P0 1=P1 2=P2
+  cooldown_hours INT           NOT NULL DEFAULT 24,
+  version        INT           NOT NULL DEFAULT 1,
+  status         TINYINT       NOT NULL DEFAULT 1,
+  params_json    JSON          NOT NULL,
+  remark         VARCHAR(255),
+  created_by     BIGINT UNSIGNED,
+  created_at     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  is_deleted     TINYINT       NOT NULL DEFAULT 0,
+  UNIQUE KEY ux_rule_code (rule_code, is_deleted)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='V2 预警规则定义（阈值全配置化，附录 B 为默认值）';
+
+CREATE TABLE IF NOT EXISTS alert_event (
+  id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  rule_id       BIGINT UNSIGNED NOT NULL,
+  target_type   VARCHAR(20)   NOT NULL,
+  target_id     BIGINT UNSIGNED,
+  target_name   VARCHAR(200),
+  shop_id       BIGINT UNSIGNED,
+  detected_at   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  evidence_json JSON          NOT NULL,
+  priority      TINYINT       NOT NULL DEFAULT 1,
+  status        TINYINT       NOT NULL DEFAULT 0,         -- 0待处理 1处理中 2已处理 3已忽略
+  owner_id      BIGINT UNSIGNED,
+  due_at        DATETIME,
+  created_by    BIGINT UNSIGNED,
+  created_at    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  is_deleted    TINYINT       NOT NULL DEFAULT 0,
+  KEY ix_event_rule_target (rule_id, target_type, target_id, detected_at),
+  KEY ix_event_status (status, priority, detected_at),
+  CONSTRAINT fk_event_rule FOREIGN KEY (rule_id) REFERENCES alert_rule(id),
+  CONSTRAINT fk_event_owner FOREIGN KEY (owner_id) REFERENCES sys_user(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='V2 预警事件（一次具体预警，不覆盖历史）';
+
+CREATE TABLE IF NOT EXISTS operation_action (
+  id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  alert_event_id  BIGINT UNSIGNED NOT NULL,
+  handler_id      BIGINT UNSIGNED NOT NULL,
+  action_type     VARCHAR(20)   NOT NULL,                 -- handle/ignore/transfer/note
+  action_at       DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  note            VARCHAR(500),
+  expected_result VARCHAR(500),
+  observe_until   DATETIME,
+  created_by      BIGINT UNSIGNED,
+  created_at      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  is_deleted      TINYINT       NOT NULL DEFAULT 0,
+  KEY ix_action_event (alert_event_id),
+  CONSTRAINT fk_action_event FOREIGN KEY (alert_event_id) REFERENCES alert_event(id),
+  CONSTRAINT fk_action_handler FOREIGN KEY (handler_id) REFERENCES sys_user(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='V2 运营处理动作（人/类型/时间/备注/预期）';
+
+CREATE TABLE IF NOT EXISTS action_result (
+  id               BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  action_id        BIGINT UNSIGNED NOT NULL,
+  evaluated_at     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  before_json      JSON          NOT NULL,
+  after_json       JSON          NOT NULL,
+  result           VARCHAR(20)   NOT NULL DEFAULT 'pending', -- improved/unchanged/worse/pending
+  improvement_rate DECIMAL(8,4),
+  note             VARCHAR(500),
+  created_by       BIGINT UNSIGNED,
+  created_at       DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at       DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  is_deleted       TINYINT       NOT NULL DEFAULT 0,
+  UNIQUE KEY ux_result_action (action_id, is_deleted),
+  CONSTRAINT fk_result_action FOREIGN KEY (action_id) REFERENCES operation_action(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='V2 动作效果回看（观察期后对比前后指标）';

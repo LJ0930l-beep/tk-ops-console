@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { DEFAULT_ROLES, buildCollabNo, round2, statDate, REGION_TZ_OFFSET } from '@tk/shared';
+import { seedV2DemoData } from './seedV2.js';
 import { hashPassword } from '../core/auth.js';
 import { insert, run, get, all } from '../core/db.js';
 import { migrate } from './migrate.js';
@@ -682,6 +683,9 @@ export function seedDemoData(opts: { reset?: boolean } = {}): void {
     error_msg: 'auth expired: shop token invalid (sub_code=105001)',
     started_at: iso(daysAgo(1, 2)), finished_at: iso(daysAgo(1, 2, 1)),
   });
+
+  // V2.0：分析宽表重建 + 演示流量回填 + 默认规则 + 首轮预警事件
+  seedV2DemoData();
 
   return undefined as unknown as void;
 }

@@ -433,3 +433,176 @@ export interface ProfitRow {
   is_estimated: 0 | 1;
   orders: number;
 }
+
+/* ==================== V2.0 分析宽表与预警动作闭环（§15.2/§15.3） ==================== */
+
+export const CHANNELS = ['product_card', 'live', 'video', 'affiliate', 'ads', 'organic'] as const;
+export type Channel = (typeof CHANNELS)[number];
+export const CHANNEL_LABELS: Record<Channel, string> = {
+  product_card: '商品卡',
+  live: '直播',
+  video: '短视频',
+  affiliate: '联盟',
+  ads: '付费广告',
+  organic: '自然流量',
+};
+
+/** content_type(1达人视频 2达人直播 3自营视频 4自营直播 5商品卡) → 分析渠道；空值按有无达人归联盟/自然 */
+export function channelOfContentType(contentType: number | null, creatorId?: number | null): Channel {
+  if (contentType === 1 || contentType === 3) return 'video';
+  if (contentType === 2 || contentType === 4) return 'live';
+  if (contentType === 5) return 'product_card';
+  return creatorId ? 'affiliate' : 'organic';
+}
+
+export interface ShopChannelDaily {
+  stat_date: string;
+  shop_id: number;
+  channel: Channel;
+  visitors: number;
+  orders: number;
+  gmv: number;
+  refund: number;
+  net_gmv: number;
+  ad_spend: number;
+  source: string;
+}
+
+export interface ProductChannelDaily {
+  stat_date: string;
+  shop_id: number;
+  spu_id: number;
+  channel: Channel;
+  impression: number;
+  click: number;
+  add_cart: number;
+  orders: number;
+  gmv: number;
+  refund: number;
+  net_gmv: number;
+  source: string;
+}
+
+export interface CreatorDaily {
+  stat_date: string;
+  creator_id: number;
+  shop_id: number | null;
+  orders: number;
+  gmv: number;
+  refund: number;
+  net_gmv: number;
+  sample_cost: number;
+  commission: number;
+  source: string;
+}
+
+export interface VideoDaily {
+  stat_date: string;
+  video_id: number;
+  views: number;
+  product_click: number;
+  orders: number;
+  gmv: number;
+  refund: number;
+  net_gmv: number;
+  ad_spend: number;
+  source: string;
+}
+
+export interface LiveMinute {
+  live_session_id: number;
+  minute_ts: string;
+  online_users: number;
+  product_click: number;
+  orders: number;
+  gmv: number;
+  paid_traffic_ratio: number;
+  source: string;
+}
+
+export type AlertTargetType = 'product' | 'creator' | 'video' | 'live' | 'sample' | 'shop' | 'ads';
+export type AlertOperator = '>' | '>=' | '<' | '<=' | '==';
+
+export interface AlertRule {
+  id: number;
+  rule_code: string;
+  rule_name: string;
+  target_type: AlertTargetType;
+  scope_json: string;
+  metric: string;
+  operator: AlertOperator;
+  threshold: number;
+  window_days: number;
+  priority: 0 | 1 | 2;
+  cooldown_hours: number;
+  version: number;
+  status: 0 | 1;
+  params_json: string;
+  remark: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AlertEvent {
+  id: number;
+  rule_id: number;
+  rule_code?: string;
+  rule_name?: string;
+  target_type: AlertTargetType;
+  target_id: number | null;
+  target_name: string | null;
+  shop_id: number | null;
+  detected_at: string;
+  evidence_json: string;
+  priority: 0 | 1 | 2;
+  status: 0 | 1 | 2 | 3;
+  owner_id: number | null;
+  owner_name?: string;
+  due_at: string | null;
+  actions?: OperationAction[];
+}
+
+export interface OperationAction {
+  id: number;
+  alert_event_id: number;
+  handler_id: number;
+  handler_name?: string;
+  action_type: 'handle' | 'ignore' | 'transfer' | 'note';
+  action_at: string;
+  note: string | null;
+  expected_result: string | null;
+  observe_until: string | null;
+  result?: ActionResult;
+}
+
+export interface ActionResult {
+  id: number;
+  action_id: number;
+  evaluated_at: string;
+  before_json: string;
+  after_json: string;
+  result: 'improved' | 'unchanged' | 'worse' | 'pending';
+  improvement_rate: number | null;
+  note: string | null;
+}
+
+export const ALERT_PRIORITY_LABELS: Record<number, string> = { 0: 'P0 今日必处理', 1: 'P1 本周观察', 2: 'P2 趋势参考' };
+export const ALERT_EVENT_STATUS_LABELS: Record<number, string> = { 0: '待处理', 1: '处理中', 2: '已处理', 3: '已忽略' };
+export const ACTION_TYPE_LABELS: Record<string, string> = { handle: '处理', ignore: '忽略', transfer: '转派', note: '备注' };
+
+/** 附录 B 默认规则（seed 落入 alert_rule；所有阈值必须在规则中心可改，不得写死） */
+export const DEFAULT_ALERT_RULES: Omit<AlertRule, 'id' | 'created_at' | 'updated_at'>[] = [
+  { rule_code: 'CHANNEL_DEPENDENCY', rule_name: '单渠道依赖红灯', target_type: 'product', scope_json: '{}', metric: 'max_channel_share', operator: '>', threshold: 0.8, window_days: 7, priority: 0, cooldown_hours: 24, version: 1, status: 1, params_json: '{"rising":true}', remark: '最大渠道占比>80%且持续上升；站点/类目/店铺可配' },
+  { rule_code: 'CHANNEL_MIGRATION', rule_name: '渠道迁移', target_type: 'product', scope_json: '{}', metric: 'channel_share_delta', operator: '>', threshold: 0.15, window_days: 7, priority: 1, cooldown_hours: 48, version: 1, status: 1, params_json: '{}', remark: '渠道占比周环比变化绝对值>15pct' },
+  { rule_code: 'SAMPLE_SILENT', rule_name: '样品签收未发布', target_type: 'sample', scope_json: '{}', metric: 'days_since_sign', operator: '>', threshold: 14, window_days: 14, priority: 0, cooldown_hours: 24, version: 1, status: 1, params_json: '{}', remark: '签收后>14天未发布；类目/合作类型可配' },
+  { rule_code: 'CREATOR_REFUND', rule_name: '达人退货异常', target_type: 'creator', scope_json: '{}', metric: 'refund_rate_over_baseline', operator: '>', threshold: 0.05, window_days: 30, priority: 1, cooldown_hours: 72, version: 1, status: 1, params_json: '{}', remark: '退货率>类目基准+5pct，生成暂停寄样建议' },
+  { rule_code: 'CREATOR_DECLINE', rule_name: '达人净GMV下滑', target_type: 'creator', scope_json: '{}', metric: 'weekly_net_gmv_decline_weeks', operator: '>=', threshold: 2, window_days: 28, priority: 1, cooldown_hours: 168, version: 1, status: 1, params_json: '{}', remark: '净GMV连续2周下降' },
+  { rule_code: 'NEW_PRODUCT_CHECK_1', rule_name: '新品首次检测', target_type: 'product', scope_json: '{}', metric: 'hours_since_launch', operator: '>=', threshold: 48, window_days: 3, priority: 2, cooldown_hours: 24, version: 1, status: 1, params_json: '{"until_hours":72}', remark: '上架48-72h形成冷启健康度，不直接判死刑' },
+  { rule_code: 'NEW_PRODUCT_FAIL', rule_name: '冷启失败候选', target_type: 'product', scope_json: '{}', metric: 'day7_valid_interaction', operator: '<', threshold: 1, window_days: 7, priority: 0, cooldown_hours: 48, version: 1, status: 1, params_json: '{}', remark: '第7天仍无有效互动/订单/内容承接' },
+  { rule_code: 'NEW_PRODUCT_END', rule_name: '新品期结束', target_type: 'product', scope_json: '{}', metric: 'days_since_launch', operator: '>=', threshold: 14, window_days: 14, priority: 2, cooldown_hours: 336, version: 1, status: 1, params_json: '{}', remark: '第14天移出新品池，进入常规ABC分层' },
+  { rule_code: 'VIDEO_DECAY', rule_name: '视频衰减', target_type: 'video', scope_json: '{}', metric: 'ma3_over_peak7', operator: '<', threshold: 0.5, window_days: 7, priority: 1, cooldown_hours: 72, version: 1, status: 1, params_json: '{"consecutive":2}', remark: '连续2周期3日均值<近7日峰值50%且方向一致' },
+  { rule_code: 'ADS_LOSS', rule_name: '广告低于盈亏线', target_type: 'ads', scope_json: '{}', metric: 'roas_vs_breakeven', operator: '<', threshold: 1, window_days: 7, priority: 0, cooldown_hours: 24, version: 1, status: 1, params_json: '{}', remark: 'ROAS<Break-even ROAS（1/广告前贡献毛利率）' },
+];
+
+/** ABC 分层默认阈值（§6.1；必须在规则中心可配置） */
+export const ABC_DEFAULTS = { a_cum_share: 0.8, b_cum_share: 0.95 };

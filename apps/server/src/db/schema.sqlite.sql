@@ -534,3 +534,182 @@ CREATE TABLE IF NOT EXISTS stock_ledger (
   is_deleted   INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_stock_wh_sku ON stock_ledger(warehouse_id, sku_id, op_time);
+
+-- ============================================================
+-- V2.0 增补（2026-09-19《TikTok Shop 多端口运营决策后台 V2.0》§15.2/§15.3）
+-- 第二层：分析宽表（可由事实表聚合或导入回填，source 标注来源，均可追溯）
+-- 第三层：预警与动作闭环表
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS analytics_shop_channel_daily (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  stat_date   TEXT    NOT NULL,                         -- 报表自然日（站点切日口径与利润引擎一致）
+  shop_id     INTEGER NOT NULL REFERENCES tk_shop(id),
+  channel     TEXT    NOT NULL,                         -- product_card/live/video/affiliate/ads/organic
+  visitors    INTEGER NOT NULL DEFAULT 0,
+  orders      INTEGER NOT NULL DEFAULT 0,
+  gmv         REAL    NOT NULL DEFAULT 0,               -- 毛 GMV（人民币）
+  refund      REAL    NOT NULL DEFAULT 0,
+  net_gmv     REAL    NOT NULL DEFAULT 0,               -- 净 GMV = gmv - refund
+  ad_spend    REAL    NOT NULL DEFAULT 0,
+  source      TEXT    NOT NULL DEFAULT 'fact',          -- fact=事实表聚合 import=导入 mock=演示
+  created_by  INTEGER,
+  created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+  updated_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+  is_deleted  INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_ascd ON analytics_shop_channel_daily(stat_date, shop_id, channel) WHERE is_deleted = 0;
+
+CREATE TABLE IF NOT EXISTS analytics_product_channel_daily (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  stat_date   TEXT    NOT NULL,
+  shop_id     INTEGER NOT NULL REFERENCES tk_shop(id),
+  spu_id      INTEGER NOT NULL REFERENCES product_spu(id),
+  channel     TEXT    NOT NULL,
+  impression  INTEGER NOT NULL DEFAULT 0,
+  click       INTEGER NOT NULL DEFAULT 0,
+  add_cart    INTEGER NOT NULL DEFAULT 0,
+  orders      INTEGER NOT NULL DEFAULT 0,
+  gmv         REAL    NOT NULL DEFAULT 0,
+  refund      REAL    NOT NULL DEFAULT 0,
+  net_gmv     REAL    NOT NULL DEFAULT 0,
+  source      TEXT    NOT NULL DEFAULT 'fact',
+  created_by  INTEGER,
+  created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+  updated_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+  is_deleted  INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_apcd ON analytics_product_channel_daily(stat_date, spu_id, channel) WHERE is_deleted = 0;
+
+CREATE TABLE IF NOT EXISTS analytics_creator_daily (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  stat_date    TEXT    NOT NULL,
+  creator_id   INTEGER NOT NULL REFERENCES creator(id),
+  shop_id      INTEGER REFERENCES tk_shop(id),
+  orders       INTEGER NOT NULL DEFAULT 0,
+  gmv          REAL    NOT NULL DEFAULT 0,
+  refund       REAL    NOT NULL DEFAULT 0,
+  net_gmv      REAL    NOT NULL DEFAULT 0,
+  sample_cost  REAL    NOT NULL DEFAULT 0,              -- 当日寄样成本（采购+运费，人民币）
+  commission   REAL    NOT NULL DEFAULT 0,
+  source       TEXT    NOT NULL DEFAULT 'fact',
+  created_by   INTEGER,
+  created_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+  updated_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+  is_deleted   INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_acd ON analytics_creator_daily(stat_date, creator_id) WHERE is_deleted = 0;
+
+CREATE TABLE IF NOT EXISTS analytics_video_daily (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  stat_date     TEXT    NOT NULL,
+  video_id      INTEGER NOT NULL REFERENCES video(id),
+  views         INTEGER NOT NULL DEFAULT 0,
+  product_click INTEGER NOT NULL DEFAULT 0,
+  orders        INTEGER NOT NULL DEFAULT 0,
+  gmv           REAL    NOT NULL DEFAULT 0,
+  refund        REAL    NOT NULL DEFAULT 0,
+  net_gmv       REAL    NOT NULL DEFAULT 0,
+  ad_spend      REAL    NOT NULL DEFAULT 0,
+  source        TEXT    NOT NULL DEFAULT 'fact',
+  created_by    INTEGER,
+  created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+  updated_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+  is_deleted    INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_avd ON analytics_video_daily(stat_date, video_id) WHERE is_deleted = 0;
+
+CREATE TABLE IF NOT EXISTS analytics_live_minute (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  live_session_id    INTEGER NOT NULL REFERENCES live_session(id),
+  minute_ts          TEXT    NOT NULL,                  -- UTC 分钟时刻
+  online_users       INTEGER NOT NULL DEFAULT 0,
+  product_click      INTEGER NOT NULL DEFAULT 0,
+  orders             INTEGER NOT NULL DEFAULT 0,
+  gmv                REAL    NOT NULL DEFAULT 0,
+  paid_traffic_ratio REAL    NOT NULL DEFAULT 0,        -- 0~1
+  source             TEXT    NOT NULL DEFAULT 'import',
+  created_by         INTEGER,
+  created_at         TEXT    NOT NULL DEFAULT (datetime('now')),
+  updated_at         TEXT    NOT NULL DEFAULT (datetime('now')),
+  is_deleted         INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_alm ON analytics_live_minute(live_session_id, minute_ts) WHERE is_deleted = 0;
+
+-- ---------- V2.0 第三层：预警与动作闭环 ----------
+
+CREATE TABLE IF NOT EXISTS alert_rule (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  rule_code      TEXT    NOT NULL,                      -- CHANNEL_DEPENDENCY 等（附录 B）
+  rule_name      TEXT    NOT NULL,
+  target_type    TEXT    NOT NULL,                      -- product/creator/video/live/sample/shop/ads
+  scope_json     TEXT    NOT NULL DEFAULT '{}',         -- 适用站点/类目/店铺过滤
+  metric         TEXT    NOT NULL,                      -- 评估指标名
+  operator       TEXT    NOT NULL DEFAULT '>',          -- > >= < <= ==
+  threshold      REAL    NOT NULL DEFAULT 0,
+  window_days    INTEGER NOT NULL DEFAULT 7,            -- 观察窗口
+  priority       INTEGER NOT NULL DEFAULT 1,            -- 0=P0 1=P1 2=P2
+  cooldown_hours INTEGER NOT NULL DEFAULT 24,           -- 同规则同对象冷却
+  version        INTEGER NOT NULL DEFAULT 1,
+  status         INTEGER NOT NULL DEFAULT 1,            -- 1启用 0停用
+  params_json    TEXT    NOT NULL DEFAULT '{}',         -- 规则私有参数（连续周数、峰值比例等）
+  remark         TEXT,
+  created_by     INTEGER,
+  created_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+  updated_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+  is_deleted     INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_rule_code ON alert_rule(rule_code) WHERE is_deleted = 0;
+
+CREATE TABLE IF NOT EXISTS alert_event (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  rule_id       INTEGER NOT NULL REFERENCES alert_rule(id),
+  target_type   TEXT    NOT NULL,
+  target_id     INTEGER,
+  target_name   TEXT,
+  shop_id       INTEGER REFERENCES tk_shop(id),
+  detected_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+  evidence_json TEXT    NOT NULL DEFAULT '{}',          -- 命中证据快照
+  priority      INTEGER NOT NULL DEFAULT 1,
+  status        INTEGER NOT NULL DEFAULT 0,             -- 0待处理 1处理中 2已处理 3已忽略
+  owner_id      INTEGER REFERENCES sys_user(id),
+  due_at        TEXT,
+  created_by    INTEGER,
+  created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+  updated_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+  is_deleted    INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS ix_event_rule_target ON alert_event(rule_id, target_type, target_id, detected_at);
+CREATE INDEX IF NOT EXISTS ix_event_status ON alert_event(status, priority, detected_at);
+
+CREATE TABLE IF NOT EXISTS operation_action (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  alert_event_id  INTEGER NOT NULL REFERENCES alert_event(id),
+  handler_id      INTEGER NOT NULL REFERENCES sys_user(id),
+  action_type     TEXT    NOT NULL,                     -- handle/ignore/transfer/note
+  action_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+  note            TEXT,
+  expected_result TEXT,
+  observe_until   TEXT,                                 -- 观察期截止，到期生成效果回看
+  created_by      INTEGER,
+  created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+  updated_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+  is_deleted      INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS ix_action_event ON operation_action(alert_event_id);
+
+CREATE TABLE IF NOT EXISTS action_result (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  action_id        INTEGER NOT NULL REFERENCES operation_action(id),
+  evaluated_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+  before_json      TEXT    NOT NULL DEFAULT '{}',
+  after_json       TEXT    NOT NULL DEFAULT '{}',
+  result           TEXT    NOT NULL DEFAULT 'pending',  -- improved/unchanged/worse/pending
+  improvement_rate REAL,
+  note             TEXT,
+  created_by       INTEGER,
+  created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+  updated_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+  is_deleted       INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_result_action ON action_result(action_id) WHERE is_deleted = 0;

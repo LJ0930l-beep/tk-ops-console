@@ -76,12 +76,12 @@
 
     <el-dialog v-model="runVisible" title="立即重跑同步任务" width="560px">
       <el-alert type="info" :closable="false" show-icon style="margin-bottom: 12px">
-        <template #default>提交 <code>POST /api/sync/run</code>，按时间窗口增量补跑（窗口会自动与既有重叠窗口对齐）；结果写入一条 sync_log。</template>
+        <template #default>提交 <code>POST /api/sync/run</code>，按时间窗口增量补跑（窗口会自动与既有重叠窗口对齐）；结果写入一条 sync_log。不填窗口＝接上次 <code>window_end</code> 继续，首次默认最近 24 小时；要重算历史区间必须显式填窗口。</template>
       </el-alert>
       <el-form :model="runForm" label-width="110px">
         <el-form-item label="任务类型" required>
           <el-select v-model="runForm.task_type" filterable style="width: 100%">
-            <el-option v-for="o in TASK_OPTIONS" :key="String(o.value)" :label="o.label" :value="String(o.value)" />
+            <el-option v-for="o in RUN_TASK_OPTIONS" :key="String(o.value)" :label="o.label" :value="String(o.value)" />
           </el-select>
         </el-form-item>
         <el-form-item label="店铺">
@@ -115,17 +115,32 @@ import ResourcePage, { type ColumnDef, type OptionDef, type SearchDef } from '@/
 const dict = useDictStore();
 const rp = ref();
 
-const TASK_OPTIONS: OptionDef[] = [
-  { value: 'order', label: 'order 订单' },
-  { value: 'product', label: 'product 商品' },
-  { value: 'listing', label: 'listing 商品映射预匹配' },
-  { value: 'returns', label: 'returns 售后退款' },
-  { value: 'settlement', label: 'settlement 结算流水' },
-  { value: 'affiliate_order', label: 'affiliate_order 联盟归因' },
-  { value: 'ad', label: 'ad 广告日报' },
-  { value: 'video', label: 'video 视频数据' },
-  { value: 'live', label: 'live 直播数据' },
-];
+/** sync_log.task_type 的展示名：日志里会出现定时任务/导入写入的历史类型，展示要全 */
+const TASK_LABELS: Record<string, string> = {
+  order: 'order 订单',
+  listing: 'listing 店铺商品',
+  product: 'product 平台商品',
+  returns: 'returns 售后退款',
+  affiliate: 'affiliate 联盟归因回填',
+  affiliate_order: 'affiliate_order 联盟订单',
+  aggregate: 'aggregate 派生汇总刷新',
+  all: 'all 一键全量补跑',
+  settlement: 'settlement 结算流水',
+  ad: 'ad 广告日报',
+  video: 'video 视频数据',
+  live: 'live 直播数据',
+};
+/** 筛选下拉：日志里可能出现的都列上 */
+const TASK_OPTIONS: OptionDef[] = Object.entries(TASK_LABELS).map(([value, label]) => ({ value, label }));
+/**
+ * 「立即重跑」可提交的类型必须与后端 sync.routes.ts 的 TASK_TYPES 逐字一致：
+ * 多一项就是 400 Invalid enum value（结算/广告/视频/直播各有自己的入口，不走 /sync/run），
+ * 少一项则界面上根本点不到宽表刷新与一键全量补跑。
+ */
+const RUN_TASK_OPTIONS: OptionDef[] = ['order', 'listing', 'product', 'returns', 'affiliate_order', 'aggregate', 'all'].map((v) => ({
+  value: v,
+  label: TASK_LABELS[v],
+}));
 const STATUS_OPTIONS: OptionDef[] = [
   { value: 1, label: '成功', type: 'success' },
   { value: 2, label: '部分失败', type: 'warning' },
@@ -139,7 +154,7 @@ onMounted(async () => {
   await loadHealth();
 });
 
-const taskLabel = (v: unknown) => String(TASK_OPTIONS.find((o) => o.value === String(v))?.label ?? v ?? '—');
+const taskLabel = (v: unknown) => TASK_LABELS[String(v ?? '')] ?? String(v ?? '—');
 const statusLabel = (v: unknown) => String(STATUS_OPTIONS.find((o) => Number(o.value) === Number(v))?.label ?? v ?? '—');
 const statusTag = (v: unknown) => STATUS_OPTIONS.find((o) => Number(o.value) === Number(v))?.type ?? 'info';
 const num = (v: unknown) => Number(v ?? 0);
@@ -247,13 +262,23 @@ async function doRun() {
   if (!runForm.task_type) return ElMessage.warning('请选择任务类型');
   running.value = true;
   try {
-    const res = await apiPost<Record<string, unknown>>('/sync/run', {
-      task_type: runForm.task_type,
-      shop_id: runForm.shop_id,
-      window_start: runForm.window_start,
-      window_end: runForm.window_end,
-    });
-    ElMessage.success(`已执行：拉取 ${num(res?.fetched)} 条，新增 ${num(res?.inserted)}，更新 ${num(res?.updated)}，失败 ${num(res?.failed)}`);
+    const res = await apiPost<{ task_type?: string; shop_ids?: number[]; runs?: { window_start?: string; window_end?: string }[]; summary?: Record<string, number> }>(
+      '/sync/run',
+      {
+        task_type: runForm.task_type,
+        shop_id: runForm.shop_id,
+        window_start: runForm.window_start,
+        window_end: runForm.window_end,
+      },
+    );
+    // 计数在 summary 里，窗口在 runs 里：不填窗口时后端只算增量（接上次窗口，首次＝最近 24 小时），
+    // 不把实际窗口回显出来，用户会把「窗口没覆盖到数据」误读成「重算成功但没数据」。
+    const s = res?.summary ?? {};
+    const w = res?.runs?.[0];
+    const win = w?.window_start && w?.window_end ? `，窗口 ${String(w.window_start).slice(0, 16)} ~ ${String(w.window_end).slice(0, 16)}` : '';
+    ElMessage.success(
+      `已执行 ${String(res?.task_type ?? runForm.task_type)}（${res?.shop_ids?.length ?? 0} 家店${win}）：拉取 ${num(s.fetched)} 条，新增 ${num(s.inserted)}，更新 ${num(s.updated)}，失败 ${num(s.failed)}`,
+    );
     runVisible.value = false;
     rp.value?.reload(1);
     await loadHealth();

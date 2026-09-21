@@ -7,9 +7,11 @@
  * 断言「无 404（路由没挂）、无 500（SQL/口径炸了）」，403 属于正常的越权拦截。
  */
 import { describe, it, expect, beforeAll } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 // @ts-expect-error 纯 JS 脚本，无类型声明
 import { collectRoutes } from '../../../scripts/route-inventory.mjs';
+import { SYNC_TASK_TYPES } from '../src/modules/sync.routes.js';
 import { boot, login, auth, dataOf, pageOf, ACCOUNTS, type TestContext } from './helper.js';
 
 /** 仓库根：vitest 的 cwd 是 apps/server，扫源码要按本文件位置回推，别依赖 cwd */
@@ -74,6 +76,25 @@ describe('全部静态 GET 路由', () => {
         const res = await ctx.http.get(`${r.path}${r.path.includes('?') ? '&' : '?'}${q}`).set(auth(t));
         if (res.status >= 500) bad.push(`${role} ${r.path} → ${res.status}`);
       }
+    }
+    expect(bad).toEqual([]);
+  });
+});
+
+describe('同步任务下拉与后端 enum 的契约', () => {
+  it('前端每一项都能被 /sync/run 接受（曾因多出 settlement/ad/video/live 四项必然 400）', async () => {
+    const vue = readFileSync(`${ROOT}/apps/web/src/views/system/SyncLogList.vue`, 'utf8');
+    const block = vue.slice(vue.indexOf('const RUN_TASK_OPTIONS'), vue.indexOf('const STATUS_OPTIONS'));
+    const offered = [...block.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]).filter((v) => v !== 'value' && v !== 'label');
+    expect(offered.length).toBeGreaterThanOrEqual(7);
+    expect(offered.every((v) => (SYNC_TASK_TYPES as readonly string[]).includes(v))).toBe(true);
+    // 宽表刷新与一键全量补跑必须在界面上点得到
+    expect(offered).toContain('aggregate');
+    expect(offered).toContain('all');
+    const bad: string[] = [];
+    for (const t of offered) {
+      const res = await ctx.http.post('/api/sync/run').set(auth(token)).send({ task_type: t });
+      if (res.status !== 200) bad.push(`${t} → ${res.status}`);
     }
     expect(bad).toEqual([]);
   });

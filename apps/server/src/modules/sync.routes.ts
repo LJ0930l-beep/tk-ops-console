@@ -29,8 +29,10 @@ import {
 
 const MODULE = '数据同步';
 
-/** 对外开放的任务类型（'affiliate' / 'product' 是 PRD 6.1 的叫法，入库归一到 affiliate_order / listing） */
-const TASK_TYPES = ['order', 'listing', 'returns', 'affiliate', 'product', 'affiliate_order', 'aggregate', 'all'] as const;
+/** 对外开放的任务类型（'affiliate' / 'product' 是 PRD 6.1 的叫法，入库归一到 affiliate_order / listing）
+ *  导出给契约测试用：前端「立即重跑」下拉必须与这份清单逐字一致，多一项就是 400。 */
+export const SYNC_TASK_TYPES = ['order', 'listing', 'returns', 'affiliate', 'product', 'affiliate_order', 'aggregate', 'all'] as const;
+const TASK_TYPES = SYNC_TASK_TYPES;
 const TASK_LABEL: Record<string, string> = {
   order: '订单同步',
   listing: '店铺商品同步',

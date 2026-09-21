@@ -8,6 +8,7 @@
  * 用法：npm run smoke（退出码非 0 = 有 FAIL）
  */
 import { DatabaseSync } from 'node:sqlite';
+import { readFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { setDb } from '../apps/server/src/core/db.js';
 import { migrate } from '../apps/server/src/db/migrate.js';
@@ -268,6 +269,21 @@ if (!win.lo || !win.hi) {
   if (outOfRange.length) fails.push({ route: '/api/dashboard/trend', role: 'chain', status: 200, note: `${outOfRange.length} 个日期落在请求区间外` });
   chain.push(`  trend days=${rows.length}（${rows[0]?.date ?? '-'} ~ ${rows[rows.length - 1]?.date ?? '-'}）`);
   if (!rows.length) fails.push({ route: '/api/dashboard/trend', role: 'chain', status: 200, note: '订单区间内趋势为空' });
+}
+
+/* ---------- ⑤ 前端下拉/表单里写死的枚举，必须被后端接受（契约漂移探测器） ---------- */
+const vue = readFileSync(new URL('../apps/web/src/views/system/SyncLogList.vue', import.meta.url), 'utf8');
+const optsBlock = vue.slice(vue.indexOf('const RUN_TASK_OPTIONS'), vue.indexOf('const STATUS_OPTIONS'));
+const taskOptions = [...optsBlock.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]).filter((v) => v !== 'value' && v !== 'label');
+chain.push(`  前端同步任务下拉 ${taskOptions.length} 项：${taskOptions.join('/')}`);
+for (const t of taskOptions) {
+  const res = await call('POST', '/api/sync/run', tokens.boss, { task_type: t });
+  checks++;
+  if (res.status === 200) chain.push(`  ✓ task_type=${t} → 200`);
+  else {
+    chain.push(`  ✗ task_type=${t} → ${res.status} ${String((res.body as { message?: string })?.message ?? '').slice(0, 80)}`);
+    fails.push({ route: `POST /api/sync/run {task_type:${t}}`, role: 'chain', status: res.status, note: '前端下拉里有、后端 enum 不认' });
+  }
 }
 
 /* ---------- 输出 ---------- */

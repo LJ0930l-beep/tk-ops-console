@@ -19,6 +19,9 @@
       :action-width="150"
       dialog-width="720px"
     >
+      <template #toolbar="{ query }">
+        <ExportButton url="/products/export/sku" name="product-sku" :params="query" />
+      </template>
       <template #form-extra="{ form, editing }">
         <el-form-item v-if="canSeeCost" label="成本口径">
           <el-alert type="warning" :closable="false" show-icon :title="`单件成本 = 采购成本 + 头程成本 = ${unitCost(form)} CNY/件`">
@@ -42,6 +45,7 @@ import { apiGet, type Paged } from '@/api/client';
 import { useAuthStore } from '@/stores/auth';
 import { useDictStore } from '@/stores/dict';
 import ResourcePage, { type ColumnDef, type FormFieldDef, type OptionDef, type SearchDef } from '@/components/ResourcePage.vue';
+import ExportButton from '@/components/ExportButton.vue';
 
 const auth = useAuthStore();
 const dict = useDictStore();

@@ -17,6 +17,7 @@ import { badRequest, forbidden, notFound, ok, parseBody, paginate, qv, wrap } fr
 import { Q, queryPage } from '../core/query.js';
 import { canAccessShop, requireExport, requireMenu, shopScope, type AuthedRequest } from '../core/auth.js';
 import { writeOpLog } from '../core/oplog.js';
+import { exportFormat, sendTable } from '../core/export.js';
 import { AD_GROUP_DIMS, AD_TYPE_LABEL, adMetrics, resolveRange, type AdGroupDim } from '../services/profit.js';
 import { createRateConverter, rateDay, toCnySql } from '../services/rates.js';
 import { runAggregates } from '../services/aggregate.js';
@@ -424,7 +425,7 @@ adsRouter.get(
   '/export',
   requireMenu('ads'),
   requireExport,
-  wrap((req, res) => {
+  wrap(async (req, res) => {
     const user = current(req);
     const { q } = adQuery(req);
     const input = adRangeInput(req);
@@ -460,11 +461,9 @@ adsRouter.get(
         ];
       }),
     ];
-    const csv = lines.map((l) => l.map((v) => (/[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v))).join(',')).join('\r\n');
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="ad-daily-${range.start}_${range.end}.csv"`);
-    res.end(`\uFEFF${csv}`);
-    writeOpLog({ user_id: user.id, module: '投放中心', action: 'export', target_table: 'ad_daily', after: { rows: rows.length, range }, ip: req.ip });
+    const format = exportFormat(req);
+    await sendTable(res, { filename: `ad-daily-${range.start}_${range.end}`, headers: AD_HEADERS, rows: lines.slice(1) }, format);
+    writeOpLog({ user_id: user.id, module: '投放中心', action: 'export', target_table: 'ad_daily', after: { rows: rows.length, range, format }, ip: req.ip });
   }),
 );
 

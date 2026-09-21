@@ -27,6 +27,7 @@ import {
   type ProfitDim,
   type ReconcileRow,
 } from '../services/profit.js';
+import { exportFormat, sendTable } from '../core/export.js';
 import { createRateConverter, fetchPublicRates, getRate, InvalidRateRequestError, latestRates, listCurrencies, listRates, MAX_RATE_TO_CNY, PublicRateSourceError, RATE_SOURCE, rateDay, toCnySql, upsertRate, validIsoDay } from '../services/rates.js';
 
 const current = (req: Request): CurrentUser => (req as AuthedRequest).user;
@@ -38,17 +39,9 @@ function requireCost(req: Request, _res: Response, next: NextFunction): void {
   next();
 }
 
-/** CSV 导出：加 BOM 让 Excel 直接识别 UTF-8 */
-function sendCsv(res: Response, filename: string, headers: string[], rows: (string | number | null | undefined)[][]): void {
-  const esc = (v: string | number | null | undefined): string => {
-    const s = v === null || v === undefined ? '' : String(v);
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  };
-  const body = [headers, ...rows].map((r) => r.map(esc).join(',')).join('\r\n');
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-  res.end(`\uFEFF${body}`);
-}
+/** 导出统一走 core/export.ts：同一份表头/行数据，?format=csv|xlsx 决定格式（XLSX 是流式写，需 await） */
+const sendExport = (req: Request, res: Response, filename: string, headers: string[], rows: (string | number | null | undefined)[][]): Promise<void> =>
+  sendTable(res, { filename, headers, rows }, exportFormat(req));
 
 const shopFilter = (req: Request, col: string): { sql: string; params: number[] } => {
   const scope = shopScope(current(req), col);
@@ -456,7 +449,7 @@ financeRouter.get(
   requireMenu('finance'),
   requireCost,
   requireExport,
-  wrap((req, res) => {
+  wrap(async (req, res) => {
     const f = reconcileWindow(reconcileFilter(req));
     const result = reconcileByOrder(f);
     const list = f.orderNo ? result.list.filter((r) => r.tk_order_id === f.orderNo) : result.list;
@@ -468,7 +461,7 @@ financeRouter.get(
       after: { kind: 'settlement_reconcile', start: result.start, end: result.end, rows: list.length },
       ip: req.ip,
     });
-    sendCsv(res, `settlement-reconcile-${result.start}_${result.end}.csv`, RECONCILE_HEADERS, list.map(reconcileCsvRow));
+    await sendExport(req, res, `settlement-reconcile-${result.start}_${result.end}`, RECONCILE_HEADERS, list.map(reconcileCsvRow));
   }),
 );
 
@@ -1236,7 +1229,7 @@ financeRouter.get(
   requireMenu('finance'),
   requireCost,
   requireExport,
-  wrap((req, res) => {
+  wrap(async (req, res) => {
     const f = reportFilter(req);
     const rawDim = qv(req, 'dim') ?? 'shop';
     if (!(REPORT_DIMS as readonly string[]).includes(rawDim)) throw badRequest(`dim 只支持 ${REPORT_DIMS.join(' / ')}`);
@@ -1270,7 +1263,7 @@ financeRouter.get(
       r.unmapped_amount_cny,
       r.rate_missing ? 1 : 0,
     ]);
-    sendCsv(res, `profit-${dim}-${rep.start}_${rep.end}.csv`, PROFIT_HEADERS, rows);
+    await sendExport(req, res, `profit-${dim}-${rep.start}_${rep.end}`, PROFIT_HEADERS, rows);
   }),
 );
 

@@ -30,7 +30,7 @@
       <div style="display: flex; justify-content: space-between; margin-bottom: 4px">
         <slot name="toolbar-extra" />
         <div>
-          <slot name="toolbar" :reload="() => reload()" />
+          <slot name="toolbar" :reload="() => reload()" :query="query" />
           <el-button v-if="createable && canWrite" type="primary" :icon="Plus" @click="openCreate">新增</el-button>
         </div>
       </div>

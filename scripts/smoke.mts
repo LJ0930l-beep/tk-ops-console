@@ -238,23 +238,31 @@ if (String(before) === String(sample('SELECT COUNT(*) AS v FROM creator WHERE is
   warns.push({ route: 'POST /api/system/import', role: 'chain', status: 200, note: '达人数未变化（可能命中 upsert 更新）' });
 }
 
-/* 导出：CSV 必须是 200 + 非空 + 带下载头 */
+/* 导出：CSV 必须 200 + BOM；XLSX 必须 200 + PK 魔数（真的能打开的 Excel，不是 200 就算过） */
 const exportPaths = [
   '/api/products/export/sku',
   '/api/orders/export',
   '/api/ads/export',
   '/api/finance/profit/export',
   '/api/finance/settlement/reconcile/export',
-  '/api/system/import/template?table=creator',
 ];
 for (const p of exportPaths) {
-  const res = await call('GET', `${p}${p.includes('?') ? '&' : '?'}${DEFAULT_QUERY}`, tokens.boss);
-  checks++;
-  const tag = res.status === 200 && res.text.length > 0 ? '✓' : '✗';
-  chain.push(`${tag} 导出 ${p} → ${res.status} ${res.text.length}B`);
-  if (res.status !== 200) fails.push({ route: p, role: 'boss', status: res.status, note: '导出失败' });
-  else if (res.text.length < 10) warns.push({ route: p, role: 'boss', status: 200, note: `导出内容过短（${res.text.length}B）` });
+  for (const format of ['csv', 'xlsx'] as const) {
+    const res = await fetch(`${BASE}${p}?format=${format}&${DEFAULT_QUERY}`, { headers: { authorization: `Bearer ${tokens.boss}` } });
+    const buf = Buffer.from(await res.arrayBuffer());
+    checks++;
+    const magic = format === 'xlsx' ? buf.subarray(0, 2).toString() === 'PK' : buf[0] === 0xef && buf[1] === 0xbb;
+    const tag = res.status === 200 && magic ? '✓' : '✗';
+    chain.push(`${tag} 导出 ${p} [${format}] → ${res.status} ${buf.length}B 魔数${magic ? '正确' : '不对'}`);
+    if (res.status !== 200) fails.push({ route: `${p}?format=${format}`, role: 'boss', status: res.status, note: '导出失败' });
+    else if (!magic) fails.push({ route: `${p}?format=${format}`, role: 'boss', status: 200, note: `文件头不对（${format} 应为 ${format === 'xlsx' ? 'PK' : 'UTF-8 BOM'}）` });
+    else if (buf.length < 10) warns.push({ route: `${p}?format=${format}`, role: 'boss', status: 200, note: `导出内容过短（${buf.length}B）` });
+  }
 }
+const tpl = await call('GET', `/api/system/import/template?table=creator&${DEFAULT_QUERY}`, tokens.boss);
+checks++;
+chain.push(`${tpl.status === 200 && tpl.text.length > 0 ? '✓' : '✗'} 导入模板 /api/system/import/template → ${tpl.status} ${tpl.text.length}B`);
+if (tpl.status !== 200) fails.push({ route: '/api/system/import/template', role: 'boss', status: tpl.status, note: '模板下载失败' });
 
 /* 切日：利润日报与看板趋势必须落在请求区间内，且都按店铺时区归日 */
 const win = WIN;

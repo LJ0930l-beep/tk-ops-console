@@ -83,6 +83,8 @@ export const config = {
   sampleContentDueDays: Number(process.env.SAMPLE_DUE_DAYS ?? 7),
   protectDefaultDays: Number(process.env.CREATOR_PROTECT_DAYS ?? 30),
   syncOverlapMinutes: Number(process.env.SYNC_OVERLAP_MIN ?? 5),
+  /** 同步导出行数上限（PRD B8：一期只做同步导出，超了明确拒绝让人缩小范围） */
+  exportMaxRows: num('EXPORT_MAX_ROWS', 20000),
   enableScheduler: process.env.ENABLE_SCHEDULER !== 'false',
   /**
    * 反向代理层数（nginx 等）。不设时 req.ip 就是代理自己的地址，

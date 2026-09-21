@@ -29,6 +29,7 @@ import { badRequest, notFound, ok, parseBody, qv, wrap } from '../core/http.js';
 import { Q, queryPage } from '../core/query.js';
 import { maskFields, requireExport, requireMenu, shopScope, type AuthedRequest } from '../core/auth.js';
 import { logIfChanged, writeOpLog } from '../core/oplog.js';
+import { sendTable, type ExportCell } from '../core/export.js';
 
 const MODULE = '订单中心';
 
@@ -396,7 +397,7 @@ const EXPORT_COLUMNS = [
 orderRouter.get(
   '/export',
   requireExport,
-  wrap((req, res) => {
+  wrap(async (req, res) => {
     const user = current(req);
     const q = orderQ(req);
     const rows = all<Record<string, unknown>>(
@@ -417,18 +418,16 @@ orderRouter.get(
       module: MODULE,
       action: 'export',
       target_table: 'tk_order',
-      after: { rows: list.length, format: qv(req, 'format') === 'csv' ? 'csv' : 'json', filters, cost_masked: !user.can_see_cost },
+      after: { rows: list.length, format: ['csv', 'xlsx'].includes(String(qv(req, 'format') ?? '').toLowerCase()) ? String(qv(req, 'format')).toLowerCase() : 'json', filters, cost_masked: !user.can_see_cost },
       ip: req.ip,
     });
-    if (qv(req, 'format') === 'csv') {
-      const esc = (v: unknown): string => {
-        const s = v === null || v === undefined ? '' : String(v);
-        return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-      };
-      const csv = [EXPORT_COLUMNS.join(','), ...list.map((r) => EXPORT_COLUMNS.map((c) => esc(r[c])).join(','))].join('\r\n');
-      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-      res.setHeader('Content-Disposition', `attachment; filename="orders-${fmt(new Date()).slice(0, 10)}.csv"`);
-      res.send(`﻿${csv}`);
+    const format = String(qv(req, 'format') ?? '').toLowerCase();
+    if (format === 'csv' || format === 'xlsx') {
+      await sendTable(
+        res,
+        { filename: `orders-${fmt(new Date()).slice(0, 10)}`, headers: [...EXPORT_COLUMNS], rows: list.map((r) => EXPORT_COLUMNS.map((c) => r[c] as ExportCell)) },
+        format,
+      );
       return;
     }
     ok(res, { columns: [...EXPORT_COLUMNS], count: list.length, rows: list });

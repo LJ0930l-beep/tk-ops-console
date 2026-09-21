@@ -15,6 +15,7 @@ import { badRequest, forbidden, notFound, ok, parseBody, qv, wrap } from '../cor
 import { Q, queryList, queryPage } from '../core/query.js';
 import { maskFields, requireExport, requireMenu, shopScope, type AuthedRequest } from '../core/auth.js';
 import { logIfChanged, writeOpLog } from '../core/oplog.js';
+import { sendTable, type ExportCell } from '../core/export.js';
 
 const MODULE = '商品中心';
 /** 无成本查看权限时要掩码的字段 */
@@ -839,7 +840,7 @@ const EXPORT_COLUMNS = [
 productRouter.get(
   '/export/sku',
   requireExport,
-  wrap((req, res) => {
+  wrap(async (req, res) => {
     const user = current(req);
     const { q, from } = skuListQ(req);
     const view = skuView(user);
@@ -850,6 +851,7 @@ productRouter.get(
       ...q.params,
     );
     const list = rows.map(view);
+    const format = String(qv(req, 'format') ?? '').toLowerCase();
     writeOpLog({
       user_id: user.id,
       module: MODULE,
@@ -860,9 +862,19 @@ productRouter.get(
         columns: [...EXPORT_COLUMNS],
         filters: { keyword: qv(req, 'keyword'), spu_id: qv(req, 'spu_id'), shop_id: qv(req, 'shop_id'), category: qv(req, 'category') },
         cost_masked: !user.can_see_cost,
+        format: format === 'csv' || format === 'xlsx' ? format : 'json',
       },
       ip: req.ip,
     });
+    // 默认仍回 JSON（前端表格/既有用例依赖），?format=csv|xlsx 才出文件
+    if (format === 'csv' || format === 'xlsx') {
+      await sendTable(
+        res,
+        { filename: `product-sku-${new Date().toISOString().slice(0, 10)}`, headers: [...EXPORT_COLUMNS], rows: list.map((r) => EXPORT_COLUMNS.map((c) => r[c] as ExportCell)) },
+        format as 'csv' | 'xlsx',
+      );
+      return;
+    }
     ok(res, { columns: [...EXPORT_COLUMNS], count: list.length, rows: list });
   }),
 );

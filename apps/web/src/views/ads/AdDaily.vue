@@ -35,6 +35,7 @@
           <el-button :icon="RefreshLeft" @click="resetQuery">重置</el-button>
           <el-button :icon="Calendar" @click="quickLast7">近 7 天</el-button>
           <el-button :icon="TrendCharts" @click="quickLast30">近 30 天</el-button>
+          <ExportButton url="/ads/export" name="ad-daily" :params="exportParams" />
         </el-form-item>
       </el-form>
       <el-alert
@@ -134,6 +135,7 @@ import { Calendar, RefreshLeft, Search, TrendCharts } from '@element-plus/icons-
 import type { AdDaily, PageResult } from '@tk/shared';
 import { adRoi, num, round2 } from '@tk/shared';
 import { apiGet, errMsg } from '@/api/client';
+import ExportButton from '@/components/ExportButton.vue';
 import { useDictStore } from '@/stores/dict';
 
 type Row = AdDaily & Record<string, unknown>;
@@ -165,6 +167,13 @@ const query = reactive<{ shop_id?: number; ad_type?: number; campaign_id?: strin
   campaign_id: '',
   keyword: '',
 });
+
+/** 导出用与列表完全相同的筛选条件，否则「导出的不是屏幕上这一屏」 */
+const exportParams = computed<Record<string, unknown>>(() => ({
+  stat_date_from: dateRange.value[0],
+  stat_date_to: dateRange.value[1],
+  ...Object.fromEntries(Object.entries(query).filter(([, v]) => v !== '' && v !== undefined && v !== null)),
+}));
 
 /* ---- 派生指标 ---- */
 const money = (v: unknown) => (v === '***' ? '***' : num(v).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));

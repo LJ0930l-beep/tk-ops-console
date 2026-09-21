@@ -36,6 +36,7 @@
         <el-form-item>
           <el-button type="primary" :icon="Search" :loading="loading" @click="load">生成报表</el-button>
           <el-button :icon="RefreshLeft" @click="resetQuery">重置</el-button>
+          <ExportButton url="/finance/profit/export" :name="`profit-${dim}`" :params="exportParams" />
         </el-form-item>
       </el-form>
 
@@ -161,6 +162,17 @@ function monthStart(offset: number): string {
   const d = new Date();
   return dayText(new Date(d.getFullYear(), d.getMonth() + offset, 1));
 }
+
+/** 导出与报表同源：维度、期间、店铺/站点与两个口径开关一并带上 */
+const exportParams = computed<Record<string, unknown>>(() => ({
+  dim: dim.value,
+  from: period.value[0],
+  to: period.value[1],
+  shop_id: query.shop_id || undefined,
+  region: query.region || undefined,
+  only_settled: query.only_settled ? 1 : 0,
+  include_sample: query.include_sample ? 1 : 0,
+}));
 
 async function load(): Promise<void> {
   loading.value = true;

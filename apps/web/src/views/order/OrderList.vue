@@ -22,6 +22,9 @@
       :default-page-size="20"
       :action-width="80"
     >
+      <template #toolbar="{ query }">
+        <ExportButton url="/orders/export" name="orders" :params="query" />
+      </template>
       <template #actions="{ row }">
         <el-button link type="primary" size="small" @click="goDetail(row)">详情</el-button>
       </template>
@@ -34,6 +37,7 @@ import { computed, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { ORDER_STATUS_LABEL } from '@tk/shared';
 import ResourcePage from '@/components/ResourcePage.vue';
+import ExportButton from '@/components/ExportButton.vue';
 import type { ColumnDef, OptionDef, SearchDef } from '@/components/ResourcePage.vue';
 import { useDictStore } from '@/stores/dict';
 

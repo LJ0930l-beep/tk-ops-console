@@ -60,11 +60,11 @@
 
 ## 6. SQLite → PostgreSQL/MySQL 迁移路径 ⬜ 待做（任务 #31 的一项）
 
-- **现状**：`apps/server/src/db/` 里没有任何 mysql 相关代码；建表与查询按 SQLite 写（`node:sqlite` 的 `DatabaseSync`、`datetime('now')`、`IFNULL` 等）。
-  `docs/development-standards.md` §5 写了双方言约定，但**没有可执行的迁移路径**，换库等于重写数据层。
-- **做法**：短期用 [pgloader](https://pgloader.readthedocs.io/en/latest/ref/sqlite.html) 一条命令搬数据（自动映射类型）；
-  代码侧把方言差异收口到 `core/db.ts` 一层（现在已经是唯一出入口，改造点集中），SQL 里的 `IFNULL/datetime()/AUTOINCREMENT` 按 §5 的双方言表逐个替换。
-- **工作量**：数据搬迁 0.5 人日；方言收口 3–5 人日。**验收**：同一套测试（243 例）在两种库上都绿；`npm run smoke` 在 PG 上跑通。
+- **现状**：`apps/server/src/db/schema.mysql.sql` **已经存在**（37 张表，与 `schema.sqlite.sql` 数量一致），但没有任何代码加载它——运行时只有 `node:sqlite` 的 `DatabaseSync` 一条路，SQL 里也是 SQLite 写法（`datetime('now')`、`IFNULL`、`substr(order_time,1,10)`）。也就是说：那份 MySQL DDL 现在只是文档，既没有驱动/迁移路径，也没有「两份 schema 是否已经漂移」的校验。
+- **做法**：① 先加一条**漂移校验**（两份 DDL 的表名/列名集合对拍，进 `npm test`），否则那份 MySQL DDL 会继续悄悄过期；
+  ② 数据搬迁用 [pgloader](https://pgloader.readthedocs.io/en/latest/ref/sqlite.html) 一条命令（自动映射类型）；
+  ③ 代码侧把方言差异收口到 `core/db.ts`（现在已是唯一出入口，改造点集中），逐个替换 `IFNULL/datetime()/substr(order_time,1,10)/AUTOINCREMENT`。
+- **工作量**：漂移校验 0.5 人日；数据搬迁 0.5 人日；方言收口 3–5 人日。**验收**：同一套测试（243 例）在两种库上都绿；`npm run smoke` 在 PG 上跑通。
 - **建议时机**：只有真的要多人并发写、或数据量超过单机 SQLite 舒适区时才做；否则先用 WAL + 定期备份顶着。
 
 ## 7. 后台任务队列 ⬜ 待做（按需）

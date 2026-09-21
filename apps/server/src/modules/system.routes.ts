@@ -297,10 +297,11 @@ const dictBody = z.object({
 });
 
 dictRouter.get('/', sysOnly, wrap((req, res) => {
-  const q = new Q('is_deleted = 0')
-    .eq('dict_type', req.query.dict_type, false)
-    .like(`dict_label LIKE ? OR dict_value LIKE ?`, req.query.keyword);
-  ok(res, queryPage(req, { from: 'sys_dict', q, orderBy: 'dict_type ASC, sort ASC' }));
+  const q = new Q('t.is_deleted = 0')
+    .eq('t.dict_type', req.query.dict_type, false)
+    .like(`t.dict_label LIKE ? OR t.dict_value LIKE ?`, req.query.keyword);
+  // queryPage 默认 select t.*，from 必须自带别名 t，否则整页 500（no such table: t）
+  ok(res, queryPage(req, { from: 'sys_dict t', q, orderBy: 't.dict_type ASC, t.sort ASC' }));
 }));
 
 dictRouter.post(

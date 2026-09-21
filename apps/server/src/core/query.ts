@@ -93,11 +93,10 @@ export function queryPage<T = Record<string, unknown>>(
 ): PageResult<T> {
   const { limit, offset, page, pageSize } = paginate(req);
   const select = opts.select ?? 't.*';
-  const from = opts.from.includes(' is_deleted') || opts.q.whereSql.includes('is_deleted') ? opts.from : opts.from;
   const where = opts.q.whereSql || ' WHERE 1 = 1';
   const params = [...opts.q.params, ...(opts.extraFromParams ?? [])];
-  const list = all<T>(`SELECT ${select} FROM ${from}${where} ORDER BY ${opts.orderBy ?? 'id DESC'} LIMIT ? OFFSET ?`, ...params, limit, offset);
-  const total = Number(get<{ c: number }>(`SELECT COUNT(*) AS c FROM ${from}${where}`, ...params)?.c ?? 0);
+  const list = all<T>(`SELECT ${select} FROM ${opts.from}${where} ORDER BY ${opts.orderBy ?? 'id DESC'} LIMIT ? OFFSET ?`, ...params, limit, offset);
+  const total = Number(get<{ c: number }>(`SELECT COUNT(*) AS c FROM ${opts.from}${where}`, ...params)?.c ?? 0);
   return { list, total, page, pageSize };
 }
 

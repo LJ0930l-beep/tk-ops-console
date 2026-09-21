@@ -2,7 +2,7 @@
  * TikTok Shop 开放平台真实客户端（官方 Open API 签名契约，方案第七章 / 6.4）。
  *
  * 签名规则（官方《如何生成签名》与 tiktok/ttspc-server-sample 中间件一致）：
- *   1. 查询参数剔除 sign 与空值，按 key 升序拼成 `key1value1key2value2…`（无 `=`、无 `&`）；
+ *   1. 查询参数剔除 sign、access_token 与空值，按 key 升序拼成 `key1value1key2value2…`（无 `=`、无 `&`）；
  *   2. base = path + 上面的串 + 请求体原文（无体时为空串）；
  *   3. signed = app_secret + base + app_secret；
  *   4. sign = HMAC-SHA256(key = app_secret, data = signed) 的**十六进制小写**；
@@ -53,7 +53,7 @@ const isEmpty = (v: QueryValue): boolean => v === undefined || v === null || v =
 /** 升序拼 `key+value`：签名串与查询串必须由同一个 params 对象生成，否则平台判签名无效 */
 export function sortedKeyValue(params: Record<string, QueryValue>): string {
   return Object.entries(params)
-    .filter(([k, v]) => k !== 'sign' && !isEmpty(v))
+    .filter(([k, v]) => k !== 'sign' && k !== 'access_token' && !isEmpty(v))
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([k, v]) => `${k}${String(v)}`)
     .join('');

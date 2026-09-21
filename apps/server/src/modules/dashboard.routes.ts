@@ -13,6 +13,7 @@ import type { CurrentUser } from '@tk/shared';
 import { get } from '../core/db.js';
 import { ok, qv, wrap } from '../core/http.js';
 import { maskFields, requireMenu, shopScope, type AuthedRequest } from '../core/auth.js';
+import { maskError } from '../core/redact.js';
 import { dashboardMetrics, todoCounts, todoDetails } from '../services/profit.js';
 import { rateDay } from '../services/rates.js';
 
@@ -37,14 +38,6 @@ function visibleShops(user: CurrentUser): number {
   const scope = shopScope(user, 'id');
   const row = get<{ c: number | string }>(`SELECT COUNT(*) AS c FROM tk_shop WHERE is_deleted = 0 AND status = 1 ${scope.sql}`, ...scope.params);
   return Number(row?.c ?? 0);
-}
-
-/** 同步错误文案脱敏：绝不允许把凭证片段带进工作台（realClient.safe 同一思路，兜底再裁一次） */
-function maskError(text: string): string {
-  return text
-    .replace(/(app[_-]?secret|access[_-]?token|app[_-]?key|password|sign|token)\s*[=:]\s*[^\s,&"']+/gi, '$1=***')
-    .replace(/[A-Za-z0-9_-]{32,}/g, '***')
-    .slice(0, 300);
 }
 
 interface SyncAlarm {

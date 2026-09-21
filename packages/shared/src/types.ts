@@ -398,7 +398,7 @@ export interface DashboardSummary {
   est_gross_profit: number;
   est_profit_rate: number;
   settled_amount: number;
-  ad_spend: number;
+  ad_spend: number | null;
   ad_gmv: number;
   ad_roi: number | null;
   unmapped_listings: number;

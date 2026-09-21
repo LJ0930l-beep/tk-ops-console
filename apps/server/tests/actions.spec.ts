@@ -166,7 +166,7 @@ describe('权限边界', () => {
     expect(evBoss).toBeTruthy();
     run(`UPDATE alert_event SET owner_id = ?, status = 0 WHERE id = ?`, bossId, evBoss!.id);
     const denied = await http.post(`/api/actions/events/${evBoss!.id}/handle`).set(auth(token.bd)).send({ action_type: 'note', note: 'x' });
-    expect(denied.status).toBe(403);
+    expect(denied.status).toBe(404);
 
     // 归属 BD 自己的事件：可处理
     const evBd = firstOpenEvent([evBoss!.id]);
@@ -176,13 +176,13 @@ describe('权限边界', () => {
     expect(allowed.status).toBe(200);
   });
 
-  it('BD 的今日看板只含本人或无主事件', async () => {
+  it('BD 的今日看板只含本人名下预警', async () => {
     const bdId = userId('chenbd');
     const res = await http.get('/api/actions/today').set(auth(token.bd));
     expect(res.status).toBe(200);
     const d = dataOf<{ p0: { owner_id: number | null }[]; p1: { owner_id: number | null }[]; p2: { owner_id: number | null }[] }>(res.body);
     const all_ = [...d.p0, ...d.p1, ...d.p2];
-    expect(all_.every((e) => e.owner_id === null || Number(e.owner_id) === bdId)).toBe(true);
+    expect(all_.every((e) => e.owner_id !== null && Number(e.owner_id) === bdId)).toBe(true);
   });
 });
 

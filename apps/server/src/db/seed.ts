@@ -391,7 +391,7 @@ export function seedDemoData(opts: { reset?: boolean } = {}): void {
         rate_date: date,
         currency: cur,
         rate_to_cny: round2(base * (1 + ((d % 7) - 3) * 0.0015)),
-        source: 1,
+        source: 4,
       });
     }
   }

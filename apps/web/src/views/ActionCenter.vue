@@ -128,7 +128,7 @@
           <el-descriptions-item label="优先级"><el-tag size="small" :type="prioType(detail.priority)">{{ 'P' + detail.priority }}</el-tag></el-descriptions-item>
           <el-descriptions-item label="状态"><el-tag size="small">{{ ALERT_EVENT_STATUS_LABELS[detail.status] }}</el-tag></el-descriptions-item>
           <el-descriptions-item label="发现时间">{{ detail.detected_at }}</el-descriptions-item>
-          <el-descriptions-item label="处理时限">{{ detail.due_at || '—' }}</el-descriptions-item>
+          <el-descriptions-item label="处理时限">{{ formatUtcTimestamp(detail.due_at) || '—' }}</el-descriptions-item>
           <el-descriptions-item label="负责人">{{ detail.owner_name || '未指派' }}</el-descriptions-item>
         </el-descriptions>
 
@@ -163,11 +163,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onActivated, onMounted, reactive, ref } from 'vue';
-import { useRouter } from 'vue-router';
+import { computed, onActivated, onMounted, reactive, ref, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { ACTION_TYPE_LABELS, ALERT_EVENT_STATUS_LABELS, num } from '@tk/shared';
 import { apiGet, apiPost, errMsg } from '@/api/client';
+import { formatUtcTimestamp } from '@/utils/date';
 import EventList from './action-center/EventList.vue';
 
 interface ApiEvent {
@@ -207,6 +208,7 @@ interface DetailEvent extends ApiEvent {
 }
 
 const router = useRouter();
+const route = useRoute();
 const loading = ref(false);
 const data = reactive<TodayData>({ p0: [], p1: [], p2: [], mine: [], counts: {}, recent_results: [] });
 
@@ -260,6 +262,24 @@ async function openDetail(id: number): Promise<void> {
     detailLoading.value = false;
   }
 }
+
+let handledDeepLink: string | null = null;
+async function openDeepLinkFromQuery(): Promise<void> {
+  const queryValue = route.query.event_id;
+  const raw = Array.isArray(queryValue) ? queryValue[0] : queryValue;
+  if (raw === undefined || raw === null) {
+    handledDeepLink = null;
+    return;
+  }
+  const value = String(raw);
+  if (handledDeepLink === value) return;
+  handledDeepLink = value;
+  const id = /^\d+$/.test(value) ? Number(value) : 0;
+  await router.replace({ path: route.path, query: { ...route.query, event_id: undefined } });
+  if (Number.isSafeInteger(id) && id > 0) await openDetail(id);
+}
+
+watch(() => route.query.event_id, () => { void openDeepLinkFromQuery(); });
 
 /* ---- 处理弹窗 ---- */
 const handleVisible = ref(false);
@@ -326,9 +346,14 @@ function goto(path: string): void {
   void router.push(path);
 }
 
-onMounted(load);
+onMounted(async () => {
+  await load();
+  await openDeepLinkFromQuery();
+});
 onActivated(() => {
-  if (!loading.value) void load();
+  if (!loading.value) {
+    void load().then(openDeepLinkFromQuery);
+  }
 });
 </script>
 

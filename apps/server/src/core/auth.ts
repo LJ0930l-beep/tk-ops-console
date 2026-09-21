@@ -159,7 +159,12 @@ export function shopScope(user: CurrentUser, col: string): { sql: string; params
       return { sql: `AND ${col} IN (SELECT id FROM tk_shop WHERE owner_id = ?)`, params: [user.id] };
     case DATA_SCOPE.DEPT:
       return {
-        sql: `AND ${col} IN (SELECT s.shop_id FROM sys_user_shop s JOIN sys_user m ON m.id = s.user_id WHERE m.dept = (SELECT dept FROM sys_user WHERE id = ?))`,
+        sql: `AND ${col} IN (
+          SELECT s.shop_id FROM sys_user_shop s
+          JOIN sys_user m ON m.id = s.user_id AND m.is_deleted = 0 AND m.status = 1
+          JOIN tk_shop shop ON shop.id = s.shop_id AND shop.is_deleted = 0
+          WHERE s.is_deleted = 0 AND m.dept = (SELECT dept FROM sys_user WHERE id = ? AND is_deleted = 0)
+        )`,
         params: [user.id],
       };
     default:

@@ -9,9 +9,15 @@
  *     报表响应里必须标 rate_missing，绝不静默按 1 折算（静默按 1 会把利润算成天文数字）。
  */
 import { round2 } from '@tk/shared';
-import { all, get, insert, update } from '../core/db.js';
+import { all, get, insert, tx, update } from '../core/db.js';
 
 export const CNY = 'CNY';
+
+/** 汇率来源：1 Frankfurter 公开 API；2 手工；3 从前值延用；4 演示数据。 */
+export const RATE_SOURCE = { FRANKFURTER: 1, MANUAL: 2, CARRIED: 3, DEMO: 4 } as const;
+export type RateSource = (typeof RATE_SOURCE)[keyof typeof RATE_SOURCE];
+/** MySQL schema stores DECIMAL(18,6): maximum representable positive exchange rate. */
+export const MAX_RATE_TO_CNY = 999_999_999_999.99;
 
 /** 兜底牌价：1 单位外币 = ? 人民币。仅在 exchange_rate 完全无该币种记录时使用，且必须标 missing */
 export const FALLBACK_RATE_TO_CNY: Record<string, number> = {
@@ -197,58 +203,138 @@ export interface RateUpsertInput {
   rate_date: string;
   currency: string;
   rate_to_cny: number;
-  /** 1 自动 2 手工 */
-  source?: number;
+  source?: RateSource;
   user_id?: number | null;
 }
 
-/** 维护汇率：(rate_date, currency) 唯一（ux_rate），已存在则覆盖更新 */
-export function upsertRate(input: RateUpsertInput): { id: number; created: boolean; rate_date: string; currency: string } {
+/** 维护汇率：(rate_date, currency) 唯一（ux_rate）；自动/延用值永不覆盖手工值。 */
+export function upsertRate(input: RateUpsertInput): { id: number; created: boolean; rate_date: string; currency: string; skipped?: 'manual' } {
   const currency = normalizeCurrency(input.currency);
   const day = rateDay(input.rate_date);
-  const exist = get<{ id: number }>(`SELECT id FROM exchange_rate WHERE is_deleted = 0 AND rate_date = ? AND currency = ?`, day, currency);
+  const source = input.source ?? RATE_SOURCE.MANUAL;
+  if (!/^[A-Z]{3}$/.test(currency)) throw new Error('币种必须使用三字母代码');
+  if (!validIsoDay(day)) throw new Error('汇率日期必须是有效的 YYYY-MM-DD');
+  if (![1, 2, 3, 4].includes(source)) throw new Error('汇率来源不合法');
+  if (!Number.isFinite(input.rate_to_cny) || input.rate_to_cny <= 0 || input.rate_to_cny > MAX_RATE_TO_CNY) throw new Error('汇率必须是可存储的有限正数');
+  if (currency === CNY && input.rate_to_cny !== 1) throw new Error('CNY 汇率必须固定为 1');
+  const exist = get<{ id: number; source: number }>(`SELECT id, source FROM exchange_rate WHERE is_deleted = 0 AND rate_date = ? AND currency = ?`, day, currency);
   if (exist) {
-    update('exchange_rate', exist.id, { rate_to_cny: input.rate_to_cny, source: input.source ?? 2 } as never);
+    if (Number(exist.source) === RATE_SOURCE.MANUAL && source !== RATE_SOURCE.MANUAL) {
+      return { id: exist.id, created: false, rate_date: day, currency, skipped: 'manual' };
+    }
+    update('exchange_rate', exist.id, { rate_to_cny: input.rate_to_cny, source } as never);
     return { id: exist.id, created: false, rate_date: day, currency };
   }
   const id = insert('exchange_rate', {
     rate_date: day,
     currency,
     rate_to_cny: input.rate_to_cny,
-    source: input.source ?? 2,
+    source,
     created_by: input.user_id ?? null,
   });
   return { id, created: true, rate_date: day, currency };
 }
 
-/** 汇率保留精度：小额币种（PHP/IDR 等）4 位小数会丢信息，统一按量级取位 */
-export const roundRate = (n: number): number => (n >= 100 ? round2(n) : Math.round((n + Number.EPSILON) * 100000) / 100000);
+/** 汇率保留六位小数，与 exchange_rate DECIMAL(18,6) 对齐，避免小额币种被截断。 */
+export const roundRate = (n: number): number => Math.round((n + Number.EPSILON) * 1_000_000) / 1_000_000;
 
-/**
- * 「拉取公开牌价」的本地模拟：在上一日值上加 ±0.15% 的确定性波动（同一天重复调用结果一致），
- * 不访问外网；source=1 自动。真实对接时替换本函数体即可，调用方与口径不变。
- */
-export function mockFetchRates(opts: { date?: string; currencies?: string[] } = {}): {
-  date: string;
-  rows: { currency: string; rate_to_cny: number; prev_rate: number; created: boolean }[];
-} {
-  const date = rateDay(opts.date ?? todayUtc());
-  const currencies = (opts.currencies?.length ? opts.currencies.map(normalizeCurrency) : listCurrencies()).filter((c) => c !== CNY);
-  const rows = currencies.map((cur) => {
-    const last = get<{ rate_to_cny: number | string }>(
-      `SELECT rate_to_cny FROM exchange_rate WHERE is_deleted = 0 AND currency = ? ORDER BY rate_date DESC, id DESC LIMIT 1`,
-      cur,
-    );
-    const prev = Number(last?.rate_to_cny ?? FALLBACK_RATE_TO_CNY[cur] ?? 1);
-    const drift = ((dateKey(date) % 7) - 3) * 0.0005;
-    const rate = roundRate(prev * (1 + drift));
-    const r = upsertRate({ rate_date: date, currency: cur, rate_to_cny: rate, source: 1, user_id: null });
-    return { currency: cur, rate_to_cny: rate, prev_rate: prev, created: r.created };
-  });
-  return { date, rows };
+const FRANKFURTER_RATES_URL = 'https://api.frankfurter.dev/v2/rates';
+const FRANKFURTER_TIMEOUT_MS = 8_000;
+
+export class PublicRateSourceError extends Error {
+  constructor(message = '公开汇率服务暂不可用') {
+    super(message);
+    this.name = 'PublicRateSourceError';
+  }
 }
 
-/** 日期串 → 稳定整数（模拟波动的种子，避免引入随机数导致报表数字不可复现） */
-function dateKey(date: string): number {
-  return date.replace(/-/g, '').slice(-5) ? Number(date.replace(/-/g, '').slice(-5)) : 0;
+export class InvalidRateRequestError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidRateRequestError';
+  }
+}
+
+export function validIsoDay(day: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return false;
+  const parsed = new Date(`${day}T00:00:00.000Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === day;
+}
+
+interface FrankfurterRate {
+  date?: unknown;
+  base?: unknown;
+  quote?: unknown;
+  rate?: unknown;
+}
+
+/**
+ * 从 Frankfurter v2 获取 CNY 基准牌价。API 返回「1 CNY = x 外币」，落库前取倒数，
+ * 统一成「1 外币 = N CNY」。所有响应先完整校验，再开启事务写入，避免网络/脏响应留下半批数据。
+ */
+export async function fetchPublicRates(opts: { date?: string; currencies?: string[] } = {}): Promise<{
+  date: string;
+  source: 'Frankfurter v2 public API';
+  rows: { currency: string; rate_to_cny: number; prev_rate: number | null; created: boolean; skipped?: 'manual' }[];
+}> {
+  const requestedDate = opts.date ? rateDay(opts.date) : undefined;
+  if (requestedDate && !validIsoDay(requestedDate)) throw new InvalidRateRequestError('汇率日期必须是有效的 YYYY-MM-DD');
+  const requestedCurrencies = opts.currencies?.length ? opts.currencies : listCurrencies();
+  const currencies = [...new Set(requestedCurrencies.map(normalizeCurrency).filter((c) => c !== CNY))];
+  if (currencies.length === 0) throw new InvalidRateRequestError('没有可刷新的外币');
+  if (currencies.length > 100 || currencies.some((c) => !/^[A-Z]{3}$/.test(c))) {
+    throw new InvalidRateRequestError('币种列表不合法');
+  }
+
+  const url = new URL(FRANKFURTER_RATES_URL);
+  url.searchParams.set('base', CNY);
+  url.searchParams.set('quotes', currencies.join(','));
+  if (requestedDate) url.searchParams.set('date', requestedDate);
+
+  let response: Response;
+  let payload: unknown;
+  try {
+    response = await fetch(url, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(FRANKFURTER_TIMEOUT_MS) });
+    if (!response.ok) throw new PublicRateSourceError();
+    payload = await response.json();
+  } catch (error) {
+    if (error instanceof PublicRateSourceError) throw error;
+    throw new PublicRateSourceError();
+  }
+
+  if (!Array.isArray(payload)) throw new PublicRateSourceError('公开汇率服务返回格式异常');
+  const byCurrency = new Map<string, { date: string; rate_to_cny: number }>();
+  for (const entry of payload as FrankfurterRate[]) {
+    const cur = normalizeCurrency(typeof entry?.quote === 'string' ? entry.quote : '');
+    const base = normalizeCurrency(typeof entry?.base === 'string' ? entry.base : '');
+    const day = typeof entry?.date === 'string' ? entry.date : '';
+    const rawRate = entry?.rate;
+    const inverse = typeof rawRate === 'number' ? 1 / rawRate : NaN;
+    const roundedInverse = roundRate(inverse);
+    if (!currencies.includes(cur) || byCurrency.has(cur) || base !== CNY || !validIsoDay(day)
+      || !Number.isFinite(rawRate) || Number(rawRate) <= 0 || !Number.isFinite(inverse) || inverse <= 0
+      || !Number.isFinite(roundedInverse) || roundedInverse <= 0 || roundedInverse > MAX_RATE_TO_CNY) {
+      throw new PublicRateSourceError('公开汇率服务返回无效牌价');
+    }
+    if ((requestedDate && day > requestedDate) || (!requestedDate && day > todayUtc())) {
+      throw new PublicRateSourceError('公开汇率服务返回了晚于当前日期的牌价');
+    }
+    byCurrency.set(cur, { date: day, rate_to_cny: roundedInverse });
+  }
+  if (byCurrency.size !== currencies.length || currencies.some((cur) => !byCurrency.has(cur))) {
+    throw new PublicRateSourceError('公开汇率服务未返回全部请求币种');
+  }
+  const dates = new Set([...byCurrency.values()].map((r) => r.date));
+  if (dates.size !== 1) throw new PublicRateSourceError('公开汇率服务返回的牌价日期不一致');
+
+  const date = [...dates][0] as string;
+  const rows = tx(() => currencies.map((currency) => {
+    const rate = (byCurrency.get(currency) as { rate_to_cny: number }).rate_to_cny;
+    const prev = get<{ rate_to_cny: number | string }>(
+      `SELECT rate_to_cny FROM exchange_rate WHERE is_deleted = 0 AND currency = ? ORDER BY rate_date DESC, id DESC LIMIT 1`, currency,
+    );
+    const r = upsertRate({ rate_date: date, currency, rate_to_cny: rate, source: RATE_SOURCE.FRANKFURTER });
+    return { currency, rate_to_cny: rate, prev_rate: prev ? Number(prev.rate_to_cny) : null, created: r.created, skipped: r.skipped };
+  }));
+  return { date, source: 'Frankfurter v2 public API', rows };
 }

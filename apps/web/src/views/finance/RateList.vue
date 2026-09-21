@@ -9,6 +9,7 @@
     dialog-width="560px"
   >
     <template #toolbar="{ reload }">
+      <el-button type="primary" :loading="fetching" @click="fetchPublic(reload)">拉取公开日汇率</el-button>
       <el-button :loading="filling" @click="fillMissing(reload)">补最近 7 天缺失</el-button>
       <ImportDialog table="exchange_rate" button-text="导入汇率" @done="() => reload()" />
     </template>
@@ -17,8 +18,8 @@
         type="info"
         :closable="false"
         show-icon
-        title="汇率按 (rate_date, currency) 唯一：同一天的同一币种只能有一条，重复提交按覆盖处理。折算方向一律为「1 单位外币 = N 人民币」，CNY 恒为 1。"
-        style="width: 560px"
+        title="公开汇率来自 Frankfurter v2（日频数据，非实时成交价）；手工值不会被自动刷新覆盖，补缺值与演示数据会单独标记。折算方向为「1 单位外币 = N 人民币」，CNY 恒为 1。"
+        style="width: 640px"
       />
     </template>
   </ResourcePage>
@@ -37,13 +38,16 @@ const CURRENCY: OptionDef[] = ['USD', 'MYR', 'PHP', 'SGD', 'THB', 'VND', 'IDR', 
   label: c,
 }));
 
-/** exchange_rate.source：1 自动 / 2 手工 */
+/** exchange_rate.source：公开 API、手工、延用前值、演示数据分别展示 */
 const SOURCE: OptionDef[] = [
-  { value: 1, label: '自动', type: 'success' },
+  { value: 1, label: 'Frankfurter 公开 API', type: 'success' },
   { value: 2, label: '手工', type: 'warning' },
+  { value: 3, label: '延用前值', type: 'info' },
+  { value: 4, label: '演示数据', type: 'danger' },
 ];
 
 const filling = ref(false);
+const fetching = ref(false);
 
 const columns: ColumnDef[] = [
   { prop: 'rate_date', label: '汇率日期', width: 120, type: 'date', sortable: true },
@@ -73,13 +77,12 @@ const formFields: FormFieldDef[] = [
     },
   },
   { key: 'rate_to_cny', label: '兑人民币汇率', type: 'number', required: true, precision: 6, min: 0, default: 1 },
-  { key: 'source', label: '来源', type: 'select', required: true, options: SOURCE, default: 2 },
 ];
 
-/** DECIMAL(18,6) 语义，前端按 4 位展示（PRD §3.8 汇率维护） */
+/** 保留与数据库一致的六位精度，尤其避免 VND/IDR 等小额币种显示失真。 */
 function mapRow(row: Record<string, unknown>): Record<string, unknown> {
   const v = Number(row.rate_to_cny ?? NaN);
-  return { ...row, rate_text: Number.isFinite(v) ? v.toFixed(4) : '-' };
+  return { ...row, rate_text: Number.isFinite(v) ? v.toFixed(6) : '-' };
 }
 
 async function fillMissing(reload: () => void): Promise<void> {
@@ -92,6 +95,21 @@ async function fillMissing(reload: () => void): Promise<void> {
     ElMessage.error(errMsg(e));
   } finally {
     filling.value = false;
+  }
+}
+
+async function fetchPublic(reload: () => void): Promise<void> {
+  fetching.value = true;
+  try {
+    const r = await apiPost<{ rows?: { skipped?: string }[]; date?: string }>('/finance/rate/fetch', {});
+    const rows = r?.rows ?? [];
+    const skipped = rows.filter((row) => row.skipped === 'manual').length;
+    ElMessage.success(`已拉取 ${r?.date ?? '最新'} 公开牌价：${rows.length - skipped} 个币种更新，${skipped} 个手工值保留`);
+    reload();
+  } catch (e) {
+    ElMessage.error(errMsg(e));
+  } finally {
+    fetching.value = false;
   }
 }
 </script>

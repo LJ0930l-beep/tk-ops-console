@@ -21,6 +21,8 @@
 </template>
 
 <script setup lang="ts">
+import { parseUtcTimestamp } from '@/utils/date';
+
 interface Ev {
   id: number;
   rule_name: string;
@@ -46,13 +48,13 @@ function chips(ev: Record<string, unknown> | undefined): Record<string, string> 
 
 function dueText(e: Ev): string {
   if (!e.due_at) return '';
-  const diff = Date.parse(e.due_at.replace(' ', 'T')) - Date.now();
+  const diff = parseUtcTimestamp(e.due_at) - Date.now();
   const h = Math.round(diff / 3_600_000);
   if (h < 0) return `已超时 ${Math.abs(h)}h`;
   if (h < 48) return `剩 ${h}h`;
   return `剩 ${Math.round(h / 24)}d`;
 }
-const isOverdue = (e: Ev) => !!e.due_at && Date.parse(e.due_at.replace(' ', 'T')) < Date.now() && (e.status === 0 || e.status === 1);
+const isOverdue = (e: Ev) => !!e.due_at && parseUtcTimestamp(e.due_at) < Date.now() && (e.status === 0 || e.status === 1);
 </script>
 
 <style scoped>

@@ -47,8 +47,8 @@ describe('官方签名算法', () => {
     expect(buildSign(SECRET, PATH, params, body)).toBe(expectHex);
   });
 
-  it('参数升序拼接，忽略 sign 与空值（顺序不影响签名）', () => {
-    expect(sortedKeyValue({ b: 2, a: '1', c: '', sign: 'zzz', d: null })).toBe('a1b2');
+  it('参数升序拼接，忽略 sign/access_token 与空值（顺序不影响签名）', () => {
+    expect(sortedKeyValue({ b: 2, a: '1', c: '', sign: 'zzz', access_token: 'secret-token', d: null })).toBe('a1b2');
     expect(buildSign(SECRET, PATH, { a: '1', b: '2' })).toBe(buildSign(SECRET, PATH, { b: '2', a: '1', sign: 'whatever' }));
     // 改一个字节就必须换签名：平台侧同样只认这套拼法
     expect(buildSign(SECRET, PATH, { a: '1', b: '2' })).not.toBe(buildSign(SECRET, PATH, { a: '1', b: '3' }));

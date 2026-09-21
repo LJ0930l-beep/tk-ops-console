@@ -33,8 +33,9 @@ import {
   type ProfitRow,
 } from '@tk/shared';
 import { all, get } from '../core/db.js';
-import { personScope, shopScope } from '../core/auth.js';
+import { hasMenu, personScope, shopScope } from '../core/auth.js';
 import { notFound } from '../core/http.js';
+import { maskError } from '../core/redact.js';
 import { config } from '../config.js';
 import { createRateConverter, rateDay, todayUtc } from './rates.js';
 
@@ -1438,6 +1439,11 @@ const countOf = (sql: string, ...p: (number | string)[]): number => Number(get<{
 /** 样品签收后未出内容的超期阈值，与达人中心共用 config.sampleContentDueDays */
 const sampleDueDays = (): string => `+${Math.max(1, Number(config.sampleContentDueDays) || 7)} day`;
 
+/** CRM 待办只对有达人权限的角色开放，并按达人负责人收敛到本人/本组。 */
+function crmTodoScope(user: CurrentUser, ownerCol: string): { sql: string; params: number[] } {
+  return hasMenu(user, 'creator') ? personScope(user, ownerCol, true) : { sql: ' AND 1 = 0', params: [] };
+}
+
 /** 待办计数：工作台红点与「我的待办」列表同一套条件 */
 export function todoCounts(user: CurrentUser): Record<'unmapped_listings' | 'unmapped_items' | 'creators_to_follow' | 'samples_overdue' | 'auth_expiring' | 'sync_failed' | 'live_today', number> {
   const shop = shopScope(user, 'l.shop_id');
@@ -1445,14 +1451,25 @@ export function todoCounts(user: CurrentUser): Record<'unmapped_listings' | 'unm
   const shopAuth = shopScope(user, 'id');
   const shopSync = shopScope(user, 'sl.shop_id');
   const shopLive = shopScope(user, 'lv.shop_id');
+  const outreachScope = crmTodoScope(user, 'o.user_id');
+  const sampleScope = crmTodoScope(user, 'c.owner_id');
   return {
     unmapped_listings: countOf(`SELECT COUNT(*) AS c FROM shop_listing l WHERE ${TODO_WHERE.unmapped_listing} ${shop.sql}`, ...shop.params),
     unmapped_items: countOf(
       `SELECT COUNT(*) AS c FROM tk_order_item i JOIN tk_order o ON o.id = i.order_id WHERE ${TODO_WHERE.unmapped_item} ${shopItem.sql}`,
       ...shopItem.params,
     ),
-    creators_to_follow: countOf(`SELECT COUNT(DISTINCT o.creator_id) AS c FROM creator_outreach o WHERE ${TODO_WHERE.creator_follow}`),
-    samples_overdue: countOf(`SELECT COUNT(*) AS c FROM sample_shipment s WHERE ${TODO_WHERE.sample_overdue}`, sampleDueDays()),
+    creators_to_follow: countOf(
+      `SELECT COUNT(DISTINCT o.creator_id) AS c FROM creator_outreach o JOIN creator c ON c.id = o.creator_id AND c.is_deleted = 0
+        WHERE ${TODO_WHERE.creator_follow} ${outreachScope.sql}`,
+      ...outreachScope.params,
+    ),
+    samples_overdue: countOf(
+      `SELECT COUNT(*) AS c FROM sample_shipment s JOIN creator c ON c.id = s.creator_id AND c.is_deleted = 0
+        WHERE ${TODO_WHERE.sample_overdue} ${sampleScope.sql}`,
+      sampleDueDays(),
+      ...sampleScope.params,
+    ),
     auth_expiring: countOf(`SELECT COUNT(*) AS c FROM tk_shop WHERE ${TODO_WHERE.auth_expiring} ${shopAuth.sql}`, ...shopAuth.params),
     sync_failed: countOf(`SELECT COUNT(*) AS c FROM sync_log sl WHERE ${TODO_WHERE.sync_failed} ${shopSync.sql}`, ...shopSync.params),
     live_today: countOf(`SELECT COUNT(*) AS c FROM live_session lv WHERE ${TODO_WHERE.live_today} ${shopLive.sql}`, ...shopLive.params),
@@ -1467,6 +1484,8 @@ export function todoDetails(user: CurrentUser, limit = 20): TodoGroup[] {
   const shopAuth = shopScope(user, 's.id');
   const shopSync = shopScope(user, 'sl.shop_id');
   const shopLive = shopScope(user, 'lv.shop_id');
+  const outreachScope = crmTodoScope(user, 'o.user_id');
+  const sampleScope = crmTodoScope(user, 'c.owner_id');
   const groups: TodoGroup[] = [];
 
   groups.push({
@@ -1512,10 +1531,11 @@ export function todoDetails(user: CurrentUser, limit = 20): TodoGroup[] {
     items: all<Record<string, string | number | null>>(
       `SELECT o.id, o.creator_id, o.next_follow_at, o.summary, c.handle, u.real_name
          FROM creator_outreach o
-         JOIN creator c ON c.id = o.creator_id
+         JOIN creator c ON c.id = o.creator_id AND c.is_deleted = 0
          LEFT JOIN sys_user u ON u.id = o.user_id
-        WHERE ${TODO_WHERE.creator_follow}
+        WHERE ${TODO_WHERE.creator_follow} ${outreachScope.sql}
         ORDER BY o.next_follow_at ASC LIMIT ?`,
+      ...outreachScope.params,
       limit,
     ).map((r) => ({
       id: `creator-${String(r.creator_id)}`,
@@ -1534,12 +1554,13 @@ export function todoDetails(user: CurrentUser, limit = 20): TodoGroup[] {
     items: all<Record<string, string | number | null>>(
       `SELECT s.id, s.sign_time, s.tracking_no, c.handle, p.name_cn
          FROM sample_shipment s
-         JOIN creator c ON c.id = s.creator_id
+         JOIN creator c ON c.id = s.creator_id AND c.is_deleted = 0
          LEFT JOIN product_sku sk ON sk.id = s.sku_id
          LEFT JOIN product_spu p ON p.id = sk.spu_id
-        WHERE ${TODO_WHERE.sample_overdue}
+        WHERE ${TODO_WHERE.sample_overdue} ${sampleScope.sql}
         ORDER BY s.sign_time ASC LIMIT ?`,
       sampleDueDays(),
+      ...sampleScope.params,
       limit,
     ).map((r) => ({
       id: `sample-${String(r.id)}`,
@@ -1584,7 +1605,7 @@ export function todoDetails(user: CurrentUser, limit = 20): TodoGroup[] {
       id: `sync-${String(r.id)}`,
       title: `${String(r.shop_name ?? '全平台')} · ${String(r.task_type ?? '')} 同步异常`,
       subtitle: String(r.started_at ?? ''),
-      hint: String(r.error_msg ?? '同步失败或数据异常'),
+      hint: r.error_msg === null || r.error_msg === undefined ? '同步失败或数据异常' : maskError(String(r.error_msg)),
       link: '/system/synclog',
     })),
   });
@@ -1613,11 +1634,13 @@ export function todoDetails(user: CurrentUser, limit = 20): TodoGroup[] {
 }
 
 /** 工作台看板：严格返回 DashboardSummary 全字段；无成本权限时利润/成本类为 null */
-export type DashboardPayload = Omit<DashboardSummary, 'est_cost' | 'est_gross_profit' | 'est_profit_rate' | 'settled_amount'> & {
+export type DashboardPayload = Omit<DashboardSummary, 'est_cost' | 'est_gross_profit' | 'est_profit_rate' | 'settled_amount' | 'ad_spend' | 'ad_roi'> & {
   est_cost: number | null;
   est_gross_profit: number | null;
   est_profit_rate: number | null;
   settled_amount: number | null;
+  ad_spend: number | null;
+  ad_roi: number | null;
   net_gmv: number;
   settled_pending: number | null;
   ad_orders: number;
@@ -1657,9 +1680,9 @@ export function dashboardMetrics(user: CurrentUser, range: { start?: string; end
     est_gross_profit: canCost ? overall.gross_profit : null,
     est_profit_rate: canCost ? profitRate(overall.gross_profit, overall.net_gmv || overall.gmv) : null,
     settled_amount: canCost ? overall.settled_paid : null,
-    ad_spend: overall.ad_spend,
+    ad_spend: canCost ? overall.ad_spend : null,
     ad_gmv: overall.ad_gmv,
-    ad_roi: ads.total.roi,
+    ad_roi: canCost ? ads.total.roi : null,
     unmapped_listings: todos.unmapped_listings,
     creators_to_follow: todos.creators_to_follow,
     samples_overdue: todos.samples_overdue,

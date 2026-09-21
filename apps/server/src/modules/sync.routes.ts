@@ -9,6 +9,7 @@
  */
 import { Router, type Request } from 'express';
 import { z } from 'zod';
+import { DATA_SCOPE } from '@tk/shared';
 import { config } from '../config.js';
 import { all, get } from '../core/db.js';
 import { badRequest, notFound, ok, parseBody, qv, wrap } from '../core/http.js';
@@ -21,7 +22,7 @@ import {
   refreshDerivedAggregates,
   registerSyncJobs,
   runTask,
-  runTaskForAllShops,
+  runTaskForShopIds,
   type SyncResult,
   type SyncTaskInput,
 } from '../jobs/syncJobs.js';
@@ -48,6 +49,12 @@ const applyScope = (q: Q, scope: { sql: string; params: number[] }): Q => q.and(
 function scopedShopIds(req: Request): number[] {
   const scope = scopeOf(req, 's.id');
   return all<{ id: number }>(`SELECT s.id FROM tk_shop s WHERE s.is_deleted = 0 AND s.status = 1 ${scope.sql} ORDER BY s.id`, ...scope.params).map((r) => r.id);
+}
+
+/** 聚合刷新不依赖授权状态，但仍只可处理操作者可见的店铺。 */
+function visibleShopIds(req: Request): number[] {
+  const scope = scopeOf(req, 's.id');
+  return all<{ id: number }>(`SELECT s.id FROM tk_shop s WHERE s.is_deleted = 0 ${scope.sql} ORDER BY s.id`, ...scope.params).map((r) => r.id);
 }
 
 function assertShopVisible(req: Request, shopId: number): void {
@@ -143,16 +150,26 @@ syncRouter.post(
     let targets: number[];
     if (body.shop_id) {
       assertShopVisible(req, body.shop_id);
-      if (!activeShopIds().includes(body.shop_id)) throw badRequest('该店铺未处于「运营中 + 已授权」状态，请先在店铺管理完成授权');
       targets = [body.shop_id];
-      results = await runTask(body.task_type as SyncTaskInput, body.shop_id, opts);
+      if (body.task_type === 'aggregate') {
+        results = [refreshDerivedAggregates(opts, [body.shop_id])];
+      } else {
+        if (!activeShopIds().includes(body.shop_id)) throw badRequest('该店铺未处于「运营中 + 已授权」状态，请先在店铺管理完成授权');
+        results = await runTask(body.task_type as SyncTaskInput, body.shop_id, opts);
+      }
     } else if (body.task_type === 'aggregate') {
-      targets = [];
-      results = [refreshDerivedAggregates(opts)];
+      if (user.data_scope === DATA_SCOPE.ALL) {
+        targets = [];
+        results = [refreshDerivedAggregates(opts)];
+      } else {
+        targets = visibleShopIds(req);
+        if (!targets.length) throw badRequest('范围内没有可刷新的店铺');
+        results = await runTaskForShopIds(targets, 'aggregate', opts);
+      }
     } else {
       targets = scopedShopIds(req).filter((id) => activeShopIds().includes(id));
       if (!targets.length) throw badRequest('范围内没有可同步的店铺（需运营中且已授权）');
-      results = await runTaskForAllShops(body.task_type as SyncTaskInput, opts);
+      results = await runTaskForShopIds(targets, body.task_type as SyncTaskInput, opts);
     }
     writeOpLog({
       user_id: user.id,

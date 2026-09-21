@@ -402,6 +402,41 @@ stockRouter.get(
   }),
 );
 
+/**
+ * SKU / SPU 选择器：库存建档必须选 SKU，但仓库角色没有 product 菜单，
+ * 所以这里只出编码与规格（无成本字段），按 stock 菜单把关，不让前端去蹭 /products/*。
+ */
+stockRouter.get(
+  '/skus',
+  requireMenu('stock'),
+  wrap((req, res) => {
+    const q = new Q('k.is_deleted = 0').like(
+      `k.sku_code LIKE ? OR k.spec LIKE ? OR p.name_cn LIKE ? OR p.spu_code LIKE ?`,
+      qv(req, 'keyword'),
+    );
+    ok(res, queryPage(req, {
+      from: 'product_sku k LEFT JOIN product_spu p ON p.id = k.spu_id AND p.is_deleted = 0',
+      select: 'k.id, k.sku_code, k.spec, k.status, k.spu_id, p.spu_code, p.name_cn',
+      q,
+      orderBy: 'k.id DESC',
+    }));
+  }),
+);
+
+stockRouter.get(
+  '/spus',
+  requireMenu('stock'),
+  wrap((req, res) => {
+    const q = new Q('p.is_deleted = 0').like(`p.name_cn LIKE ? OR p.spu_code LIKE ?`, qv(req, 'keyword'));
+    ok(res, queryPage(req, {
+      from: 'product_spu p',
+      select: 'p.id, p.spu_code, p.name_cn, p.category, p.status',
+      q,
+      orderBy: 'p.spu_code ASC',
+    }));
+  }),
+);
+
 /** 变动类型 / 仓库类型字典（前端下拉与标签色用） */
 stockRouter.get(
   '/meta',

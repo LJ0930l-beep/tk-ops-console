@@ -185,7 +185,15 @@ export function snapshotCost(sku: { purchase_cost: number; first_leg_cost: numbe
 function upsertPlatformOrder(shopId: number, o: PlatformOrder, c: Counters): void {
   const tkOrderId = String(o.order_id ?? '').trim();
   if (!tkOrderId) throw new Error('平台订单缺少 order_id');
-  const exist = get<{ id: number }>(`SELECT id FROM tk_order WHERE tk_order_id = ?`, tkOrderId);
+  const exist = get<{ id: number; shop_id: number; is_deleted: number }>(`SELECT id, shop_id, is_deleted FROM tk_order WHERE tk_order_id = ?`, tkOrderId);
+  if (exist && Number(exist.is_deleted) !== 0) {
+    throw new Error('已有订单号位于回收站，已拒绝静默更新');
+  }
+  if (exist && Number(exist.shop_id) !== shopId) {
+    // tk_order_id is globally unique today. A duplicate imported under another shop must fail
+    // closed instead of silently re-parenting the existing order and its cost/attribution history.
+    throw new Error('已有订单号归属其他店铺，已拒绝跨店改写');
+  }
   const currency = String(o.currency ?? '').slice(0, 3).toUpperCase() || 'USD';
   const subtotal = money(o.products_amount);
   const sellerDiscount = money(o.seller_discount ?? o.discount_amount);
@@ -467,7 +475,13 @@ function upsertPlatformReturn(shopId: number, r: PlatformReturn, c: Counters): v
   const returnId = String(r.return_id ?? '').trim();
   if (!returnId) throw new Error('平台售后单缺少 return_id');
   const tkOrderId = String(r.order_id ?? '').trim();
-  const order = tkOrderId ? get<{ id: number }>(`SELECT id FROM tk_order WHERE tk_order_id = ?`, tkOrderId) : undefined;
+  const order = tkOrderId ? get<{ id: number; shop_id: number; is_deleted: number }>(`SELECT id, shop_id, is_deleted FROM tk_order WHERE tk_order_id = ?`, tkOrderId) : undefined;
+  if (order && Number(order.is_deleted) !== 0) {
+    throw new Error('售后单引用的订单位于回收站，已拒绝关联');
+  }
+  if (order && Number(order.shop_id) !== shopId) {
+    throw new Error('售后单引用的订单归属其他店铺，已拒绝跨店关联');
+  }
   const itemRef = String(r.item_id ?? '');
   const item = order
     ? get<{ id: number }>(
@@ -495,8 +509,14 @@ function upsertPlatformReturn(shopId: number, r: PlatformReturn, c: Counters): v
     apply_time: unixToUtc(r.apply_time ?? r.create_time ?? r.delivery_time),
     finish_time: unixToUtc(r.finish_time),
   };
-  const exist = get<{ id: number }>(`SELECT id FROM tk_return WHERE tk_return_id = ?`, returnId);
+  const exist = get<{ id: number; shop_id: number; is_deleted: number }>(`SELECT id, shop_id, is_deleted FROM tk_return WHERE tk_return_id = ?`, returnId);
   if (exist) {
+    if (Number(exist.is_deleted) !== 0) {
+      throw new Error('已有售后单号位于回收站，已拒绝静默更新');
+    }
+    if (Number(exist.shop_id) !== shopId) {
+      throw new Error('已有售后单号归属其他店铺，已拒绝跨店改写');
+    }
     const patch: Record<string, unknown> = { ...payload };
     if (r.has_returned !== undefined) patch.is_restocked = flag(r.has_returned);
     update('tk_return', Number(exist.id), patch as never);
@@ -607,13 +627,18 @@ function pickAttributionTarget(shopId: number, a: PlatformAffiliateOrder): { id:
  *  2. 把 cost_matched=0（从来没有快照）且映射已补齐的历史明细按当前成本补一次，逐行写操作日志。
  * 已冻结过 cost_snapshot 的历史行绝不回溯（方案表 7 + 要点 5.1）。
  */
-export function refreshDerivedAggregates(opts: SyncOptions = {}): SyncResult {
+export function refreshDerivedAggregates(opts: SyncOptions = {}, shopIds?: number[]): SyncResult {
   const startedAt = utcStamp();
   const user = opts.user_id ?? SYSTEM_USER_ID;
-  const window = resolveWindow('aggregate', 0, opts);
+  const scopedIds = shopIds === undefined ? undefined : [...new Set(shopIds.map(Number).filter((id) => Number.isInteger(id) && id > 0))];
+  const shopFilter = scopedIds === undefined ? '' : scopedIds.length ? ` AND shop_id IN (${scopedIds.map(() => '?').join(',')})` : ' AND 1 = 0';
+  const orderShopFilter = scopedIds === undefined ? '' : scopedIds.length ? ` AND o.shop_id IN (${scopedIds.map(() => '?').join(',')})` : ' AND 1 = 0';
+  const scopeParams = scopedIds ?? [];
+  const logShopId = scopedIds?.length === 1 ? scopedIds[0]! : 0;
+  const window = resolveWindow('aggregate', logShopId, opts);
   const logId = insert('sync_log', {
     task_type: 'aggregate',
-    shop_id: null,
+    shop_id: logShopId || null,
     window_start: window.from,
     window_end: window.to,
     started_at: startedAt,
@@ -626,20 +651,24 @@ export function refreshDerivedAggregates(opts: SyncOptions = {}): SyncResult {
     tx(() => {
       listingFixed = scalar<number>(
         `SELECT COUNT(*) FROM shop_listing
-          WHERE is_deleted = 0 AND map_status <> (CASE WHEN sku_id IS NULL THEN 2 ELSE 1 END)`,
+          WHERE is_deleted = 0 AND map_status <> (CASE WHEN sku_id IS NULL THEN 2 ELSE 1 END)${shopFilter}`,
+        ...scopeParams,
       );
       if (listingFixed > 0) {
         run(
           `UPDATE shop_listing
               SET map_status = CASE WHEN sku_id IS NULL THEN 2 ELSE 1 END, updated_at = datetime('now')
-            WHERE is_deleted = 0 AND map_status <> (CASE WHEN sku_id IS NULL THEN 2 ELSE 1 END)`,
+            WHERE is_deleted = 0 AND map_status <> (CASE WHEN sku_id IS NULL THEN 2 ELSE 1 END)${shopFilter}`,
+          ...scopeParams,
         );
       }
       const stale = all<{ id: number; listing_id: number; quantity: number; order_id: number }>(
         `SELECT i.id, i.listing_id, i.quantity, i.order_id
            FROM tk_order_item i
-           JOIN shop_listing l ON l.id = i.listing_id
-          WHERE i.is_deleted = 0 AND i.cost_matched = 0 AND i.sku_id IS NULL AND l.sku_id IS NOT NULL`,
+           JOIN tk_order o ON o.id = i.order_id AND o.is_deleted = 0
+           JOIN shop_listing l ON l.id = i.listing_id AND l.shop_id = o.shop_id
+          WHERE i.is_deleted = 0 AND i.cost_matched = 0 AND i.sku_id IS NULL AND l.sku_id IS NOT NULL${orderShopFilter}`,
+        ...scopeParams,
       );
       for (const row of stale) {
         const sku = get<{ id: number; purchase_cost: number; first_leg_cost: number; sku_code: string }>(
@@ -674,7 +703,7 @@ export function refreshDerivedAggregates(opts: SyncOptions = {}): SyncResult {
     status: errorMsg ? 3 : 1,
     error_msg: errorMsg,
     detail: { listing_fixed: listingFixed, item_backfilled: itemBackfilled },
-  }, 0, 'aggregate');
+  }, logShopId, 'aggregate');
 }
 
 /* ==================== sync_log 收口 ==================== */
@@ -776,11 +805,11 @@ export async function runTask(taskType: SyncTaskInput, shopId: number, opts: Syn
     case 'affiliate_order':
       return [await applyAffiliateAttribution(shopId, opts)];
     case 'aggregate':
-      return [refreshDerivedAggregates(opts)];
+      return [refreshDerivedAggregates(opts, [shopId])];
     case 'all': {
       const out: SyncResult[] = [];
       for (const t of ['listing', 'order', 'returns', 'affiliate_order'] as const) out.push(...(await runTask(t, shopId, opts)));
-      out.push(refreshDerivedAggregates(opts));
+      out.push(refreshDerivedAggregates(opts, [shopId]));
       return out;
     }
     default:
@@ -790,9 +819,16 @@ export async function runTask(taskType: SyncTaskInput, shopId: number, opts: Syn
 
 /** 全店批量入口：给调度器与 POST /sync/run（未指定 shop_id）用 */
 export async function runTaskForAllShops(taskType: SyncTaskInput, opts: SyncOptions = {}): Promise<SyncResult[]> {
+  if (taskType === 'aggregate') return [refreshDerivedAggregates(opts)];
   const out: SyncResult[] = [];
   for (const shopId of activeShopIds()) out.push(...(await runTask(taskType, shopId, opts)));
-  if (taskType === 'all' || taskType === 'aggregate') out.push(refreshDerivedAggregates(opts));
+  return out;
+}
+
+/** 指定店铺批量入口：供有数据范围的手动操作复用，绝不重新枚举全局店铺。 */
+export async function runTaskForShopIds(shopIds: number[], taskType: SyncTaskInput, opts: SyncOptions = {}): Promise<SyncResult[]> {
+  const out: SyncResult[] = [];
+  for (const shopId of [...new Set(shopIds)]) out.push(...(await runTask(taskType, shopId, opts)));
   return out;
 }
 

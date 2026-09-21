@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { ORDER_STATUS_LABEL } from '@tk/shared';
 import { activeShopIds, normalizeFulfillment, normalizeOrderStatus, refreshDerivedAggregates, resolveWindow, runTask, type SyncResult } from '../src/jobs/syncJobs.js';
 import { MockTikTokShopClient } from '../src/services/tiktok/mockProvider.js';
-import { get, insert, run } from '../src/core/db.js';
+import { all, get, insert, run } from '../src/core/db.js';
 import { config } from '../src/config.js';
 import { ACCOUNTS, auth, boot, dataOf, login, pageOf } from './helper.js';
 
@@ -114,6 +114,20 @@ describe('订单同步落库与幂等', () => {
     expect(again.inserted).toBe(0);
   });
 
+  it('订单号已在回收站时同步失败，不更新不可见的历史订单', async () => {
+    const orderExtId = `ORDER-TRASH-${Date.now()}`;
+    const orderId = insert('tk_order', { shop_id: SHOP, tk_order_id: orderExtId, order_status: 'COMPLETED', currency: 'MYR', total_paid: 45 });
+    run(`UPDATE tk_order SET is_deleted = 1 WHERE id = ?`, orderId);
+
+    await withMock('getOrders', (async () => [{ order_id: orderExtId, status: 'COMPLETED', currency: 'MYR', total_amount: 0.01 }]) as MockTikTokShopClient['getOrders'], async () => {
+      const [result] = await runTask('order', SHOP, WIN);
+      expect(result.failed).toBe(1);
+    });
+
+    const hidden = get<{ is_deleted: number; total_paid: number }>(`SELECT is_deleted, total_paid FROM tk_order WHERE id = ?`, orderId)!;
+    expect([Number(hidden.is_deleted), Number(hidden.total_paid)]).toEqual([1, 45]);
+  });
+
   it('找不到内部 SKU 的明细计入 failed 并让日志变「部分失败」，绝不静默按 0 成本', async () => {
     expect(first.status).toBe(2);
     expect(first.detail.unmapped_items ?? 0).toBeGreaterThan(0);
@@ -181,6 +195,53 @@ describe('商品 / 售后 / 联盟 / 派生刷新', () => {
     expect(['returns', 'affiliate_order']).toContain(String(lastLog(aff.task_type, SHOP)?.task_type));
   });
 
+  it('售后同步拒绝跨店重复单号和跨店订单关联', async () => {
+    const otherShop = get<{ id: number }>(`SELECT id FROM tk_shop WHERE id <> ? AND is_deleted = 0 ORDER BY id LIMIT 1`, SHOP)!;
+    const orderExtId = `RETURN-SCOPE-ORDER-${Date.now()}`;
+    const orderId = insert('tk_order', { shop_id: SHOP, tk_order_id: orderExtId, order_status: 'COMPLETED', currency: 'MYR' });
+    const returnExtId = `RETURN-SCOPE-${Date.now()}`;
+    insert('tk_return', { shop_id: otherShop.id, tk_return_id: returnExtId, refund_amount: 39.9, currency: 'MYR' });
+
+    await withMock('getReturns', (async () => [{ return_id: returnExtId, order_id: orderExtId, refund_amount: 0.01, currency: 'MYR' }]) as MockTikTokShopClient['getReturns'], async () => {
+      const [result] = await runTask('returns', SHOP, WIN);
+      expect(result.failed).toBe(1);
+    });
+
+    const still = get<{ shop_id: number; order_id: number | null; refund_amount: number }>(
+      `SELECT shop_id, order_id, refund_amount FROM tk_return WHERE tk_return_id = ?`, returnExtId,
+    )!;
+    expect([Number(still.shop_id), still.order_id, Number(still.refund_amount)]).toEqual([Number(otherShop.id), null, 39.9]);
+  });
+
+  it('售后同步拒绝引用跨店或回收站订单，并拒绝覆盖回收站售后', async () => {
+    const otherShop = get<{ id: number }>(`SELECT id FROM tk_shop WHERE id <> ? AND is_deleted = 0 ORDER BY id LIMIT 1`, SHOP)!;
+    const otherOrderExtId = `RETURN-CROSS-SHOP-ORDER-${Date.now()}`;
+    insert('tk_order', { shop_id: otherShop.id, tk_order_id: otherOrderExtId, order_status: 'COMPLETED', currency: 'MYR' });
+    const deletedOrderExtId = `RETURN-DELETED-ORDER-${Date.now()}`;
+    const deletedOrderId = insert('tk_order', { shop_id: SHOP, tk_order_id: deletedOrderExtId, order_status: 'COMPLETED', currency: 'MYR' });
+    run(`UPDATE tk_order SET is_deleted = 1 WHERE id = ?`, deletedOrderId);
+
+    const trashedReturnId = `RETURN-TRASH-${Date.now()}`;
+    const trashedReturn = insert('tk_return', { shop_id: SHOP, tk_return_id: trashedReturnId, refund_amount: 39.9, currency: 'MYR' });
+    run(`UPDATE tk_return SET is_deleted = 1 WHERE id = ?`, trashedReturn);
+    const crossShopReturnId = `RETURN-CROSS-SHOP-${Date.now()}`;
+    const deletedOrderReturnId = `RETURN-DELETED-ORDER-REF-${Date.now()}`;
+
+    await withMock('getReturns', (async () => [
+      { return_id: crossShopReturnId, order_id: otherOrderExtId, refund_amount: 0.01, currency: 'MYR' },
+      { return_id: deletedOrderReturnId, order_id: deletedOrderExtId, refund_amount: 0.01, currency: 'MYR' },
+      { return_id: trashedReturnId, refund_amount: 0.01, currency: 'MYR' },
+    ]) as MockTikTokShopClient['getReturns'], async () => {
+      const [result] = await runTask('returns', SHOP, WIN);
+      expect(result.failed).toBe(3);
+    });
+
+    expect(get(`SELECT id FROM tk_return WHERE tk_return_id = ?`, crossShopReturnId)).toBeUndefined();
+    expect(get(`SELECT id FROM tk_return WHERE tk_return_id = ?`, deletedOrderReturnId)).toBeUndefined();
+    expect(Number(get<{ refund_amount: number; is_deleted: number }>(`SELECT refund_amount, is_deleted FROM tk_return WHERE id = ?`, trashedReturn)?.refund_amount)).toBe(39.9);
+    expect(Number(get<{ is_deleted: number }>(`SELECT is_deleted FROM tk_return WHERE id = ?`, trashedReturn)?.is_deleted)).toBe(1);
+  });
+
   it('映射补齐后跑 aggregate：历史待映射行回填成本快照并留操作日志', () => {
     const sku = get<{ id: number; purchase_cost: number; first_leg_cost: number }>(
       `SELECT id, purchase_cost, first_leg_cost FROM product_sku WHERE is_deleted = 0 LIMIT 1`,
@@ -234,6 +295,74 @@ describe('同步入口鉴权与限范围', () => {
     expect(dataOf<{ summary: { fetched: number } }>(mine.body).summary.fetched).toBeGreaterThan(0);
   });
 
+  it('无 shop_id 的批量同步与聚合只写入范围内店铺', async () => {
+    const manager = await login(http, ACCOUNTS.opsManager);
+    const managerId = Number(get<{ id: number }>(`SELECT id FROM sys_user WHERE username = ?`, ACCOUNTS.opsManager)?.id);
+    const allowed = all<{ id: number }>(
+      `SELECT DISTINCT s.id FROM tk_shop s
+         JOIN sys_user_shop us ON us.shop_id = s.id AND us.is_deleted = 0
+         JOIN sys_user member ON member.id = us.user_id AND member.is_deleted = 0
+        WHERE s.is_deleted = 0 AND s.status = 1 AND s.auth_status = 1
+          AND member.dept = (SELECT dept FROM sys_user WHERE id = ?)
+        ORDER BY s.id`,
+      managerId,
+    ).map((r) => Number(r.id));
+    const visible = all<{ id: number }>(
+      `SELECT DISTINCT s.id FROM tk_shop s
+         JOIN sys_user_shop us ON us.shop_id = s.id AND us.is_deleted = 0
+         JOIN sys_user member ON member.id = us.user_id AND member.is_deleted = 0
+        WHERE s.is_deleted = 0 AND member.dept = (SELECT dept FROM sys_user WHERE id = ?)
+        ORDER BY s.id`,
+      managerId,
+    ).map((r) => Number(r.id));
+    const outsider = get<{ id: number }>(
+      `SELECT s.id FROM tk_shop s WHERE s.is_deleted = 0
+        AND NOT EXISTS (SELECT 1 FROM sys_user_shop us JOIN sys_user member ON member.id = us.user_id
+                         WHERE us.shop_id = s.id AND us.is_deleted = 0
+                           AND member.dept = (SELECT dept FROM sys_user WHERE id = ?))
+        ORDER BY s.id LIMIT 1`,
+      managerId,
+    );
+    expect(allowed.length).toBeGreaterThan(0);
+    expect(outsider).toBeTruthy();
+
+    const firstLogId = Number(get<{ id: number }>(`SELECT IFNULL(MAX(id), 0) AS id FROM sync_log`)?.id ?? 0);
+    const batch = await http.post('/api/sync/run').set(auth(manager)).send({
+      task_type: 'order',
+      window_start: '2099-01-01 00:00:00',
+      window_end: '2099-01-01 00:15:00',
+    });
+    expect(batch.status).toBe(200);
+    expect(dataOf<{ shop_ids: number[] }>(batch.body).shop_ids).toEqual(allowed);
+    const batchLogs = all<{ shop_id: number | null }>(
+      `SELECT shop_id FROM sync_log WHERE id > ? AND created_by = ? AND task_type = 'order'`,
+      firstLogId,
+      managerId,
+    );
+    expect(batchLogs.map((r) => Number(r.shop_id)).sort((a, b) => a - b)).toEqual(allowed);
+    expect(batchLogs.some((r) => Number(r.shop_id) === Number(outsider!.id))).toBe(false);
+
+    const listingId = insert('shop_listing', {
+      shop_id: Number(outsider!.id),
+      tk_sku_id: `SCOPE-OUTSIDE-${Date.now()}`,
+      product_name: '范围外聚合回归样本',
+      sale_price: 10,
+      map_status: 1,
+    });
+    const aggregateLogId = Number(get<{ id: number }>(`SELECT IFNULL(MAX(id), 0) AS id FROM sync_log`)?.id ?? 0);
+    const aggregate = await http.post('/api/sync/run').set(auth(manager)).send({ task_type: 'aggregate' });
+    expect(aggregate.status).toBe(200);
+    expect(dataOf<{ shop_ids: number[] }>(aggregate.body).shop_ids).toEqual(visible);
+    expect(Number(get<{ map_status: number }>(`SELECT map_status FROM shop_listing WHERE id = ?`, listingId)?.map_status)).toBe(1);
+    const aggregateLogs = all<{ shop_id: number | null }>(
+      `SELECT shop_id FROM sync_log WHERE id > ? AND created_by = ? AND task_type = 'aggregate'`,
+      aggregateLogId,
+      managerId,
+    );
+    expect(aggregateLogs.length).toBe(visible.length);
+    expect(aggregateLogs.every((r) => r.shop_id !== null && visible.includes(Number(r.shop_id)))).toBe(true);
+  });
+
   it('未授权店铺不允许手动补跑，任务名也必须是白名单', async () => {
     const boss = await login(http, ACCOUNTS.boss);
     run(`UPDATE tk_shop SET auth_status = 0 WHERE id = 4`);
@@ -265,6 +394,30 @@ describe('卖家表格导入与结算对账', () => {
     expect(dataOf<{ run: { inserted: number; updated: number } }>(again.body).run.inserted).toBe(0);
     // 明细缺行直接判参数错误，不落半条订单
     expect((await http.post('/api/sync/import/orders').set(auth(await boss())).send({ shop_id: SHOP, rows: [{ order_id: 'CSV-0002', status: 'X' }] })).status).toBe(400);
+  });
+
+  it('订单全局键已归属另一店铺时拒绝导入，且不改写原店订单', async () => {
+    const orderId = `CROSS-SHOP-${Date.now()}`;
+    insert('tk_order', {
+      shop_id: SHOP,
+      tk_order_id: orderId,
+      order_status: 'COMPLETED',
+      order_time: nowUtc(),
+      currency: 'MYR',
+      total_paid: 81,
+      created_by: 1,
+    } as never);
+
+    const res = await http.post('/api/sync/import/orders').set(auth(await boss())).send({
+      shop_id: 4,
+      rows: [{ order_id: orderId, status: 'CANCELLED', total_paid: 1, items: [{ price: 1, quantity: 1 }] }],
+    });
+
+    expect(res.status).toBe(200);
+    expect(dataOf<{ run: { inserted: number; updated: number; failed: number } }>(res.body).run).toMatchObject({ inserted: 0, updated: 0, failed: 1 });
+    expect(get<{ shop_id: number; order_status: string; total_paid: number }>(
+      `SELECT shop_id, order_status, total_paid FROM tk_order WHERE tk_order_id = ?`, orderId,
+    )).toMatchObject({ shop_id: SHOP, order_status: 'COMPLETED', total_paid: 81 });
   });
 
   it('结算账单重复导入只更新金额，不产生第二条流水', async () => {

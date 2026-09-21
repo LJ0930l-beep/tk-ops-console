@@ -290,10 +290,11 @@ function onSort({ prop, order }: { prop: string; order: string | null }): void {
 
 async function searchSku(keyword: string): Promise<void> {
   try {
-    const data = await apiGet<PageResult<Record<string, unknown>>>('/products/skus', { page: 1, pageSize: 50, keyword });
+    const data = await apiGet<PageResult<Record<string, unknown>>>('/stock/skus', { page: 1, pageSize: 50, keyword });
     skus.value = (data.list ?? []) as { id: number; sku_code: string; spec?: string | null }[];
-  } catch {
-    /* SKU 接口未就绪时下拉为空，仍可手填 ID 之外的字段 */
+  } catch (e) {
+    skus.value = [];
+    ElMessage.warning(errMsg(e));
   }
 }
 

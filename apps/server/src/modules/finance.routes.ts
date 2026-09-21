@@ -12,7 +12,7 @@ import { Router, type NextFunction, type Request, type Response } from 'express'
 import { z } from 'zod';
 import { round2, type CurrentUser } from '@tk/shared';
 import { all, get, insert, softDelete, tx, update, type SqlParam } from '../core/db.js';
-import { badRequest, forbidden, notFound, ok, parseBody, paginate, qv, wrap } from '../core/http.js';
+import { AppError, badRequest, forbidden, notFound, ok, parseBody, paginate, qv, wrap } from '../core/http.js';
 import { Q, queryPage } from '../core/query.js';
 import { canAccessShop, requireExport, requireMenu, shopScope, type AuthedRequest } from '../core/auth.js';
 import { logIfChanged, writeOpLog } from '../core/oplog.js';
@@ -27,7 +27,7 @@ import {
   type ProfitDim,
   type ReconcileRow,
 } from '../services/profit.js';
-import { createRateConverter, getRate, latestRates, listCurrencies, listRates, mockFetchRates, rateDay, toCnySql, upsertRate } from '../services/rates.js';
+import { createRateConverter, fetchPublicRates, getRate, InvalidRateRequestError, latestRates, listCurrencies, listRates, MAX_RATE_TO_CNY, PublicRateSourceError, RATE_SOURCE, rateDay, toCnySql, upsertRate, validIsoDay } from '../services/rates.js';
 
 const current = (req: Request): CurrentUser => (req as AuthedRequest).user;
 
@@ -880,7 +880,7 @@ function rateFilter(req: Request): Q {
 }
 
 const RATE_SELECT = `t.id, t.rate_date, t.currency, t.rate_to_cny, t.source, t.updated_at,
-       CASE WHEN t.source = 1 THEN '自动' ELSE '手工' END AS source_name`;
+       CASE t.source WHEN 1 THEN 'Frankfurter 公开 API' WHEN 2 THEN '手工' WHEN 3 THEN '延用前值' WHEN 4 THEN '演示数据' ELSE '未知来源' END AS source_name`;
 
 financeRouter.get(
   '/rate',
@@ -924,10 +924,14 @@ financeRouter.post(
     const user = current(req);
     const body = parseBody(
       z.object({
-        rate_date: z.string().min(10).max(20),
-        currency: z.string().min(2).max(8),
-        rate_to_cny: z.number().positive(),
-        source: z.union([z.literal(1), z.literal(2)]).default(2),
+        rate_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(validIsoDay, '汇率日期必须是有效的 YYYY-MM-DD'),
+        currency: z.string().regex(/^[A-Za-z]{3}$/, '币种必须使用三字母代码'),
+        rate_to_cny: z.number().finite().positive().max(MAX_RATE_TO_CNY),
+        source: z.literal(RATE_SOURCE.MANUAL).default(RATE_SOURCE.MANUAL),
+      }).superRefine((body, ctx) => {
+        if (body.currency.toUpperCase() === 'CNY' && body.rate_to_cny !== 1) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['rate_to_cny'], message: 'CNY 汇率必须固定为 1' });
+        }
       }),
       req.body,
     );
@@ -953,10 +957,10 @@ financeRouter.put(
     const body = parseBody(
       z
         .object({
-          rate_date: z.string().min(10).max(20),
-          currency: z.string().min(2).max(8),
-          rate_to_cny: z.number().positive(),
-          source: z.union([z.literal(1), z.literal(2)]),
+          rate_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(validIsoDay, '汇率日期必须是有效的 YYYY-MM-DD'),
+          currency: z.string().regex(/^[A-Za-z]{3}$/, '币种必须使用三字母代码'),
+          rate_to_cny: z.number().finite().positive().max(MAX_RATE_TO_CNY),
+          source: z.literal(RATE_SOURCE.MANUAL),
         })
         .partial(),
       req.body,
@@ -965,7 +969,10 @@ financeRouter.put(
     const currency = String(body.currency ?? before.currency ?? 'USD').toUpperCase();
     const rate = Number(body.rate_to_cny ?? before.rate_to_cny);
     if (!Number.isFinite(rate) || rate <= 0) throw badRequest('汇率必须是正数');
-    const r = upsertRate({ rate_date: day, currency, rate_to_cny: rate, source: body.source ?? 2, user_id: user.id });
+    if (!validIsoDay(day)) throw badRequest('汇率日期必须是有效的 YYYY-MM-DD');
+    if (!/^[A-Z]{3}$/.test(currency)) throw badRequest('币种必须使用三字母代码');
+    if (currency === 'CNY' && rate !== 1) throw badRequest('CNY 汇率必须固定为 1');
+    const r = upsertRate({ rate_date: day, currency, rate_to_cny: rate, source: RATE_SOURCE.MANUAL, user_id: user.id });
     if (r.id !== id) softDelete('exchange_rate', id);
     logIfChanged({
       user_id: user.id,
@@ -974,7 +981,7 @@ financeRouter.put(
       target_table: 'exchange_rate',
       target_id: r.id,
       before: before as Record<string, unknown>,
-      after: { ...before, rate_date: day, currency, rate_to_cny: rate, source: body.source ?? before.source },
+      after: { ...before, rate_date: day, currency, rate_to_cny: rate, source: RATE_SOURCE.MANUAL },
       keys: ['rate_date', 'currency', 'rate_to_cny', 'source'],
       ip: req.ip,
     });
@@ -994,19 +1001,31 @@ financeRouter.delete(
   }),
 );
 
-/**
- * 拉取牌价（本地模拟，不访问外网）：不传币种则刷新全部在用币种，source=1 自动。
- * 返回逐币种新旧值，前端据此提示「今日牌价已刷新」。
- */
+/** 拉取 Frankfurter v2 公开日汇率；不传币种则刷新当前系统使用的外币。 */
 financeRouter.post(
   '/rate/fetch',
   requireMenu('finance'),
-  wrap((req, res) => {
+  wrap(async (req, res) => {
     const user = current(req);
-    const body = parseBody(z.object({ date: z.string().min(10).max(20).optional(), currencies: z.array(z.string().length(3)).optional() }), req.body ?? {});
-    const out = mockFetchRates({ date: body.date, currencies: body.currencies });
+    const body = parseBody(
+      z.object({
+        date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+        currencies: z.array(z.string().length(3)).max(100).optional(),
+      }),
+      req.body ?? {},
+    );
+    let out;
+    try {
+      out = await fetchPublicRates({ date: body.date, currencies: body.currencies });
+    } catch (error) {
+      if (error instanceof InvalidRateRequestError) throw badRequest(error.message);
+      if (error instanceof PublicRateSourceError) throw new AppError(502, error.message);
+      throw error;
+    }
     writeOpLog({ user_id: user.id, module: '财务中心', action: 'create', target_table: 'exchange_rate', after: out, ip: req.ip });
-    ok(res, out, `已刷新 ${out.rows.length} 个币种 ${out.date} 牌价`);
+    const updated = out.rows.filter((r) => !r.skipped).length;
+    const skipped = out.rows.length - updated;
+    ok(res, out, `已从公开 API 刷新 ${updated} 个币种 ${out.date} 牌价${skipped ? `，${skipped} 个手工值已保留` : ''}`);
   }),
 );
 
@@ -1022,10 +1041,10 @@ financeRouter.post(
     const user = current(req);
     const body = parseBody(
       z.object({
-        from: z.string().min(10).max(20).optional(),
-        to: z.string().min(10).max(20).optional(),
+        from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+        to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
         days: z.coerce.number().int().min(1).max(366).optional(),
-        currencies: z.array(z.string().length(3)).optional(),
+        currencies: z.array(z.string().regex(/^[A-Za-z]{3}$/)).max(100).optional(),
       }),
       req.body ?? {},
     );
@@ -1033,32 +1052,39 @@ financeRouter.post(
     const days = body.days ?? 7;
     const to = rateDay(body.to ?? '') || today;
     const from = rateDay(body.from ?? '') || new Date(Date.parse(`${to}T00:00:00Z`) - (days - 1) * 86400_000).toISOString().slice(0, 10);
+    if (!validIsoDay(from) || !validIsoDay(to)) throw badRequest('补齐区间必须使用有效的 YYYY-MM-DD 日期');
     if (from > to) throw badRequest('起始日期不能晚于结束日期');
-    const currencies = (body.currencies?.length ? body.currencies : listCurrencies()).filter((c) => c !== 'CNY');
+    if (to > today) throw badRequest('不能补齐未来日期');
+    const spanDays = Math.floor((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86400_000) + 1;
+    if (spanDays > 366) throw badRequest('单次补齐区间不能超过 366 天');
+    const currencies = [...new Set((body.currencies?.length ? body.currencies : listCurrencies()).map((c) => String(c).toUpperCase()))]
+      .filter((c) => c !== 'CNY');
     const detail: { rate_date: string; currency: string; rate_to_cny: number }[] = [];
     tx(() => {
       for (const cur of currencies) {
-        const known = get<{ rate_date: string; rate_to_cny: number | string }>(
-          `SELECT rate_date, rate_to_cny FROM exchange_rate WHERE is_deleted = 0 AND currency = ? AND rate_date <= ? ORDER BY rate_date DESC LIMIT 1`,
+        let carry = get<{ rate_to_cny: number | string; source: number }>(
+          `SELECT rate_to_cny, source FROM exchange_rate WHERE is_deleted = 0 AND currency = ? AND rate_date < ? ORDER BY rate_date DESC LIMIT 1`,
           cur,
-          to,
+          from,
         );
-        if (!known) continue;
-        let rate = Number(known.rate_to_cny);
-        const span = Math.max(0, Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86400_000));
-        for (let i = 0; i <= span; i++) {
+        for (let i = 0; i < spanDays; i++) {
           const day = new Date(Date.parse(`${from}T00:00:00Z`) + i * 86400_000).toISOString().slice(0, 10);
-          const hit = get<{ rate_to_cny: number | string }>(
-            `SELECT rate_to_cny FROM exchange_rate WHERE is_deleted = 0 AND currency = ? AND rate_date = ?`,
+          const hit = get<{ rate_to_cny: number | string; source: number }>(
+            `SELECT rate_to_cny, source FROM exchange_rate WHERE is_deleted = 0 AND currency = ? AND rate_date = ?`,
             cur,
             day,
           );
           if (hit) {
-            rate = Number(hit.rate_to_cny);
+            carry = hit;
             continue;
           }
-          insert('exchange_rate', { rate_date: day, currency: cur, rate_to_cny: rate, source: 1, created_by: user.id });
+          // Carry forward only. Do not backfill earlier days from a later known rate.
+          if (!carry) continue;
+          const rate = Number(carry.rate_to_cny);
+          const source = Number(carry.source) === RATE_SOURCE.DEMO ? RATE_SOURCE.DEMO : RATE_SOURCE.CARRIED;
+          insert('exchange_rate', { rate_date: day, currency: cur, rate_to_cny: rate, source, created_by: user.id });
           detail.push({ rate_date: day, currency: cur, rate_to_cny: rate });
+          carry = { rate_to_cny: rate, source };
         }
       }
     });

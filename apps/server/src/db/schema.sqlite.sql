@@ -7,6 +7,11 @@
 
 PRAGMA foreign_keys = ON;
 
+CREATE TABLE IF NOT EXISTS schema_migration (
+  version    TEXT PRIMARY KEY,
+  applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- ---------- 5.8 系统支撑（一期，其余模块依赖它，故先建） ----------
 
 CREATE TABLE IF NOT EXISTS sys_role (
@@ -498,7 +503,7 @@ CREATE TABLE IF NOT EXISTS exchange_rate (
   rate_date   TEXT    NOT NULL,
   currency    TEXT    NOT NULL,
   rate_to_cny REAL    NOT NULL,
-  source      INTEGER NOT NULL DEFAULT 1,                -- 1自动 2手工
+  source      INTEGER NOT NULL DEFAULT 2,                -- 1 Frankfurter公开API 2手工 3延用前值 4演示数据
   created_by  INTEGER,
   created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
   updated_at  TEXT    NOT NULL DEFAULT (datetime('now')),
@@ -682,6 +687,25 @@ CREATE TABLE IF NOT EXISTS alert_event (
 );
 CREATE INDEX IF NOT EXISTS ix_event_rule_target ON alert_event(rule_id, target_type, target_id, detected_at);
 CREATE INDEX IF NOT EXISTS ix_event_status ON alert_event(status, priority, detected_at);
+
+-- 到期提醒：收件人和指派周期均参与幂等键；过期记录保留以供审计，不复用 stale 行。
+CREATE TABLE IF NOT EXISTS user_notification (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  recipient_id       INTEGER NOT NULL REFERENCES sys_user(id),
+  alert_event_id     INTEGER NOT NULL REFERENCES alert_event(id),
+  notification_type  TEXT    NOT NULL DEFAULT 'alert_due',
+  due_at_snapshot    TEXT    NOT NULL,
+  assignment_cycle   INTEGER NOT NULL DEFAULT 0,
+  read_at            TEXT,
+  stale_at           TEXT,
+  created_at         TEXT    NOT NULL DEFAULT (datetime('now')),
+  updated_at         TEXT    NOT NULL DEFAULT (datetime('now')),
+  is_deleted         INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_user_notification_dedupe
+  ON user_notification(recipient_id, alert_event_id, due_at_snapshot, assignment_cycle);
+CREATE INDEX IF NOT EXISTS ix_user_notification_inbox
+  ON user_notification(recipient_id, is_deleted, stale_at, read_at, created_at);
 
 CREATE TABLE IF NOT EXISTS operation_action (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,

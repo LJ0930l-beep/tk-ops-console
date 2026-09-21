@@ -10,6 +10,11 @@
 
 SET NAMES utf8mb4;
 
+CREATE TABLE IF NOT EXISTS schema_migration (
+  version    VARCHAR(120) NOT NULL PRIMARY KEY,
+  applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='应用数据迁移记录';
+
 CREATE TABLE IF NOT EXISTS sys_role (
   id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   role_name       VARCHAR(50)   NOT NULL,
@@ -478,7 +483,7 @@ CREATE TABLE IF NOT EXISTS exchange_rate (
   rate_date   DATE          NOT NULL,
   currency    CHAR(3)       NOT NULL,
   rate_to_cny DECIMAL(18,6) NOT NULL,                    -- 1 单位外币 = ? 人民币
-  source      TINYINT       NOT NULL DEFAULT 1,          -- 1自动 2手工
+  source      TINYINT       NOT NULL DEFAULT 2,          -- 1 Frankfurter公开API 2手工 3延用前值 4演示数据
   created_by  BIGINT UNSIGNED,
   created_at  DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at  DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -735,6 +740,24 @@ CREATE TABLE IF NOT EXISTS alert_event (
   CONSTRAINT fk_event_rule FOREIGN KEY (rule_id) REFERENCES alert_rule(id),
   CONSTRAINT fk_event_owner FOREIGN KEY (owner_id) REFERENCES sys_user(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='V2 预警事件（一次具体预警，不覆盖历史）';
+
+CREATE TABLE IF NOT EXISTS user_notification (
+  id                 BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  recipient_id       BIGINT UNSIGNED NOT NULL,
+  alert_event_id     BIGINT UNSIGNED NOT NULL,
+  notification_type  VARCHAR(32)   NOT NULL DEFAULT 'alert_due',
+  due_at_snapshot    VARCHAR(64)   NOT NULL,
+  assignment_cycle   BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  read_at            DATETIME,
+  stale_at           DATETIME,
+  created_at         DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at         DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  is_deleted         TINYINT       NOT NULL DEFAULT 0,
+  UNIQUE KEY ux_user_notification_dedupe (recipient_id, alert_event_id, due_at_snapshot, assignment_cycle),
+  KEY ix_user_notification_inbox (recipient_id, is_deleted, stale_at, read_at, created_at),
+  CONSTRAINT fk_user_notification_recipient FOREIGN KEY (recipient_id) REFERENCES sys_user(id),
+  CONSTRAINT fk_user_notification_event FOREIGN KEY (alert_event_id) REFERENCES alert_event(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='个人预警到期提醒收件箱';
 
 CREATE TABLE IF NOT EXISTS operation_action (
   id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,

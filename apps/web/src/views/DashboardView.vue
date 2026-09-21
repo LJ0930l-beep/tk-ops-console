@@ -175,13 +175,13 @@ const contentLabel = (t: unknown) => CONTENT_LABEL[Number(t)] ?? String(t ?? '-'
 
 const kpiCards = computed(() => {
   const s = summary.value;
-  const roi = s ? (s.ad_roi ?? adRoi(num(s.ad_spend), num(s.ad_gmv))) : null;
+  const roi = canSeeCost.value && s ? (s.ad_roi ?? adRoi(num(s.ad_spend), num(s.ad_gmv))) : null;
   return [
     { label: 'GMV（净）', value: money(s?.gmv), sub: `退款率 ${pctText(s?.refund_rate)}，退款 ${money(s?.refund_amount)}`, class: '', masked: false },
     { label: '订单数', value: int(s?.orders), sub: '非取消、非样品单', class: '', masked: false },
     { label: '预估毛利', value: mask(s?.est_gross_profit), sub: `毛利率 ${canSeeCost.value ? pctText(s?.est_profit_rate) : MASK} · 预估成本 ${mask(s?.est_cost)}`, class: 'profit', masked: !canSeeCost.value },
     { label: '实际到账', value: mask(s?.settled_amount), sub: '已打款结算流水折算', class: 'profit', masked: !canSeeCost.value },
-    { label: '广告', value: roi === null ? '—' : roi.toFixed(2), sub: `消耗 ${money(s?.ad_spend)} / GMV ${money(s?.ad_gmv)}`, class: '', masked: false },
+    { label: '广告', value: canSeeCost.value ? (roi === null ? '—' : roi.toFixed(2)) : MASK, sub: `消耗 ${mask(s?.ad_spend)} / GMV ${money(s?.ad_gmv)}`, class: '', masked: !canSeeCost.value },
     { label: '今日直播', value: int(s?.live_today), sub: '今日「已排班」场次数', class: '', masked: false },
   ];
 });

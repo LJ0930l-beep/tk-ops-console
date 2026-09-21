@@ -29,4 +29,48 @@ function addColumnIfMissing(db: DatabaseSync, table: string, column: string, ddl
 export function migrate(db: DatabaseSync): void {
   db.exec(readSchema());
   addColumnIfMissing(db, 'tk_shop', 'access_token_enc', 'TEXT');
+  migrateDueNotificationIndexes(db);
+  migrateLegacyRateSources(db);
+}
+
+/**
+ * Inbox indexes are also declared in schema.sqlite.sql for fresh databases.
+ * Reassert them for older/partially migrated databases and record the migration
+ * so operators can identify when the per-user reminder inbox was installed.
+ */
+function migrateDueNotificationIndexes(db: DatabaseSync): void {
+  const version = '2026-09-20-user-due-notifications-v1';
+  if (db.prepare('SELECT 1 FROM schema_migration WHERE version = ?').get(version)) return;
+
+  db.exec('BEGIN');
+  try {
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS ux_user_notification_dedupe
+      ON user_notification(recipient_id, alert_event_id, due_at_snapshot, assignment_cycle)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS ix_user_notification_inbox
+      ON user_notification(recipient_id, is_deleted, stale_at, read_at, created_at)`);
+    db.prepare('INSERT INTO schema_migration(version) VALUES (?)').run(version);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+/**
+ * The pre-Frankfurter /rate/fetch endpoint generated local mock values with source=1.
+ * Relabel those existing rows once; later Frankfurter rows must keep source=1 on startup.
+ */
+function migrateLegacyRateSources(db: DatabaseSync): void {
+  const version = '2026-09-20-rate-source-frankfurter-v2';
+  if (db.prepare('SELECT 1 FROM schema_migration WHERE version = ?').get(version)) return;
+
+  db.exec('BEGIN');
+  try {
+    db.exec('UPDATE exchange_rate SET source = 4 WHERE source = 1');
+    db.prepare('INSERT INTO schema_migration(version) VALUES (?)').run(version);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
 }

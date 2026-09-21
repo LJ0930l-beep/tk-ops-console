@@ -35,6 +35,7 @@ import {
   exchangeRate,
   resolvePeriod,
   roiByCollab,
+  roiByCollabRank,
   roiByCreator,
   type PeriodRange,
 } from '../services/creator/roi.js';
@@ -1659,7 +1660,25 @@ creatorRouter.get(
     const region = (qv(req, 'region') ?? '').trim().toUpperCase();
     const group = qv(req, 'group') === 'true' || qv(req, 'group') === '1';
     const limit = Math.min(200, intOf(qv(req, 'limit')) ?? 50);
-    if (group) {
+    // 三档维度（PRD §3.4）：dim=creator|bd|collab；group=true 是 bd 的老写法，保留兼容
+    const dim = (qv(req, 'dim') || (group ? 'bd' : 'creator')).toLowerCase();
+    if (dim === 'collab') {
+      const vis = creatorScope(user, 'c');
+      const rows = roiByCollabRank({
+        period,
+        scopeSql: `${vis.sql}${region ? ' AND c.region = ?' : ''}`,
+        scopeParams: [...vis.params, ...(region ? [region] : [])],
+        limit,
+      });
+      ok(res, {
+        dimension: 'collab',
+        period,
+        total: rows.length,
+        list: user.can_see_cost ? rows : rows.map((r) => maskFields(r as unknown as Record<string, unknown>, ROI_COST_FIELDS, false)),
+      });
+      return;
+    }
+    if (dim === 'bd') {
       const rows = bdRows(user, period, true);
       ok(res, {
         dimension: 'bd',

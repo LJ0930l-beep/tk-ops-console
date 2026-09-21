@@ -67,7 +67,7 @@ import { computed, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { RefreshLeft, Search } from '@element-plus/icons-vue';
-import { MASK, collabRoi, num, round2 } from '@tk/shared';
+import { COLLAB_STATUS, MASK, collabRoi, num, round2 } from '@tk/shared';
 import { apiGet, errMsg } from '@/api/client';
 import { useAuthStore } from '@/stores/auth';
 import { useDictStore } from '@/stores/dict';
@@ -219,19 +219,33 @@ function roiOfBdTotal(): string {
   return roi === null ? '—' : roi.toFixed(2);
 }
 
-/* ---------- 取数：/creators/roi?dim=&from=&to=&region=&limit= ---------- */
+/* ---------- 取数：/creators/roi/rank?dim=&period=&region=&limit= ---------- */
+const COOP_LABEL: Record<number, string> = { 1: '纯佣金', 2: '坑位费+佣金', 3: '付费视频', 4: '直播专场' };
+const COLLAB_LABEL: Record<number, string> = {
+  [COLLAB_STATUS.AGREED]: '已谈妥',
+  [COLLAB_STATUS.TO_SHIP]: '待寄样',
+  [COLLAB_STATUS.IN_TRANSIT]: '样品在途',
+  [COLLAB_STATUS.TO_PUBLISH]: '待发布',
+  [COLLAB_STATUS.PUBLISHED]: '已发布',
+  [COLLAB_STATUS.FINISHED]: '已完结',
+  [COLLAB_STATUS.OVERDUE]: '超期未履约',
+  [COLLAB_STATUS.CANCELLED]: '已取消',
+};
+
 async function load() {
   loading.value = true;
   try {
-    const data = await apiGet<Row | Row[]>('/creators/roi', {
+    const data = await apiGet<Row | Row[]>('/creators/roi/rank', {
       dim: dim.value,
       limit: limit.value,
-      ...(range.value?.[0] ? { from: range.value[0] } : {}),
-      ...(range.value?.[1] ? { to: range.value[1] } : {}),
+      ...(range.value?.[0] && range.value?.[1] ? { period: `${range.value[0]}~${range.value[1]}` } : {}),
       ...(region.value ? { region: region.value } : {}),
     });
     const list = Array.isArray(data) ? data : ((data?.list as Row[] | undefined) ?? []);
-    rows.value = list;
+    // 合作单维度后端回数字枚举，这里换成中文，否则表格里是一列 1/2/3
+    rows.value = dim.value === 'collab'
+      ? list.map((r) => ({ ...r, coop_type: COOP_LABEL[num(r.coop_type)] ?? String(r.coop_type ?? ''), status: COLLAB_LABEL[num(r.status)] ?? String(r.status ?? '') }))
+      : list;
   } catch (e) {
     rows.value = [];
     ElMessage.error(errMsg(e));

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { all, get, run } from '../src/core/db.js';
+import { all, get, insert, run } from '../src/core/db.js';
 import { IMPORT_ROW_LIMIT } from '../src/core/importer.js';
 import { ACCOUNTS, auth, boot, dataOf, login } from './helper.js';
 
@@ -315,6 +315,21 @@ describe('导入中心：汇率与视频', () => {
     expect(rows.find((r) => r.currency === 'MYR')?.rate_to_cny).toBe(1.55);
   });
 
+  it('拒绝无效日历日期以及不等于 1 的 CNY 汇率', async () => {
+    const day = '2025-02-30';
+    const res = await post(ACCOUNTS.finance, {
+      table: 'exchange_rate',
+      rows: [
+        { 日期: day, 币种: 'USD', 对人民币汇率: '7.2' },
+        { 日期: '2025-02-28', 币种: 'CNY', 对人民币汇率: '7.2' },
+      ],
+    });
+    const out = dataOf<ImportOut>(res.body);
+    expect(out.inserted).toBe(0);
+    expect(out.failed).toBe(2);
+    expect(all<{ id: number }>(`SELECT id FROM exchange_rate WHERE (rate_date = ? AND currency = 'USD') OR (rate_date = '2025-02-28' AND currency = 'CNY')`, day)).toHaveLength(0);
+  });
+
   it('视频：只有链接也能取到视频ID，发布时间按店铺时区换算，达人与商品自动归因', async () => {
     const res = await post(ACCOUNTS.ops, {
       table: 'video',
@@ -440,6 +455,37 @@ describe('导入中心：审验补强（跨店铺改写 / 报错文案 / 看板�
     expect(out.errors[0].reason).toContain('不在你的数据范围内');
     const still = get<{ refund_amount: number; shop_id: number }>(`SELECT refund_amount, shop_id FROM tk_return WHERE tk_return_id = ?`, rid)!;
     expect([Number(still.shop_id), Number(still.refund_amount)]).toEqual([Number(shopTwo.id), 39.9]);
+  });
+
+  it('有两店权限的管理员也不能把同号售后重关联到另一店铺的订单', async () => {
+    const rid = `RMA-ALL-SCOPE-${Date.now()}`;
+    insert('tk_return', { shop_id: shopTwo.id, tk_return_id: rid, refund_amount: 39.9, currency: 'MYR', status: 'COMPLETED' });
+
+    const hijack = await post(ACCOUNTS.boss, {
+      table: 'tk_return',
+      rows: [{ 售后单号: rid, 订单号: orderOne.tk_order_id, 退款金额: '0.01', 店铺ID: shopOne.id }],
+    });
+    const out = dataOf<ImportOut>(hijack.body);
+    expect(hijack.status).toBe(200);
+    expect(out.failed).toBe(1);
+    expect(out.errors[0].reason).toContain('拒绝跨店改写');
+    const still = get<{ refund_amount: number; shop_id: number; order_id: number | null }>(
+      `SELECT refund_amount, shop_id, order_id FROM tk_return WHERE tk_return_id = ?`, rid,
+    )!;
+    expect([Number(still.shop_id), Number(still.refund_amount), still.order_id]).toEqual([Number(shopTwo.id), 39.9, null]);
+  });
+
+  it('有两店权限的管理员也不能用同一全局视频 ID 改写另一店铺的视频指标', async () => {
+    const vid = `77710000000000${Date.now()}`;
+    const seed = await post(ACCOUNTS.boss, { table: 'video', rows: [{ 视频ID: vid, 播放量: '100', 店铺ID: shopTwo.id }] });
+    expect(dataOf<ImportOut>(seed.body).inserted).toBe(1);
+
+    const hijack = await post(ACCOUNTS.boss, { table: 'video', rows: [{ 视频ID: vid, 播放量: '999999', 店铺ID: shopOne.id }] });
+    const out = dataOf<ImportOut>(hijack.body);
+    expect(out.failed).toBe(1);
+    expect(out.errors[0].reason).toContain('拒绝跨店改写');
+    const still = get<{ views: number; shop_id: number }>(`SELECT views, shop_id FROM video WHERE tk_video_id = ?`, vid)!;
+    expect([Number(still.shop_id), Number(still.views)]).toEqual([Number(shopTwo.id), 100]);
   });
 
   it('唯一键被回收站里的记录占着时给运营人话，不把 sqlite 原文甩进响应和日志', async () => {

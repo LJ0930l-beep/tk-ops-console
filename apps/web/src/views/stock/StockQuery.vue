@@ -199,7 +199,7 @@ function goLedger(row: Row): void {
 onMounted(async () => {
   const [wh, spu] = await Promise.allSettled([
     apiGet<PageResult<Record<string, unknown>>>('/stock/warehouses', { page: 1, pageSize: 200 }),
-    apiGet<PageResult<Record<string, unknown>>>('/products/spus', { page: 1, pageSize: 200 }),
+    apiGet<PageResult<Record<string, unknown>>>('/stock/spus', { page: 1, pageSize: 200 }),
   ]);
   const list = (r: PromiseSettledResult<{ list: Record<string, unknown>[] }>) => (r.status === 'fulfilled' ? (r.value.list ?? []) : []);
   warehouses.value = list(wh) as { id: number; name: string }[];

@@ -273,6 +273,42 @@ export function roiByCollab(collabId: number, period: PeriodRange = { from: '', 
   return { ...finishRoi(row), collab_id: Number(row.collab_id), collab_no: String(row.collab_no), status: Number(row.status), coop_type: Number(row.coop_type) };
 }
 
+/**
+ * 合作单维度 ROI 排行（PRD §3.4「维度切换：按达人/按 BD/按合作单」的第三档）。
+ * 口径与 roiByCollab 完全一致，只是把单张换成按可见范围内的整表排名。
+ * @param opts.scopeSql creatorScope(user, 'c') 生成的 AND 片段
+ */
+export function roiByCollabRank(opts: { period: PeriodRange; scopeSql?: string; scopeParams?: SqlParam[]; limit?: number }): CollabRoiRow[] {
+  const scope = opts.scopeSql ? opts.scopeSql.replace(/^\s*AND\s+/i, '') : '';
+  const sql = `
+    SELECT l.id AS collab_id, l.collab_no, l.status, l.coop_type, l.creator_id,
+           c.handle, c.nickname, c.region, c.owner_id, u.real_name AS owner_name,
+           (SELECT COUNT(*) FROM video v WHERE v.collab_id = l.id AND v.is_deleted = 0) AS collabs,
+           (SELECT COUNT(*) FROM video v WHERE v.collab_id = l.id AND v.is_deleted = 0) AS published_videos,
+           COALESCE(inc.orders, 0) AS orders,
+           COALESCE(inc.gmv_cny, 0) AS gmv_cny,
+           COALESCE(inc.refund_cny, 0) AS refund_cny,
+           COALESCE(sc.sample_cost, 0) AS sample_cost,
+           COALESCE(sc.shipping_cost, 0) AS sample_shipping,
+           COALESCE(${COLLAB_FEE_CNY}, 0) AS fixed_fee_cny,
+           COALESCE(inc.commission_cny, 0) AS commission_cny
+      FROM collaboration l
+      JOIN creator c ON c.id = l.creator_id
+      LEFT JOIN sys_user u ON u.id = c.owner_id
+      LEFT JOIN (${incomeSql('collab', opts.period)}) inc ON inc.key_id = l.id
+      LEFT JOIN (${SAMPLE_COST_BY_COLLAB}) sc ON sc.collab_id = l.id
+     WHERE l.is_deleted = 0 ${scope ? `AND ${scope}` : ''}
+     ORDER BY gmv_cny DESC, l.id ASC
+     LIMIT ${Math.min(500, Math.max(1, opts.limit ?? 100))}`;
+  return all<Record<string, unknown>>(sql, ...(opts.scopeParams ?? [])).map((r) => ({
+    ...finishRoi(r),
+    collab_id: Number(r.collab_id),
+    collab_no: String(r.collab_no),
+    status: Number(r.status),
+    coop_type: Number(r.coop_type),
+  }));
+}
+
 export interface BdRow {
   user_id: number;
   real_name: string;

@@ -25,6 +25,7 @@ import {
   type ShopRef,
 } from '../core/importer.js';
 import { matchSkuBySellerSku, normalizeListingStatus, normalizeReturnType } from '../jobs/syncJobs.js';
+import { MAX_RATE_TO_CNY, validIsoDay } from '../services/rates.js';
 
 export const importRouter = Router();
 
@@ -205,6 +206,9 @@ export const IMPORT_SPECS: ImportSpec[] = [
       };
       // 达人/店铺/商品只在缺失时补：抓取侧的空关系不该抹掉系统里已归因好的结果
       assertRowShop(ctx, exist?.shop_id, `视频 ${vid}`);
+      if (ref && exist?.shop_id != null && Number(exist.shop_id) !== ref.shop_id) {
+        throw new Error('已有视频号归属其他店铺，已拒绝跨店改写');
+      }
       if (creator_id && !exist?.creator_id) data.creator_id = creator_id;
       if (ref && !exist?.shop_id) data.shop_id = ref.shop_id;
       if (spu && !exist?.spu_id) data.spu_id = spu.id;
@@ -328,6 +332,9 @@ export const IMPORT_SPECS: ImportSpec[] = [
       if (row.__order_id !== undefined) data.order_id = Number(row.__order_id);
       const exist = get<{ id: number; shop_id: number }>(`SELECT id, shop_id FROM tk_return WHERE is_deleted = 0 AND tk_return_id = ?`, rid);
       assertRowShop(ctx, exist?.shop_id, `售后单 ${rid}`);
+      if (exist && Number(exist.shop_id) !== ref.shop_id) {
+        throw new Error('已有售后单号归属其他店铺，已拒绝跨店改写');
+      }
       if (exist) {
         delete data.tk_return_id;
         if (Object.keys(data).length) update('tk_return', exist.id, data);
@@ -398,9 +405,13 @@ export const IMPORT_SPECS: ImportSpec[] = [
       { key: 'rate_to_cny', label: '对人民币汇率', required: true, sample: '1.52' },
     ],
     shape: z.object({
-      rate_date: zDay,
-      currency: zText.pipe(z.string().length(3, '币种请用三字母代码，如 MYR')).transform((c) => c.toUpperCase()),
-      rate_to_cny: zNum,
+      rate_date: zDay.refine(validIsoDay, '汇率日期必须是有效的 YYYY-MM-DD'),
+      currency: zText.pipe(z.string().regex(/^[A-Za-z]{3}$/, '币种请用三字母代码，如 MYR')).transform((c) => c.toUpperCase()),
+      rate_to_cny: zNum.refine((n) => Number.isFinite(n) && n > 0 && n <= MAX_RATE_TO_CNY, '汇率必须是可存储的有限正数'),
+    }).superRefine((row, ctx) => {
+      if (row.currency === 'CNY' && row.rate_to_cny !== 1) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['rate_to_cny'], message: 'CNY 汇率必须固定为 1' });
+      }
     }),
     upsert: upsertFn(
       'exchange_rate',

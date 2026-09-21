@@ -4,7 +4,8 @@ import { MENU_KEYS, type CurrentUser, type MenuKey } from '@tk/shared';
 import { all, get, insert, run, softDelete, tx, update } from '../core/db.js';
 import { badRequest, forbidden, notFound, ok, parseBody, wrap } from '../core/http.js';
 import { Q, queryList, queryPage } from '../core/query.js';
-import { hashPassword, requireMenu, type AuthedRequest } from '../core/auth.js';
+import { hashPassword, requireMenu, shopScope, type AuthedRequest } from '../core/auth.js';
+import { maskError } from '../core/redact.js';
 import { writeOpLog } from '../core/oplog.js';
 
 const current = (req: object): CurrentUser => (req as AuthedRequest).user;
@@ -242,6 +243,7 @@ export const syncLogRouter = Router();
 
 syncLogRouter.get(
   '/',
+  sysOnly,
   wrap((req, res) => {
     const q = new Q('sl.is_deleted = 0')
       .eq('sl.task_type', req.query.task_type, false)
@@ -257,17 +259,22 @@ syncLogRouter.get(
   }),
 );
 
-/** 同步健康度：最近一次各任务状态，供工作台红点与系统监控页 */
+/**
+ * 同步健康度：最近一次各任务状态，供顶栏红点与系统监控页。
+ * 顶栏对所有角色可见，所以这里不挡菜单，但必须按数据范围收敛、且错误文案过脱敏，
+ * 否则任何登录用户都能读到别人店铺的同步明细和上游报错原文。
+ */
 syncLogRouter.get('/health', wrap((req, res) => {
-  const scope = (req as AuthedRequest).user;
-  void scope;
-  ok(res, all(
+  const scope = shopScope(current(req), 'sl.shop_id');
+  const rows = all<Record<string, unknown>>(
     `SELECT sl.shop_id, s.shop_name, sl.task_type, sl.status, sl.fetched, sl.failed, sl.started_at, sl.error_msg
        FROM sync_log sl
        JOIN tk_shop s ON s.id = sl.shop_id
-      WHERE sl.is_deleted = 0 AND sl.id IN (SELECT MAX(id) FROM sync_log WHERE is_deleted = 0 GROUP BY shop_id, task_type)
+      WHERE sl.is_deleted = 0 AND sl.id IN (SELECT MAX(id) FROM sync_log WHERE is_deleted = 0 GROUP BY shop_id, task_type) ${scope.sql}
       ORDER BY sl.status DESC, s.shop_name`,
-  ));
+    ...scope.params,
+  );
+  ok(res, rows.map((r) => ({ ...r, error_msg: r.error_msg === null ? null : maskError(String(r.error_msg)) })));
 }));
 
 /* ==================== 表 26 数据字典 ==================== */

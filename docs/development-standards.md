@@ -123,10 +123,24 @@ docs/{prd,development-standards,epics,changes-vs-plan,source-plan}.md/.txt + iss
 | 唯一冲突 | 由 `app.ts:50` 兜底捕获 `UNIQUE constraint failed` → **409 `code:40900`**，消息固定"编号/唯一标识重复，请检查后重试" | `app.ts` |
 | 未匹配路由 | 404 `code:40400` | `app.ts:41` |
 | 未预期异常 | 500 `code:50000`，**不返回堆栈** | `app.ts:55` |
+| 触发限流 | 429 `code:42900`，带 `RateLimit`/`RateLimit-Policy` 标准头 | `core/rateLimit.ts` |
 
-错误码分段约定（新增码不许自创段）：`0` 成功；`400xx` 参数/业务规则；`401xx` 未登录/过期；`403xx` 无权限；`404xx` 不存在；`409xx` 冲突；`500xx` 服务端。**报表/口径类错误**在 `400` 内用子码细分（如 `EPIC-7-03` 的汇率缺失返回 400 + `code:40010`，前端据此弹专属提示）。
+错误码分段约定（新增码不许自创段）：`0` 成功；`400xx` 参数/业务规则；`401xx` 未登录/过期；`403xx` 无权限；`404xx` 不存在；`409xx` 冲突；`429xx` 限流；`500xx` 服务端。**报表/口径类错误**在 `400` 内用子码细分（如 `EPIC-7-03` 的汇率缺失返回 400 + `code:40010`，前端据此弹专属提示）。
 
 异步/作业里的错误不抛 HTTP，一律 `sendAlert({level:'error'})` + 写 `sync_log.status=3`。
+
+### 6.1.1 限流三档（`core/rateLimit.ts`）
+
+| 档 | 计数键 | 默认 | 环境变量 |
+| --- | --- | --- | --- |
+| 登录 | IP + 用户名，**只数失败** | 10 次 / 15 分钟 | `RATE_LIMIT_LOGIN_MAX`、`RATE_LIMIT_LOGIN_WINDOW_MIN` |
+| 全局 API | IP | 600 次 / 15 分钟 | `RATE_LIMIT_MAX`、`RATE_LIMIT_WINDOW_MIN` |
+| 导出/模板 | IP（只对 `/export*`、`/import/template` 计数） | 20 次 / 15 分钟 | `RATE_LIMIT_EXPORT_MAX`、`RATE_LIMIT_EXPORT_WINDOW_MIN` |
+
+整体开关 `RATE_LIMIT=false` 关闭；`NODE_ENV=test` 下默认关闭（整套回归会从 127.0.0.1 打上千次请求），
+需要验限流的用例用 `boot(true, { rateLimit: { enabled: true, ... } })` 显式打开。
+部署在 nginx 等反向代理后面**必须**设 `TRUST_PROXY=1`，否则 `req.ip` 是代理地址，全站共用一个计数桶。
+计数在单进程内存里（与「单进程 + SQLite」的部署形态一致）；真要多实例，得先换 Redis store。
 
 ### 6.2 核心工具函数用法（逐个实测签名，照抄即可运行）
 

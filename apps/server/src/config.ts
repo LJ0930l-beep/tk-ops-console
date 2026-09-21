@@ -24,9 +24,43 @@ if (!isProd && !process.env.JWT_SECRET) {
   console.warn('[config] 警告：使用内置开发 JWT 密钥，仅限本地/演示环境；生产必须设置 JWT_SECRET');
 }
 
+const num = (name: string, fallback: number): number => {
+  const v = Number(process.env[name]);
+  return Number.isFinite(v) && v > 0 ? v : fallback;
+};
+
+/**
+ * 接口限流阈值（core/rateLimit.ts 三档）。
+ * 测试环境默认关闭：整套回归会从 127.0.0.1 打上千次请求，开着必然互相踩；
+ * 需要验限流的 spec 自己用 createApp({ rateLimit: { enabled: true, ... } }) 显式打开。
+ */
+export interface RateLimitConfig {
+  enabled: boolean;
+  /** 全局 API：每 IP 每窗口最大请求数 */
+  windowMinutes: number;
+  max: number;
+  /** 登录：每 IP+用户名 的失败次数上限（成功不计数） */
+  loginWindowMinutes: number;
+  loginMax: number;
+  /** 导出/模板：整表查询，单独一档更严 */
+  exportWindowMinutes: number;
+  exportMax: number;
+}
+
+const rateLimit: RateLimitConfig = {
+  enabled: process.env.RATE_LIMIT !== 'false' && env !== 'test',
+  windowMinutes: num('RATE_LIMIT_WINDOW_MIN', 15),
+  max: num('RATE_LIMIT_MAX', 600),
+  loginWindowMinutes: num('RATE_LIMIT_LOGIN_WINDOW_MIN', 15),
+  loginMax: num('RATE_LIMIT_LOGIN_MAX', 10),
+  exportWindowMinutes: num('RATE_LIMIT_EXPORT_WINDOW_MIN', 15),
+  exportMax: num('RATE_LIMIT_EXPORT_MAX', 20),
+};
+
 export const config = {
   env,
   isProd,
+  rateLimit,
   port: Number(process.env.PORT ?? 8787),
   host: process.env.HOST ?? '127.0.0.1',
   jwtSecret: isProd ? required('JWT_SECRET', process.env.JWT_SECRET, 32) : process.env.JWT_SECRET || devSecret,
@@ -50,4 +84,9 @@ export const config = {
   protectDefaultDays: Number(process.env.CREATOR_PROTECT_DAYS ?? 30),
   syncOverlapMinutes: Number(process.env.SYNC_OVERLAP_MIN ?? 5),
   enableScheduler: process.env.ENABLE_SCHEDULER !== 'false',
+  /**
+   * 反向代理层数（nginx 等）。不设时 req.ip 就是代理自己的地址，
+   * 限流会把全站用户算成同一个 key —— 部署在代理后面必须设 TRUST_PROXY=1。
+   */
+  trustProxy: process.env.TRUST_PROXY ?? '',
 };

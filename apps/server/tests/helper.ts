@@ -3,7 +3,7 @@ import request from 'supertest';
 import { setDb } from '../src/core/db.js';
 import { migrate } from '../src/db/migrate.js';
 import { seedDemoData } from '../src/db/seed.js';
-import { createApp } from '../src/app.js';
+import { createApp, type AppOptions } from '../src/app.js';
 
 export interface TestContext {
   db: DatabaseSync;
@@ -11,14 +11,17 @@ export interface TestContext {
   http: ReturnType<typeof request>;
 }
 
-/** 内存库 + 建表 + 演示数据，返回 supertest 客户端 */
-export function boot(seed = true): TestContext {
+/**
+ * 内存库 + 建表 + 演示数据，返回 supertest 客户端。
+ * appOpts 只在需要改应用级开关时用（例如限流：vitest 下 NODE_ENV=test，默认是关的）。
+ */
+export function boot(seed = true, appOpts?: AppOptions): TestContext {
   const db = new DatabaseSync(':memory:');
   db.exec('PRAGMA foreign_keys = ON');
   setDb(db);
   migrate(db);
   if (seed) seedDemoData({});
-  return { db, http: request(createApp()) };
+  return { db, http: request(createApp(appOpts)) };
 }
 
 export const DEFAULT_PASSWORD = 'Passw0rd!';

@@ -72,7 +72,9 @@ setDb(db);
 migrate(db);
 seedDemoData({});
 
-const server = createApp().listen(0, '127.0.0.1');
+// 冒烟一轮要打上千次请求，全局限流（默认 600/15min）会把自己拦下来，所以扫描阶段关掉，
+// 末尾再单独用一套极小阈值证明限流在真 HTTP 上确实生效。
+const server = createApp({ rateLimit: false }).listen(0, '127.0.0.1');
 await new Promise<void>((r) => server.once('listening', r));
 const BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
@@ -285,6 +287,73 @@ for (const t of taskOptions) {
     fails.push({ route: `POST /api/sync/run {task_type:${t}}`, role: 'chain', status: res.status, note: '前端下拉里有、后端 enum 不认' });
   }
 }
+
+/* ---------- ⑥ 限流：三档各起一套极小阈值的服务，证明真 HTTP 上会回 429 ---------- */
+/** 每档一个独立 app（限流计数在内存里，实例之间互不影响），避免前一档的请求把后一档的额度吃掉 */
+async function withLimitedApp(cfg: Record<string, unknown>, run: (call: typeof rlCall, base: string) => Promise<void>): Promise<void> {
+  const srv = createApp({ rateLimit: { enabled: true, windowMinutes: 15, loginWindowMinutes: 15, exportWindowMinutes: 15, ...cfg } }).listen(0, '127.0.0.1');
+  await new Promise<void>((r) => srv.once('listening', r));
+  const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+  const call = async (method: string, path: string, token?: string, body?: unknown) => {
+    const res = await fetch(base + path, {
+      method,
+      headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), ...(body ? { 'content-type': 'application/json' } : {}) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    let json: unknown = null;
+    try {
+      json = await res.json();
+    } catch {
+      /* 429 也可能没有 JSON 体 */
+    }
+    return { status: res.status, json };
+  };
+  try {
+    await run(call, base);
+  } finally {
+    srv.close();
+  }
+}
+type rlCall = (method: string, path: string, token?: string, body?: unknown) => Promise<{ status: number; json: unknown }>;
+
+await withLimitedApp({ max: 3, loginMax: 100, exportMax: 100 }, async (call) => {
+  const tok = (await call('POST', '/api/auth/login', undefined, { username: 'boss', password: PASSWORD })).json as { data?: { token?: string } };
+  const statuses: number[] = [];
+  for (let i = 0; i < 6; i++) statuses.push((await call('GET', '/api/dashboard/summary', tok?.data?.token)).status);
+  checks++;
+  chain.push(`${statuses.includes(429) ? '✓' : '✗'} 全局档限流（阈值 3）→ ${statuses.join(',')}`);
+  if (!statuses.includes(429)) fails.push({ route: 'GET /api/dashboard/summary', role: 'chain', status: 200, note: '超过全局阈值仍未 429' });
+});
+
+await withLimitedApp({ max: 1000, loginMax: 2, exportMax: 100 }, async (call) => {
+  const bad = { username: 'boss', password: 'wrong-password' };
+  const seen: number[] = [];
+  for (let i = 0; i < 3; i++) seen.push((await call('POST', '/api/auth/login', undefined, bad)).status);
+  const blocked = seen.includes(429);
+  checks++;
+  // 换账号仍能登录：key 是 IP+用户名，锁住一个不该连坐别人
+  const other = await call('POST', '/api/auth/login', undefined, { username: 'finwu', password: PASSWORD });
+  chain.push(`${blocked && other.status === 200 ? '✓' : '✗'} 登录爆破被拦（阈值 2）→ ${seen.join(',')}；换账号 finwu → ${other.status}`);
+  if (!blocked) fails.push({ route: 'POST /api/auth/login', role: 'chain', status: 200, note: '连续失败登录未被限流' });
+  if (other.status !== 200) fails.push({ route: 'POST /api/auth/login', role: 'chain', status: other.status, note: 'boss 被锁后 finwu 也登不进来（限流 key 连坐）' });
+});
+
+await withLimitedApp({ max: 1000, loginMax: 100, exportMax: 1 }, async (call) => {
+  const tok = ((await call('POST', '/api/auth/login', undefined, { username: 'boss', password: PASSWORD })).json as { data?: { token?: string } })?.data?.token;
+  const first = await call('GET', '/api/orders/export', tok);
+  const second = await call('GET', '/api/orders/export', tok);
+  const list = await call('GET', '/api/orders?page=1&pageSize=5', tok);
+  checks++;
+  const good = first.status === 200 && second.status === 429 && list.status === 200;
+  chain.push(`${good ? '✓' : '✗'} 导出单独一档（阈值 1）→ 首次 ${first.status}、第二次 ${second.status}、普通列表 ${list.status}`);
+  if (!good)
+    fails.push({
+      route: 'GET /api/orders/export',
+      role: 'chain',
+      status: second.status,
+      note: `导出档限流不符合预期（${first.status}/${second.status}/${list.status}）`,
+    });
+});
 
 /* ---------- 输出 ---------- */
 server.close();

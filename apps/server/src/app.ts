@@ -2,6 +2,8 @@ import express, { type Express, type NextFunction, type Request, type Response }
 import cors from 'cors';
 import { AppError } from './core/http.js';
 import { authenticate } from './core/auth.js';
+import { buildRateLimiters } from './core/rateLimit.js';
+import { config, type RateLimitConfig } from './config.js';
 import { authRouter } from './modules/auth.routes.js';
 import { systemRouter } from './modules/system.routes.js';
 import { shopRouter, accountRouter } from './modules/shop.routes.js';
@@ -17,10 +19,28 @@ import { syncRouter } from './modules/sync.routes.js';
 import { importRouter } from './modules/import.routes.js';
 import { actionsRouter } from './modules/actions.routes.js';
 
-export function createApp(): Express {
+export interface AppOptions {
+  /**
+   * 限流覆盖：传 false 整体关闭（冒烟要一轮打上千次请求），传 partial 只调阈值（测试证明 429 真的会触发）。
+   * 默认走 config.rateLimit，也就是环境变量说了算，代码里不写死数字。
+   */
+  rateLimit?: Partial<RateLimitConfig> | false;
+}
+
+export function createApp(opts: AppOptions = {}): Express {
   const app = express();
+  // 限流按 req.ip 计数：部署在 nginx 等代理后面时必须设 TRUST_PROXY，否则全站共用一个计数桶
+  if (config.trustProxy) app.set('trust proxy', config.trustProxy);
   app.use(cors({ origin: true, credentials: true }));
   app.use(express.json({ limit: '2mb' }));
+
+  // 限流挂在最前面：登录档要在 json 解析之后（按 IP+用户名计数），全局档与导出档覆盖所有 /api
+  const rl = buildRateLimiters(opts.rateLimit);
+  if (rl) {
+    app.use('/api', rl.api);
+    app.use('/api', rl.export);
+    app.use('/api/auth/login', rl.login);
+  }
 
   app.get('/api/health', (_req, res) => res.json({ code: 0, message: 'ok', data: { status: 'up', time: new Date().toISOString() } }));
   app.use('/api/auth', authRouter);

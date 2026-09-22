@@ -38,5 +38,8 @@ Windows 下直接双击仓库根目录的三个按钮，不需要先读文档：
   启动器把它复制成 `runtime/tk_ops.db` 再用，所以随便你怎么点，`git status` 都是干净的（CI 里也有一条 job 专门守这个）。
 - **单端口不是新发明**：`serveWeb`（默认开）在后端顺带托管 `apps/web/dist`，接口路径永远优先，
   `/assets/*` 因为文件名带 content hash 所以给了 7 天强缓存，`index.html` 不缓存以免改版后卡在旧入口。
+- **改那三个 `.bat` 时别写中文、别改回 LF 换行**：cmd 按控制台代码页逐行读批处理文件，
+  LF + 多字节会把 `rem` 行切断（实测症状是 `'…口起服务' 不是内部或外部命令`，窗口一闪而过）。
+  所以 `.bat` 保持纯 ASCII + CRLF（`.gitattributes` 里钉住了），中文文案一律由 `scripts/launch.mjs` 打印。
 
 演示口令是种子数据里写死的 `Passw0rd!`（例如 `boss`），不是真实凭证；真要用真实 TikTok 店铺需按 `docs/tiktok-real-mode-mapping.md` 配 `TIKTOK_API_MODE=real` 与凭证。

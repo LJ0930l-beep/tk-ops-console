@@ -24,16 +24,16 @@ const target = path.isAbsolute(out) ? out : path.join(ROOT, 'outputs', out);
 
 mkdirSync(path.dirname(target), { recursive: true });
 const prefix = `tk-ops-console/`; // 解压后收进一个目录，不落一地散文件
+// shell:false：git 在 PATH 上就是 git.exe，交给 shell 反而会把参数拼接进命令行（Node 也会警告）
 const r = spawnSync('git', ['archive', `--prefix=${prefix}`, '--format=zip', '-o', target, 'HEAD'], {
   cwd: ROOT,
   stdio: 'inherit',
-  shell: process.platform === 'win32',
 });
 if (r.status !== 0) {
   console.error('✗ git archive 失败（确认仓库里已无未提交的关键改动）');
   process.exit(r.status ?? 1);
 }
 const { statSync } = await import('node:fs');
-const rev = spawnSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: ROOT, encoding: 'utf8', shell: process.platform === 'win32' }).stdout?.trim();
+const rev = spawnSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).stdout?.trim();
 console.log(`✓ ${path.relative(ROOT, target)}  ${(statSync(target).size / 1024 / 1024).toFixed(2)} MB  ← commit ${rev}`);
 console.log('  收件人：解压后双击 start.bat（首次会自动 npm install + build，然后开 http://127.0.0.1:8787）');

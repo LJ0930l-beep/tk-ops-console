@@ -120,6 +120,7 @@ import { RefreshLeft, Search } from '@element-plus/icons-vue';
 import type { PageResult } from '@tk/shared';
 import { num } from '@tk/shared';
 import { apiGet, errMsg } from '@/api/client';
+import type { RowLike } from '@/types/row';
 
 /** 行结构由后端聚合返回：{ warehouse_id, warehouse_name, sku_id, sku_code, spec, spu_code, qty, safety_stock? } */
 type Row = { warehouse_id: number; sku_id: number } & Record<string, unknown>;
@@ -146,10 +147,11 @@ const query = reactive<{ warehouse_id?: number; keyword?: string; spu_id?: numbe
 });
 
 const int = (v: unknown) => (v === null || v === undefined ? '-' : Math.round(num(v)).toLocaleString('zh-CN'));
-const qtyOf = (r: Row) => Math.round(num(r.qty ?? r.quantity ?? r.stock ?? 0));
-const thresholdOf = (r: Row) => Math.round(num(r.safety_stock ?? LOW_STOCK_THRESHOLD));
-const isLow = (r: Row) => qtyOf(r) <= thresholdOf(r) && qtyOf(r) > 0;
-const suggestOf = (r: Row) => Math.max(0, thresholdOf(r) * 2 - qtyOf(r));
+/** 取值函数按 RowLike 收口：el-table 插槽给的是 DefaultRow，字段本就走动态读取 */
+const qtyOf = (r: RowLike) => Math.round(num(r.qty ?? r.quantity ?? r.stock ?? 0));
+const thresholdOf = (r: RowLike) => Math.round(num(r.safety_stock ?? LOW_STOCK_THRESHOLD));
+const isLow = (r: RowLike) => qtyOf(r) <= thresholdOf(r) && qtyOf(r) > 0;
+const suggestOf = (r: RowLike) => Math.max(0, thresholdOf(r) * 2 - qtyOf(r));
 const rowClass = ({ row }: { row: Row }) => (qtyOf(row) <= 0 ? 'zero-row' : isLow(row) ? 'low-row' : '');
 
 const filtered = computed(() => (lowOnly.value ? rows.value.filter((r) => qtyOf(r) <= thresholdOf(r)) : rows.value));
@@ -186,13 +188,14 @@ function resetQuery(): void {
   void reload(1);
 }
 
-function onSort({ prop, order }: { prop: string; order: string | null }): void {
-  sortBy.value = order ? prop : 'qty';
+function onSort({ prop, order }: { prop: string | null; order: string | null; column?: unknown }): void {
+  sortBy.value = order && prop ? prop : 'qty';
   sortOrder.value = order === 'ascending' ? 'asc' : 'desc';
   void reload();
 }
 
-function goLedger(row: Row): void {
+function goLedger(raw: RowLike): void {
+  const row = raw as Row;
   void router.push({ path: '/stock/ledger', query: { warehouse_id: String(row.warehouse_id), sku_id: String(row.sku_id) } });
 }
 

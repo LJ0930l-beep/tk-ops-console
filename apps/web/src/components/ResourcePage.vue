@@ -74,7 +74,7 @@
         </template>
         <el-table-column v-if="editable || deletable || $slots.actions" label="操作" :width="actionWidth" fixed="right">
           <template #default="{ row }">
-            <slot name="actions" :row="row" :reload="() => reload()" />
+            <slot name="actions" :row="row as RowLike" :reload="() => reload()" />
             <el-button v-if="editable && canWrite" link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
             <el-popconfirm v-if="deletable && canWrite" title="删除仅打标记可追溯，确认删除？" @confirm="doDelete(row)">
               <template #reference><el-button link type="danger" size="small">删除</el-button></template>
@@ -100,7 +100,7 @@
           <template v-for="f in visibleFormFields" :key="f.key">
             <el-col :span="f.span ?? 12">
               <el-form-item :label="f.label" :prop="f.key">
-                <el-select v-if="f.type === 'select'" v-model="form[f.key]" filterable clearable :disabled="editing && f.disabledOnEdit" style="width: 100%" @change="f.onChange?.(form)">
+                <el-select v-if="f.type === 'select'" v-model="form[f.key]" filterable clearable :disabled="Boolean(editing && f.disabledOnEdit)" style="width: 100%" @change="f.onChange?.(form)">
                   <el-option v-for="o in resolveOptions(f)" :key="String(o.value)" :label="o.label" :value="o.value" :disabled="o.disabled" />
                 </el-select>
                 <el-input-number v-else-if="f.type === 'number'" v-model="form[f.key]" :precision="f.precision ?? 2" :step="f.step ?? 1" :min="f.min" :max="f.max" controls-position="right" style="width: 100%" />
@@ -108,12 +108,12 @@
                 <el-date-picker v-else-if="f.type === 'datetime'" v-model="form[f.key]" type="datetime" value-format="YYYY-MM-DD HH:mm:ss" style="width: 100%" />
                 <el-switch v-else-if="f.type === 'switch'" v-model="form[f.key]" :active-value="1" :inactive-value="0" />
                 <el-input v-else-if="f.type === 'textarea'" v-model="form[f.key]" type="textarea" :rows="2" maxlength="500" show-word-limit />
-                <el-input v-else v-model="form[f.key]" :disabled="editing && f.disabledOnEdit" :placeholder="f.placeholder" />
+                <el-input v-else v-model="form[f.key]" :disabled="Boolean(editing && f.disabledOnEdit)" :placeholder="f.placeholder" />
               </el-form-item>
             </el-col>
           </template>
         </el-row>
-        <slot name="form-extra" :form="form" :editing="editing" />
+        <slot name="form-extra" :form="form as RowLike" :editing="editing" />
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
@@ -179,6 +179,7 @@ export interface FormFieldDef {
 </script>
 
 <script setup lang="ts">
+import type { RowLike } from '@/types/row';
 import { computed, onMounted, reactive, ref } from 'vue';
 import { ElMessage, type FormRules } from 'element-plus';
 import { Plus, RefreshLeft, Search } from '@element-plus/icons-vue';
@@ -224,14 +225,14 @@ const rows = ref<Record<string, unknown>[]>([]);
 const total = ref(0);
 const page = ref(1);
 const pageSize = ref(props.defaultPageSize);
-const query = reactive<Record<string, unknown>>({});
+const query = reactive<Record<string, any>>({});
 const rangeModel = reactive<Record<string, [string, string] | null>>({});
 const sortBy = ref('');
 const sortOrder = ref('');
 
 const dialogVisible = ref(false);
 const editing = ref<Record<string, unknown> | null>(null);
-const form = reactive<Record<string, unknown>>({});
+const form = reactive<Record<string, any>>({});
 const formRef = ref();
 
 const visibleFormFields = computed(() => (props.formFields ?? []).filter((f) => !f.when || f.when(form, !!editing.value)));
@@ -301,8 +302,8 @@ async function reload(resetPage?: number) {
   }
 }
 
-function onSort({ prop, order }: { prop: string; order: string | null }) {
-  sortBy.value = order ? prop : '';
+function onSort({ prop, order }: { prop: string | null; order: string | null }) {
+  sortBy.value = order && prop ? prop : '';
   sortOrder.value = order === 'ascending' ? 'asc' : order === 'descending' ? 'desc' : '';
   reload();
 }

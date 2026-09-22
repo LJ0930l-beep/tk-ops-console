@@ -137,6 +137,7 @@ import { adRoi, num, round2 } from '@tk/shared';
 import { apiGet, errMsg } from '@/api/client';
 import ExportButton from '@/components/ExportButton.vue';
 import { useDictStore } from '@/stores/dict';
+import type { RowLike } from '@/types/row';
 
 type Row = AdDaily & Record<string, unknown>;
 
@@ -176,18 +177,19 @@ const exportParams = computed<Record<string, unknown>>(() => ({
 }));
 
 /* ---- 派生指标 ---- */
+/* ---- 派生指标：入参按 RowLike 收口，插槽给出的是 DefaultRow ---- */
 const money = (v: unknown) => (v === '***' ? '***' : num(v).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
 const int = (v: unknown) => (v === null || v === undefined ? '-' : num(v).toLocaleString('zh-CN'));
 const pct = (v: number) => (Number.isFinite(v) ? `${v.toFixed(2)}%` : '—');
-const roiOf = (r: Row): number | null => (r.roi === undefined || r.roi === null ? adRoi(num(r.spend), num(r.gmv)) : Number(r.roi));
-const roiText = (r: Row): string => {
+const roiOf = (r: RowLike): number | null => (r.roi === undefined || r.roi === null ? adRoi(num(r.spend), num(r.gmv)) : Number(r.roi));
+const roiText = (r: RowLike): string => {
   const v = roiOf(r);
   return v === null ? '—' : v.toFixed(2);
 };
-const ctr = (r: Row) => (num(r.impressions) > 0 ? (num(r.clicks) / num(r.impressions)) * 100 : NaN);
-const cpc = (r: Row) => (num(r.clicks) > 0 ? round2(num(r.spend) / num(r.clicks)) : 0);
-const cpm = (r: Row) => (num(r.impressions) > 0 ? round2((num(r.spend) / num(r.impressions)) * 1000) : 0);
-function roiClass(r: Row): string {
+const ctr = (r: RowLike) => (num(r.impressions) > 0 ? (num(r.clicks) / num(r.impressions)) * 100 : NaN);
+const cpc = (r: RowLike) => (num(r.clicks) > 0 ? round2(num(r.spend) / num(r.clicks)) : 0);
+const cpm = (r: RowLike) => (num(r.impressions) > 0 ? round2((num(r.spend) / num(r.impressions)) * 1000) : 0);
+function roiClass(r: RowLike): string {
   const v = roiOf(r);
   if (v === null) return 'mask';
   return v >= 1 ? 'roi-good' : 'roi-bad';
@@ -268,8 +270,8 @@ function resetQuery(): void {
   void reload(1);
 }
 
-function onSort({ prop, order }: { prop: string; order: string | null }): void {
-  sortBy.value = order ? prop : 'stat_date';
+function onSort({ prop, order }: { prop: string | null; order: string | null; column?: unknown }): void {
+  sortBy.value = order && prop ? prop : 'stat_date';
   sortOrder.value = order === 'ascending' ? 'asc' : 'desc';
   void reload();
 }

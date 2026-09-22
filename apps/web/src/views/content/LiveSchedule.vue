@@ -168,6 +168,7 @@ import { ArrowLeft, ArrowRight, Plus, RefreshLeft, Search } from '@element-plus/
 import type { LiveSession, PageResult } from '@tk/shared';
 import { apiGet, apiPost, apiPut, errMsg } from '@/api/client';
 import { useDictStore } from '@/stores/dict';
+import type { RowLike } from '@/types/row';
 
 type Row = LiveSession & Record<string, unknown>;
 
@@ -196,7 +197,8 @@ const pickedDay = ref(todayText());
 const dialogVisible = ref(false);
 const editing = ref<Row | null>(null);
 const formRef = ref<FormInstance>();
-const form = reactive<Record<string, unknown>>({});
+// 表单字段由 openCreate / openEdit 按弹窗分支动态写入，el-* 的 v-model 需要具体类型，故用 any 收口
+const form = reactive<Record<string, any>>({});
 
 const query = reactive<{ shop_id?: number; status?: number; keyword?: string }>({
   shop_id: route.query.shop_id ? Number(route.query.shop_id) : undefined,
@@ -250,7 +252,7 @@ function toUtcText(local: unknown): string | undefined {
   if (Number.isNaN(d.getTime())) return s;
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:00`;
 }
-function durationText(row: Row): string {
+function durationText(row: RowLike): string {
   const a = parseUtc(row.plan_start);
   const b = parseUtc(row.plan_end);
   if (!a || !b || b <= a) return '-';
@@ -321,7 +323,8 @@ function openDay(row: Row): void {
   openEdit(row);
 }
 
-function openEdit(row: Row): void {
+function openEdit(raw: RowLike): void {
+  const row = raw as Row;
   editing.value = row;
   for (const k of Object.keys(form)) delete form[k];
   Object.assign(form, {
@@ -369,7 +372,8 @@ async function doSubmit(): Promise<void> {
   }
 }
 
-async function changeStatus(row: Row, status: number): Promise<void> {
+async function changeStatus(raw: RowLike, status: number): Promise<void> {
+  const row = raw as Row;
   const body: Record<string, unknown> = { status };
   if (status === 2) body.actual_start = toUtcText(nowLocal());
   if (status === 3) {
@@ -390,7 +394,8 @@ function nowLocal(): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:00`;
 }
 
-function goReview(row: Row): void {
+function goReview(raw: RowLike): void {
+  const row = raw as Row;
   void router.push({ path: '/lives', query: { id: String(row.id), shop_id: String(row.shop_id) } });
 }
 

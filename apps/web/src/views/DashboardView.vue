@@ -134,7 +134,7 @@ import { computed, nextTick, onActivated, onMounted, onUnmounted, ref, watch } f
 import { useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { ArrowRight } from '@element-plus/icons-vue';
-import * as echarts from 'echarts';
+import { init as echartsInit, type ECharts } from '@/utils/echarts';
 import type { DashboardSummary } from '@tk/shared';
 import { CONTENT_TYPE, MASK, SAMPLE_STATUS, adRoi, num, round2 } from '@tk/shared';
 import { apiGet, errMsg } from '@/api/client';
@@ -151,9 +151,9 @@ const shopsLoaded = ref(false);
 const trendEl = ref<HTMLDivElement>();
 const shopEl = ref<HTMLDivElement>();
 const pieEl = ref<HTMLDivElement>();
-let trendChart: echarts.ECharts | null = null;
-let shopChart: echarts.ECharts | null = null;
-let pieChart: echarts.ECharts | null = null;
+let trendChart: ECharts | null = null;
+let shopChart: ECharts | null = null;
+let pieChart: ECharts | null = null;
 
 /** can_see_cost 以接口返回为准（服务端 maskFields 同步下发），回落本地登录态 */
 const canSeeCost = computed(() => (summary.value ? !!summary.value.can_see_cost : auth.canSeeCost));
@@ -213,9 +213,9 @@ function goto(path: string, query: Record<string, string> = {}): void {
 
 /* ==================== echarts ==================== */
 function initCharts(): void {
-  if (trendEl.value && !trendChart) trendChart = echarts.init(trendEl.value);
-  if (shopEl.value && !shopChart) shopChart = echarts.init(shopEl.value);
-  if (pieEl.value && !pieChart) pieChart = echarts.init(pieEl.value);
+  if (trendEl.value && !trendChart) trendChart = echartsInit(trendEl.value);
+  if (shopEl.value && !shopChart) shopChart = echartsInit(shopEl.value);
+  if (pieEl.value && !pieChart) pieChart = echartsInit(pieEl.value);
 }
 
 function renderCharts(): void {

@@ -207,14 +207,28 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { RefreshLeft, Search } from '@element-plus/icons-vue';
-import * as echarts from 'echarts';
+import { init as echartsInit, type ECharts } from '@/utils/echarts';
 import type { LiveSession, PageResult } from '@tk/shared';
 import { num, round2 } from '@tk/shared';
 import { apiGet, apiPut, errMsg } from '@/api/client';
 import ImportDialog from '@/components/ImportDialog.vue';
 import { useDictStore } from '@/stores/dict';
+import type { RowLike } from '@/types/row';
 
 type Row = LiveSession & Record<string, unknown>;
+
+/** 复盘表单：el-input-number 的 v-model 只收 number | undefined，数值字段逐个声明，索引签名兜住后端扩展字段 */
+interface ReviewForm {
+  actual_start?: string;
+  actual_end?: string;
+  review_note?: string;
+  viewers?: number;
+  peak_online?: number;
+  orders?: number;
+  gmv?: number;
+  ad_spend?: number;
+  [k: string]: unknown;
+}
 
 const dict = useDictStore();
 const route = useRoute();
@@ -240,7 +254,7 @@ const sortOrder = ref('desc');
 const planRange = ref<[string, string] | null>(null);
 const dialogVisible = ref(false);
 const current = ref<Row | null>(null);
-const form = reactive<Record<string, number | string | undefined>>({});
+const form = reactive<ReviewForm>({});
 
 const query = reactive<{ shop_id?: number; host_id?: number; status?: number }>({
   shop_id: route.query.shop_id ? Number(route.query.shop_id) : undefined,
@@ -293,13 +307,13 @@ const minutesText = (m: number) => (m > 0 ? `${Math.floor(m / 60)} 小时 ${pad(
 const int = (v: unknown) => (v === null || v === undefined ? '-' : num(v).toLocaleString('zh-CN'));
 const money = (v: unknown) => (v === '***' ? '***' : num(v).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
 
-/* ---- 派生指标（PRD §3.6 直播复盘） ---- */
-const actualMinutes = (row: Row) => diffMinutes(row.actual_start, row.actual_end) || diffMinutes(row.plan_start, row.plan_end);
-const gmvPerHour = (row: Row) => {
+/* ---- 派生指标（PRD §3.6 直播复盘）：入参按 RowLike 收口，插槽给的是 DefaultRow ---- */
+const actualMinutes = (row: RowLike) => diffMinutes(row.actual_start, row.actual_end) || diffMinutes(row.plan_start, row.plan_end);
+const gmvPerHour = (row: RowLike) => {
   const m = actualMinutes(row);
   return m > 0 ? round2((num(row.gmv) / m) * 60) : 0;
 };
-const gmvPer1k = (row: Row) => (num(row.viewers) > 0 ? round2((num(row.gmv) / num(row.viewers)) * 1000) : 0);
+const gmvPer1k = (row: RowLike) => (num(row.viewers) > 0 ? round2((num(row.gmv) / num(row.viewers)) * 1000) : 0);
 const rowClass = ({ row }: { row: Row }) => (row.review_note ? '' : 'unreviewed-row');
 
 async function reload(resetPage?: number): Promise<void> {
@@ -334,13 +348,14 @@ function resetQuery(): void {
   void reload(1);
 }
 
-function onSort({ prop, order }: { prop: string; order: string | null }): void {
-  sortBy.value = order ? prop : 'plan_start';
+function onSort({ prop, order }: { prop: string | null; order: string | null; column?: unknown }): void {
+  sortBy.value = order && prop ? prop : 'plan_start';
   sortOrder.value = order === 'ascending' ? 'asc' : order === 'descending' ? 'desc' : 'desc';
   void reload();
 }
 
-function openReview(row: Row): void {
+function openReview(raw: RowLike): void {
+  const row = raw as Row;
   current.value = row;
   for (const k of Object.keys(form)) delete form[k];
   Object.assign(form, {
@@ -400,7 +415,7 @@ const curveLoading = ref(false);
 const curveRow = ref<Row | null>(null);
 const curveRows = ref<MinuteRow[]>([]);
 const curveEl = ref<HTMLDivElement>();
-let curveChart: echarts.ECharts | null = null;
+let curveChart: ECharts | null = null;
 
 const hhmm = (ts: string): string => {
   const d = parseUtc(ts);
@@ -409,7 +424,7 @@ const hhmm = (ts: string): string => {
 
 function renderCurve(): void {
   if (!curveEl.value) return;
-  if (!curveChart) curveChart = echarts.init(curveEl.value);
+  if (!curveChart) curveChart = echartsInit(curveEl.value);
   const rows = curveRows.value;
   curveChart.setOption(
     {
@@ -432,7 +447,8 @@ function renderCurve(): void {
   );
 }
 
-async function openCurve(row: Row): Promise<void> {
+async function openCurve(raw: RowLike): Promise<void> {
+  const row = raw as Row;
   curveRow.value = row;
   curveRows.value = [];
   curveVisible.value = true;

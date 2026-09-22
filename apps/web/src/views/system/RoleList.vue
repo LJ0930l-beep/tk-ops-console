@@ -113,6 +113,7 @@ import { Plus, Refresh } from '@element-plus/icons-vue';
 import { DATA_SCOPE, MENUS, type MenuKey } from '@tk/shared';
 import { apiGet, apiPost, apiPut, errMsg } from '@/api/client';
 import { useAuthStore } from '@/stores/auth';
+import type { RowLike } from '@/types/row';
 
 const auth = useAuthStore();
 /** 角色定义即权限来源（菜单/数据范围/成本与导出开关），服务端收紧为 boss 专属；非 boss 只读 */
@@ -171,7 +172,8 @@ function openCreate() {
   visible.value = true;
 }
 
-function openEdit(row: RoleRow, view = false) {
+function openEdit(raw: RowLike, view = false) {
+  const row = raw as RoleRow;
   Object.assign(form, { ...row, menu_perms: [...(row.menu_perms ?? [])] });
   readOnly.value = view;
   visible.value = true;

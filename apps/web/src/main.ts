@@ -1,16 +1,13 @@
 import { createApp } from 'vue';
 import { createPinia } from 'pinia';
-import ElementPlus from 'element-plus';
-import zhCn from 'element-plus/es/locale/lang/zh-cn';
-import * as ElIcons from '@element-plus/icons-vue';
-import 'element-plus/dist/index.css';
-import '@/styles/main.css';
 import App from './App.vue';
 import { router } from '@/router';
+import '@/styles/main.css';
 
-const app = createApp(App);
-app.use(createPinia());
-app.use(router);
-app.use(ElementPlus, { locale: zhCn });
-for (const [name, comp] of Object.entries(ElIcons)) app.component(name, comp);
-app.mount('#app');
+/**
+ * 不再 `app.use(ElementPlus)` 全量注册、也不再 `import 'element-plus/dist/index.css'`
+ * 与「把所有图标注册成全局组件」—— 那是首屏 1.26MB 的主要来源。
+ * 组件/样式由 vite.config 里的 ElementPlusResolver + unplugin-element-plus 按需注入，
+ * 图标一律在用到的文件里 `import { Xxx } from '@element-plus/icons-vue'`。
+ */
+createApp(App).use(createPinia()).use(router).mount('#app');

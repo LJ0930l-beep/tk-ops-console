@@ -84,9 +84,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue';
 import { ElMessage } from 'element-plus';
-import * as echarts from 'echarts';
+import { init as echartsInit, type ECharts } from '@/utils/echarts';
 import { CHANNELS, CHANNEL_LABELS, num, round2, type Channel } from '@tk/shared';
 import { apiGet, errMsg } from '@/api/client';
+import type { RowLike } from '@/types/row';
 
 interface AbcRow {
   spu_id: number;
@@ -134,14 +135,16 @@ const tierCards = computed(() => {
   return [mk('A', '累计≤80%'), mk('B', '80%~95%'), mk('C', '>95%')];
 });
 
-function topChannels(row: AbcRow): { key: string; label: string; pct: number }[] {
+function topChannels(raw: RowLike): { key: string; label: string; pct: number }[] {
+  const row = raw as AbcRow;
   return Object.entries(row.channel_shares || {})
     .filter(([, v]) => num(v) > 0.001)
     .sort((a, b) => num(b[1]) - num(a[1]))
     .slice(0, 3)
     .map(([k, v]) => ({ key: k, label: CHANNEL_LABELS[k as Channel] || k, pct: Math.round(num(v) * 100) }));
 }
-function drifts(row: AbcRow): { key: string; label: string; up: boolean; pct: string }[] {
+function drifts(raw: RowLike): { key: string; label: string; up: boolean; pct: string }[] {
+  const row = raw as AbcRow;
   return Object.entries(row.share_delta || {})
     .filter(([, v]) => Math.abs(num(v)) >= 0.05)
     .sort((a, b) => Math.abs(num(b[1])) - Math.abs(num(a[1])))
@@ -151,10 +154,10 @@ function drifts(row: AbcRow): { key: string; label: string; up: boolean; pct: st
 
 /* ---- 渠道结构周趋势图 ---- */
 const chanEl = ref<HTMLDivElement>();
-let chanChart: echarts.ECharts | null = null;
+let chanChart: ECharts | null = null;
 function renderChart(): void {
   if (!chanEl.value) return;
-  if (!chanChart) chanChart = echarts.init(chanEl.value);
+  if (!chanChart) chanChart = echartsInit(chanEl.value);
   const weeks = channelWeeks.value;
   const present = CHANNELS.filter((c) => weeks.some((w) => num(w.channels?.[c]?.net_gmv) > 0));
   chanChart.setOption(

@@ -47,6 +47,7 @@ import { onMounted, ref } from 'vue';
 import { ElMessage } from 'element-plus';
 import { num } from '@tk/shared';
 import { apiGet, errMsg } from '@/api/client';
+import type { RowLike } from '@/types/row';
 
 interface Row {
   id: number;
@@ -72,7 +73,7 @@ const pageSize = 20;
 const prioType = (p: number) => (p === 0 ? 'danger' : p === 1 ? 'warning' : 'info') as 'danger' | 'warning' | 'info';
 const resultType = (r: string) => (r === 'improved' ? 'success' : r === 'worse' ? 'danger' : r === 'unchanged' ? 'info' : 'warning') as 'success' | 'danger' | 'info' | 'warning';
 const resultLabel = (r: string) => ({ improved: '改善', unchanged: '持平', worse: '恶化', pending: '观察中' }[r] ?? r);
-const rateClass = (row: Row) => (row.result === 'improved' ? 'up' : row.result === 'worse' ? 'down' : 'muted');
+const rateClass = (row: RowLike) => (row.result === 'improved' ? 'up' : row.result === 'worse' ? 'down' : 'muted');
 
 function brief(json: string | null): string {
   try {

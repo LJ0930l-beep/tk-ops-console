@@ -130,6 +130,7 @@ import type { PageResult, SettlementTxn } from '@tk/shared';
 import { SETTLE_TXN_TYPE, num, round2 } from '@tk/shared';
 import { apiGet, errMsg } from '@/api/client';
 import { useDictStore } from '@/stores/dict';
+import type { RowLike } from '@/types/row';
 
 type Row = SettlementTxn & Record<string, unknown>;
 
@@ -190,8 +191,8 @@ const txnLabel = (v: unknown) => TXN_TYPE.find((o) => String(o.value) === String
 const txnTag = (v: unknown) => TXN_TYPE.find((o) => String(o.value) === String(v ?? ''))?.type ?? 'info';
 const payLabel = (v: unknown) => PAYMENT_STATUS.find((o) => String(o.value) === String(v ?? ''))?.label ?? String(v ?? '-');
 const payTag = (v: unknown) => PAYMENT_STATUS.find((o) => String(o.value) === String(v ?? ''))?.type ?? 'info';
-/** settlement_txn 只有平台订单号，跳订单列表按号检索 */
-const orderLink = (row: Row) => `/orders?keyword=${encodeURIComponent(String(row.tk_order_id ?? ''))}`;
+/** settlement_txn 只有平台订单号，跳订单列表按号检索；入参按 RowLike 收口（插槽给的是 DefaultRow） */
+const orderLink = (row: RowLike) => `/orders?keyword=${encodeURIComponent(String(row.tk_order_id ?? ''))}`;
 
 const summaryCards = computed(() => {
   const src = serverSummary.value;
@@ -265,8 +266,8 @@ function resetQuery(): void {
   void reload(1);
 }
 
-function onSort({ prop, order }: { prop: string; order: string | null }): void {
-  sortBy.value = order ? prop : 'statement_time';
+function onSort({ prop, order }: { prop: string | null; order: string | null; column?: unknown }): void {
+  sortBy.value = order && prop ? prop : 'statement_time';
   sortOrder.value = order === 'ascending' ? 'asc' : 'desc';
   void reload();
 }

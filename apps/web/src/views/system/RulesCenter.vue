@@ -40,7 +40,7 @@
         <el-table-column label="版本" width="64" align="center" prop="version" />
         <el-table-column label="状态" width="80" align="center">
           <template #default="{ row }">
-            <el-switch :model-value="row.status === 1" :disabled="!canEdit" size="small" @change="(v: boolean) => quickToggle(row, v)" />
+            <el-switch :model-value="row.status === 1" :disabled="!canEdit" size="small" @change="(v: string | number | boolean) => quickToggle(row, Boolean(v))" />
           </template>
         </el-table-column>
         <el-table-column label="操作" width="90" fixed="right">
@@ -111,6 +111,7 @@ import { ElMessage } from 'element-plus';
 import type { AlertRule } from '@tk/shared';
 import { apiGet, apiPost, apiPut, errMsg } from '@/api/client';
 import { useAuthStore } from '@/stores/auth';
+import type { RowLike } from '@/types/row';
 
 const TARGET_LABELS: Record<string, string> = { product: '商品', creator: '达人', video: '视频', live: '直播', sample: '寄样', shop: '店铺', ads: '广告' };
 
@@ -136,7 +137,8 @@ async function load(): Promise<void> {
 const editVisible = ref(false);
 const saving = ref(false);
 const editRow = ref<AlertRule | null>(null);
-function openEdit(row: AlertRule): void {
+function openEdit(raw: RowLike): void {
+  const row = raw as AlertRule;
   editRow.value = { ...row };
   editVisible.value = true;
 }
@@ -167,7 +169,8 @@ async function saveRule(): Promise<void> {
   }
 }
 
-async function quickToggle(row: AlertRule, on: boolean): Promise<void> {
+async function quickToggle(raw: RowLike, on: boolean): Promise<void> {
+  const row = raw as AlertRule;
   try {
     await apiPut(`/actions/rules/${row.id}`, { status: on ? 1 : 0 });
     row.status = on ? 1 : 0;

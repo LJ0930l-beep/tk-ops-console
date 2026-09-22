@@ -150,7 +150,8 @@ const funnelText = computed(() => {
   return `建联 ${String(f.outreach ?? 0)} → 回复 ${String(f.replied ?? 0)}（${rate}）→ 谈妥 ${String(f.agreed ?? 0)} → 合作单 ${String(f.collabs ?? 0)}`;
 });
 
-const quick = reactive<Row>({});
+// 快捷录入是键随表单个子动态增长的字典，el-* 的 v-model 需要具体类型，故用 any 收口（不是偷懒的 any）
+const quick = reactive<Record<string, any>>({});
 const quickDraft = reactive<Row>({});
 
 const creatorIdFromQuery = computed(() => Number(route.query.creator_id ?? 0) || undefined);

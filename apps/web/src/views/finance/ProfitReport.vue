@@ -120,6 +120,7 @@ import type { ProfitRow } from '@tk/shared';
 import { REGIONS, num, profitRate, round2 } from '@tk/shared';
 import { apiGet, errMsg } from '@/api/client';
 import { useDictStore } from '@/stores/dict';
+import type { RowLike } from '@/types/row';
 
 type Dim = 'shop' | 'sku' | 'creator' | 'month';
 
@@ -151,7 +152,7 @@ const estimatedRows = computed(() => rows.value.filter((r) => Number(r.is_estima
 
 const money = (v: unknown) => (v === '***' ? '***' : num(v).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
 const int = (v: unknown) => (v === null || v === undefined ? '-' : num(v).toLocaleString('zh-CN'));
-const rate = (r: ProfitRow) => `${num(r.profit_rate).toFixed(2)}%`;
+const rate = (r: RowLike) => `${num(r.profit_rate).toFixed(2)}%`;
 const rowClass = ({ row }: { row: ProfitRow }) => (Number(row.is_estimated) === 1 ? 'estimated-row' : '');
 
 function dayText(d: Date): string {

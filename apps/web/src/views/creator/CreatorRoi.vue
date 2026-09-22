@@ -164,7 +164,7 @@ function render(row: Row, c: Col): string {
 /** 表头点击排序：本地比较，null（—）/ *** 不参与榜首 */
 const sortValue = (row: Row, prop: string) => (row[prop] === MASK || row[prop] === null || row[prop] === undefined ? Number.NEGATIVE_INFINITY : num(row[prop]));
 
-function onSortChange({ prop, order }: { prop: string; order: 'ascending' | 'descending' | null }) {
+function onSortChange({ prop, order }: { prop: string | null; order: string | null; column?: unknown }) {
   const list = [...rows.value];
   if (!order || !prop) {
     rows.value = list;

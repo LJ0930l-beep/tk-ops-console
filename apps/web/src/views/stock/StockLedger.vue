@@ -164,8 +164,20 @@ import { Plus, RefreshLeft, Search } from '@element-plus/icons-vue';
 import type { PageResult, StockLedger } from '@tk/shared';
 import { num } from '@tk/shared';
 import { apiGet, apiPost, errMsg } from '@/api/client';
+import type { RowLike } from '@/types/row';
 
 type Row = StockLedger & Record<string, unknown>;
+
+/** 录入/冲销共用一张表单：el-input-number 的 v-model 只收 number | undefined，故逐字段声明；索引签名兼容清空/回填写法 */
+interface LedgerForm {
+  warehouse_id?: number;
+  sku_id?: number;
+  change_type?: number;
+  quantity?: number;
+  op_time?: string;
+  ref_no?: string;
+  [k: string]: unknown;
+}
 
 const route = useRoute();
 const router = useRouter();
@@ -196,7 +208,7 @@ const sortOrder = ref('desc');
 const timeRange = ref<[string, string] | null>(null);
 const dialogVisible = ref(false);
 const formRef = ref<FormInstance>();
-const form = reactive<Record<string, number | string | undefined>>({});
+const form = reactive<LedgerForm>({});
 
 const query = reactive<{ warehouse_id?: number; change_type?: number; sku_id?: number; keyword?: string }>({
   warehouse_id: route.query.warehouse_id ? Number(route.query.warehouse_id) : undefined,
@@ -282,8 +294,8 @@ function resetQuery(): void {
   void reload(1);
 }
 
-function onSort({ prop, order }: { prop: string; order: string | null }): void {
-  sortBy.value = order ? prop : 'op_time';
+function onSort({ prop, order }: { prop: string | null; order: string | null; column?: unknown }): void {
+  sortBy.value = order && prop ? prop : 'op_time';
   sortOrder.value = order === 'ascending' ? 'asc' : 'desc';
   void reload();
 }
@@ -326,7 +338,8 @@ function openCreate(): void {
   dialogVisible.value = true;
 }
 
-function openReverse(row: Row): void {
+function openReverse(raw: RowLike): void {
+  const row = raw as Row;
   for (const k of Object.keys(form)) delete form[k];
   Object.assign(form, {
     warehouse_id: row.warehouse_id,

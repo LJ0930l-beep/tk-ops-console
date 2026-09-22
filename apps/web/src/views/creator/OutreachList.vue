@@ -270,8 +270,11 @@ async function loadCreators() {
   try {
     const data = await apiGet<Row>('/creators', { page: 1, pageSize: 200 });
     creatorOpts.value = toOpts(data?.list);
-  } catch {
+  } catch (e) {
     creatorOpts.value = [];
+    // 失败必须说一声：静默成空列表，界面就只显示「暂无数据」，
+    // 用户和排障的人都分不出是「真没有」还是「接口挂了」（本轮就是这么被 /system/dict 骗过的）
+    ElMessage.warning(errMsg(e));
   } finally {
     loadingCreators.value = false;
   }

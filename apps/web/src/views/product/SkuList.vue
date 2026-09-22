@@ -39,9 +39,10 @@
 </template>
 
 <script setup lang="ts">
+import { ElMessage } from 'element-plus';
 import { computed, onMounted, ref } from 'vue';
 import { num } from '@tk/shared';
-import { apiGet, type Paged } from '@/api/client';
+import { apiGet, type Paged, errMsg } from '@/api/client';
 import { useAuthStore } from '@/stores/auth';
 import { useDictStore } from '@/stores/dict';
 import ResourcePage, { type ColumnDef, type FormFieldDef, type OptionDef, type SearchDef } from '@/components/ResourcePage.vue';
@@ -68,8 +69,11 @@ async function loadSpus() {
   try {
     const r = await apiGet<Paged<Record<string, unknown>>>('/products/spu', { page: 1, pageSize: 200 });
     spuOpts.value = (r.list ?? []).map((s) => ({ value: Number(s.id), label: `${String(s.spu_code)}｜${String(s.name_cn ?? '')}` }));
-  } catch {
+  } catch (e) {
     spuOpts.value = [];
+    // 失败必须说一声：静默成空列表，界面就只显示「暂无数据」，
+    // 用户和排障的人都分不出是「真没有」还是「接口挂了」（本轮就是这么被 /system/dict 骗过的）
+    ElMessage.warning(errMsg(e));
   }
 }
 

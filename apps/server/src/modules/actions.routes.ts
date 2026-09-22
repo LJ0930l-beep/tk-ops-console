@@ -54,12 +54,25 @@ export function eventScope(user: CurrentUser): { sql: string; params: (number | 
   return { sql: parts.length ? ` AND ${parts.join(' AND ')}` : '', params };
 }
 
+/**
+ * 生成/失效到期提醒。**必须是写接口**：
+ * 原来 GET /notifications 里顺手 reconcile 一次，等于「刷新一下收件箱」就会改库
+ * —— 预取、重试、代理缓存回源、只读账号都能触发写入，且幂等只靠唯一键兜着。
+ * 现在：调度器每 15 分钟跑一次（jobs/notificationJobs），前端进页面时显式 POST 一次。
+ */
+actionsRouter.post(
+  '/notifications/sync',
+  requireMenu('dashboard'),
+  wrap((_req, res) => {
+    ok(res, reconcileDueAlertNotifications());
+  }),
+);
+
 /** Personal due reminders are restricted by recipient identity and the same event scope as actions. */
 actionsRouter.get(
   '/notifications',
   requireMenu('dashboard'),
   wrap((req, res) => {
-    reconcileDueAlertNotifications();
     const user = current(req);
     const scope = eventScope(user);
     const where = `n.recipient_id = ? AND n.is_deleted = 0 AND n.stale_at IS NULL

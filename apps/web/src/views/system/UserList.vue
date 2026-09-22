@@ -74,8 +74,11 @@ onMounted(async () => {
     roleOpts.value = (roles ?? [])
       .filter((r) => isBoss.value || !privileged(r))
       .map((r) => ({ value: Number(r.id), label: `${String(r.role_name)}（${String(r.role_key)}）` }));
-  } catch {
+  } catch (e) {
     roleOpts.value = [];
+    // 失败必须说一声：静默成空列表，界面就只显示「暂无数据」，
+    // 用户和排障的人都分不出是「真没有」还是「接口挂了」（本轮就是这么被 /system/dict 骗过的）
+    ElMessage.warning(errMsg(e));
   }
   allShops.value = (await dict.shopOptions().catch(() => [])) as ShopRow[];
 });

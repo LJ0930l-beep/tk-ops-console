@@ -426,6 +426,10 @@ CREATE TABLE IF NOT EXISTS live_session (
   is_deleted   INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_live_shop_plan ON live_session(shop_id, plan_start);
+-- 幂等键由数据库兜住：导入/手工排班都按 (店铺, 计划开播) 认同一场，
+-- 只靠应用层 SELECT-then-INSERT 挡不住并发与重跑（导入中心承诺过这个键）
+CREATE UNIQUE INDEX IF NOT EXISTS ux_live_shop_plan_start
+  ON live_session(shop_id, plan_start) WHERE is_deleted = 0 AND plan_start IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_live_host ON live_session(host_id, plan_start);
 
 -- ---------- 5.5 投放（二期） ----------
@@ -702,8 +706,9 @@ CREATE TABLE IF NOT EXISTS user_notification (
   updated_at         TEXT    NOT NULL DEFAULT (datetime('now')),
   is_deleted         INTEGER NOT NULL DEFAULT 0
 );
+-- is_deleted 必须进键：软删一条提醒后，同一事件同一到期时间还要能再发一次
 CREATE UNIQUE INDEX IF NOT EXISTS ux_user_notification_dedupe
-  ON user_notification(recipient_id, alert_event_id, due_at_snapshot, assignment_cycle);
+  ON user_notification(recipient_id, alert_event_id, due_at_snapshot, assignment_cycle, is_deleted);
 CREATE INDEX IF NOT EXISTS ix_user_notification_inbox
   ON user_notification(recipient_id, is_deleted, stale_at, read_at, created_at);
 

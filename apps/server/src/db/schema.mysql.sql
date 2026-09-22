@@ -398,6 +398,10 @@ CREATE TABLE IF NOT EXISTS live_session (
   created_at   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   is_deleted   TINYINT       NOT NULL DEFAULT 0,
+  -- MySQL 没有部分索引：把「未删除行的计划开播时间」显式成生成列，
+  -- 删除的行恒为 NULL，而 NULL 不参与唯一性比较 —— 等价于 SQLite 的 WHERE is_deleted = 0
+  live_key     VARCHAR(32)   GENERATED ALWAYS AS (IF(is_deleted = 0, DATE_FORMAT(plan_start, '%Y-%m-%d %H:%i:%s'), NULL)) STORED,
+  UNIQUE KEY ux_live_shop_plan_start (shop_id, live_key),
   KEY ix_live_shop_plan (shop_id, plan_start),
   KEY ix_live_host (host_id, plan_start),
   CONSTRAINT fk_live_account FOREIGN KEY (account_id) REFERENCES tk_account(id),
@@ -746,14 +750,14 @@ CREATE TABLE IF NOT EXISTS user_notification (
   recipient_id       BIGINT UNSIGNED NOT NULL,
   alert_event_id     BIGINT UNSIGNED NOT NULL,
   notification_type  VARCHAR(32)   NOT NULL DEFAULT 'alert_due',
-  due_at_snapshot    VARCHAR(64)   NOT NULL,
+  due_at_snapshot    DATETIME      NOT NULL,                        -- 与 alert_event.due_at 同类型，快照比较不能靠隐式转换
   assignment_cycle   BIGINT UNSIGNED NOT NULL DEFAULT 0,
   read_at            DATETIME,
   stale_at           DATETIME,
   created_at         DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at         DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   is_deleted         TINYINT       NOT NULL DEFAULT 0,
-  UNIQUE KEY ux_user_notification_dedupe (recipient_id, alert_event_id, due_at_snapshot, assignment_cycle),
+  UNIQUE KEY ux_user_notification_dedupe (recipient_id, alert_event_id, due_at_snapshot, assignment_cycle, is_deleted),
   KEY ix_user_notification_inbox (recipient_id, is_deleted, stale_at, read_at, created_at),
   CONSTRAINT fk_user_notification_recipient FOREIGN KEY (recipient_id) REFERENCES sys_user(id),
   CONSTRAINT fk_user_notification_event FOREIGN KEY (alert_event_id) REFERENCES alert_event(id)

@@ -315,8 +315,11 @@ async function loadReturns() {
       ...(shopId ? { shop_id: shopId } : {}),
     });
     returns.value = pickList(data, ['list', 'returns']);
-  } catch {
+  } catch (e) {
     returns.value = [];
+    // 失败必须说一声：静默成空列表，界面就只显示「暂无数据」，
+    // 用户和排障的人都分不出是「真没有」还是「接口挂了」（本轮就是这么被 /system/dict 骗过的）
+    ElMessage.error(errMsg(e));
   } finally {
     returnsLoading.value = false;
   }

@@ -274,7 +274,8 @@ async function fetchOpts(path: string, label: (r: Row) => string) {
     const data = await apiGet<Row | Row[]>(path, { page: 1, pageSize: 200 });
     const rows = Array.isArray(data) ? data : (data as Row)?.list;
     return toOpts(rows, label);
-  } catch {
+  } catch (e) {
+    ElMessage.warning(errMsg(e));
     return [] as { value: number; label: string }[];
   }
 }

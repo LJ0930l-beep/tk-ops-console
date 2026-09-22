@@ -311,8 +311,11 @@ async function loadOwners(): Promise<void> {
   try {
     const r = await apiGet<{ list?: { id: number; real_name: string }[] } | { id: number; real_name: string }[]>('/system/users', { pageSize: 200 });
     owners.value = Array.isArray(r) ? r : ((r as { list?: { id: number; real_name: string }[] }).list ?? []);
-  } catch {
+  } catch (e) {
     owners.value = [];
+    // 失败必须说一声：静默成空列表，界面就只显示「暂无数据」，
+    // 用户和排障的人都分不出是「真没有」还是「接口挂了」（本轮就是这么被 /system/dict 骗过的）
+    ElMessage.warning(errMsg(e));
   }
 }
 

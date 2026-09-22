@@ -212,6 +212,8 @@ const evalOut = (await step('规则评估', 'POST', '/api/actions/evaluate?end='
 chain.push(`  evaluate ${JSON.stringify(evalOut ?? {})}`);
 const today = (await step('今日行动中心', 'GET', '/api/actions/today')) as { p0?: unknown[]; p1?: unknown[]; p2?: unknown[]; mine?: unknown[] };
 chain.push(`  today p0=${today?.p0?.length ?? 0} p1=${today?.p1?.length ?? 0} p2=${today?.p2?.length ?? 0} mine=${today?.mine?.length ?? 0}`);
+// 提醒 inbox 现在只有写接口会生成（GET 不再顺手改库），所以先 POST 同步一次再看列表
+await step('提醒同步（生成/失效）', 'POST', '/api/actions/notifications/sync', {});
 const notes = (await step('提醒列表', 'GET', '/api/actions/notifications')) as { list?: { id: number }[] };
 const noteId = notes?.list?.[0]?.id;
 if (noteId) await step('提醒置已读', 'POST', `/api/actions/notifications/${noteId}/read`, {});

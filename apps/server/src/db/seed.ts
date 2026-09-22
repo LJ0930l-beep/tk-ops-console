@@ -30,7 +30,11 @@ export function seedDemoData(opts: { reset?: boolean } = {}): void {
   if (opts.reset) {
     const hasSeq = !!get(`SELECT name FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'`);
     run('PRAGMA foreign_keys = OFF');
-    const tables = all<{ name: string }>(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`);
+    // schema_migration 必须留着：清掉它就等于把「这个库已经跑过哪些幂等升级」的记忆抹了，
+    // 下次 migrate 会从头再放一遍历史迁移（有的迁移是会改数据的）
+    const tables = all<{ name: string }>(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name <> 'schema_migration'`,
+    );
     for (const t of tables) run(`DELETE FROM ${t.name}`);
     if (hasSeq) run(`DELETE FROM sqlite_sequence`);
     run('PRAGMA foreign_keys = ON');
@@ -511,9 +515,12 @@ export function seedDemoData(opts: { reset?: boolean } = {}): void {
   }
 
   /* ---------- 直播场次 ---------- */
+  // (店铺, 计划开播) 是直播场次的幂等键，库里已有唯一索引兜着（导入中心同一口径）。
+  // 所以这里不能随机取日期：两回随机撞同一天同一时段，插到第二场就直接违反唯一键。
   for (let i = 0; i < 26; i++) {
     const shop = shopId[i % shopId.length] as number;
-    const start = daysAgo(i < 4 ? -1 - i : rng.int(1, 45), rng.pick([2, 9, 19, 20]));
+    const start = daysAgo(i < 4 ? -1 - i : ((i * 3) % 45) + 1, [2, 9, 19, 20][i % 4] as number);
+    start.setUTCMinutes(i % 60, 0, 0); // 分钟随序号走：同一店铺复发时保证开播时刻必不同
     const live = i >= 4;
     insert('live_session', {
       account_id: accIds[(i + 2) % accIds.length] as number,

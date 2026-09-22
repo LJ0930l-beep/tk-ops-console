@@ -173,6 +173,8 @@ async function loadNotifications(): Promise<void> {
   if (!canSeeActions.value) return;
   notificationsLoading.value = true;
   try {
+    // 提醒 inbox 由调度器每 15 分钟生成；这里显式补一次同步（写操作只在 POST 上做，GET 已经不改库了）
+    await apiPost('/actions/notifications/sync', {}).catch(() => undefined);
     const result = await apiGet<{ list: DueNotification[]; unread_total: number }>('/actions/notifications');
     notifications.value = result.list ?? [];
     notificationUnread.value = Number(result.unread_total ?? 0);

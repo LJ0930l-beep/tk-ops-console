@@ -1,0 +1,47 @@
+-- pgloader 搬库脚本：SQLite 演示库 → PostgreSQL
+-- 用法（需要本机已装 pgloader，且 PG 目标库已建好）：
+--   createdb tk_ops
+--   pgloader scripts/pgloader/load-tk-ops.load
+-- 结束后必须跑本文件末尾三条校验 SQL（也在 docs/db-migration.md 第 3.5 步），
+-- 再对着旧库做「同一区间利润/日报逐日对账」，两库差异为 0 才算搬完。
+
+load database
+  from sqlite://apps/data/tk_ops.db
+  into postgresql://baicha@localhost:5432/tk_ops
+
+-- 我们的 DDL 是 SQLite 方言（AUTOINCREMENT / datetime 默认值），
+-- 所以目标库先按自己的 DDL 建好表，这里只搬数据不建结构。
+-- 注意：空串与 NULL 在 SQLite 里是两回事（代码按 IS NULL / COALESCE 判断），
+-- 因此不要开任何 trim/规范化选项，也不要把 smallint 的 is_deleted 转成 boolean。
+with
+  include no create,
+  truncate,
+  create no indexes,
+  batches of 5000 rows,
+  concurrency 2
+
+-- 逐表说明（为什么要一起搬、有没有外键顺序要求）：
+--   tk_shop / user_account / role / sys_*      ：权限与店铺主数据，先搬
+--   tk_order / tk_order_item / tk_returns       ：交易明细，被宽表和利润报表引用
+--   listing / product / affiliate_order         ：商品与联盟
+--   daily_* / *_analytics 宽表                  ：可丢（能由 /sync/run task_type=aggregate 重算），
+--                                                丢了反而更稳 —— 宽表口径随代码演进，旧行会带旧口径
+--   alert_rule / alert_event / action_*         ：规则与行动闭环（事件带历史，不能丢）
+--   sync_log / sys_op_log / notification        ：审计与提醒，不能丢
+--   job_queue                                   ：换库时队列应为空；不清空则迁移后要手动 requeue
+
+-- 校验 SQL（搬完在 PG 上逐条跑，两侧数字必须一致）：
+--   1) 表数量
+--      select count(*) from information_schema.tables where table_schema='public';
+--   2) 行数对账（挑最关键的几张）
+--      select 'tk_order' t, count(*) n from tk_order
+--      union all select 'tk_shop', count(*) from tk_shop
+--      union all select 'user_account', count(*) from user_account
+--      union all select 'alert_event', count(*) from alert_event;
+--   3) 口径对账（换库最容易错的地方：日期与时区）
+--      select date(order_time) d, count(*) n, round(sum(pay_amount)) amt
+--        from tk_order where is_deleted=0 group by 1 order by 1 desc limit 30;
+--      -- 与旧库同一 SQL 的结果逐行比，任何一行对不上都说明切日/类型映射有问题
+--   4) is_deleted 语义：SQLite 存 0/1 整数，PG 若建成 boolean 会把 0 变成 false 但也可能把
+--      历史脏数据（NULL/2）判成非法值 —— 保持 smallint 更安全，代码里都是 `= 0` 的写法。
+;

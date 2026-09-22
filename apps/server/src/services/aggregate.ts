@@ -13,7 +13,7 @@
  *     sync_log(task_type='aggregate') 供同步页排查。
  */
 import { get, insert, run, update } from '../core/db.js';
-import { rateSqlExpr, todayUtc } from './rates.js';
+import { rateToCnyExpr, toCnySql, todayUtc } from './rates.js';
 import { computeProfitByDimension } from './profit.js';
 
 export type AggregateTask = 'video' | 'creator' | 'listing';
@@ -82,12 +82,13 @@ const VIDEO_ITEM_FROM = `FROM tk_order_item i
           AND o.order_status <> 'CANCELLED' AND o.is_sample_order = 0`;
 
 /** 明细实收折人民币：按订单日取价，取不到用 SQL 侧兜底牌价（与利润引擎同一套常量） */
-const VIDEO_AMOUNT_CNY = `(i.item_amount * ${rateSqlExpr('o.currency', 'substr(o.order_time, 1, 10)')})`;
+// 汇率必须走 rateToCnyExpr：裸 rateSqlExpr 缺价时返回 NULL，SUM(金额 * NULL) 会把这一行静默吞掉
+const VIDEO_AMOUNT_CNY = toCnySql('i.item_amount', 'o.currency', 'substr(o.order_time, 1, 10)');
 
 const VIDEO_ORDERS_SUB = `(SELECT COUNT(DISTINCT i.order_id) ${VIDEO_ITEM_FROM} AND i.content_id = video.tk_video_id)`;
 const VIDEO_GROSS_SUB = `(SELECT IFNULL(ROUND(SUM(${VIDEO_AMOUNT_CNY}), 2), 0) ${VIDEO_ITEM_FROM} AND i.content_id = video.tk_video_id)`;
 /** 已完成退款按行级关联归到原视频冲减；没有行级关联的退款不摊（避免同一笔重复扣） */
-const VIDEO_REFUND_SUB = `(SELECT IFNULL(ROUND(SUM(r.refund_amount * ${rateSqlExpr('r.currency', 'substr(r.apply_time, 1, 10)')}), 2), 0)
+const VIDEO_REFUND_SUB = `(SELECT IFNULL(ROUND(SUM(r.refund_amount * ${rateToCnyExpr('r.currency', 'substr(r.apply_time, 1, 10)')}), 2), 0)
          FROM tk_return r
          JOIN tk_order_item i ON i.id = r.tk_order_item_id
          JOIN tk_order o ON o.id = i.order_id AND o.is_deleted = 0

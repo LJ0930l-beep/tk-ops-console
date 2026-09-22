@@ -1,4 +1,5 @@
 import { COLLAB_STATUS, round2 } from '@tk/shared';
+import { config } from '../config.js';
 import { all, get, run, scalar } from '../core/db.js';
 import { sendAlert, writeOpLog } from '../core/oplog.js';
 import { checkOverdueSamples, releaseExpiredCreators } from '../services/creator/protect.js';
@@ -137,7 +138,7 @@ export interface CronLike {
 }
 
 /**
- * 注册达人 / 内容相关作业（UTC 触发，避开订单同步高峰）。
+ * 注册达人 / 内容相关作业（按 config.jobTimezone 触发，默认 UTC，避开订单同步高峰）。
  * 不改 scheduler.ts：由集成方在其 startScheduler() 内调用 registerCreatorJobs(cron)。
  */
 export function registerCreatorJobs(cron: CronLike): { name: string; expression: string }[] {
@@ -158,7 +159,7 @@ export function registerCreatorJobs(cron: CronLike): { name: string; expression:
         console.error(`[jobs] ${j.name} 执行失败:`, msg);
         sendAlert({ title: `定时任务失败：${j.name}`, detail: msg, level: 'error' });
       }
-    }, { timezone: 'UTC' });
+    }, { name: `creator:${j.name}`, timezone: config.jobTimezone });
   }
   return jobs.map(({ name, expression }) => ({ name, expression }));
 }

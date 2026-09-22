@@ -30,6 +30,7 @@ import { Q, queryPage } from '../core/query.js';
 import { maskFields, requireExport, requireMenu, shopScope, type AuthedRequest } from '../core/auth.js';
 import { logIfChanged, writeOpLog } from '../core/oplog.js';
 import { sendTable, type ExportCell } from '../core/export.js';
+import { rateToCnyExpr } from '../services/rates.js';
 
 const MODULE = '订单中心';
 
@@ -80,26 +81,29 @@ const ITEM_COST_FIELDS = ['cost_snapshot', 'unit_cost_cny', 'est_commission', 'e
 
 /* ==================== SQL 片段 ==================== */
 
-/** 汇率：按单据日期取当天 → 该币种最近一天 → NULL（调用方 COALESCE 成 1） */
-const rateExprOf = (currencyCol: string, timeCol: string): string =>
-  `(SELECT e.rate_to_cny
-      FROM exchange_rate e
-     WHERE e.currency = ${currencyCol} AND e.is_deleted = 0
-     ORDER BY (e.rate_date <= COALESCE(substr(${timeCol}, 1, 10), '9999-12-31')) DESC, e.rate_date DESC
-     LIMIT 1)`;
-
-/** 订单维度（别名必须是 o） */
-const RATE_RAW = rateExprOf('o.currency', 'o.order_time');
-const RATE = `COALESCE(${RATE_RAW}, 1)`;
-/** 售后维度（别名必须是 r） */
-const RATE_RETURN = `COALESCE(${rateExprOf('r.currency', 'COALESCE(r.apply_time, r.finish_time)')}, 1)`;
+/**
+ * 汇率一律走 rates.ts 的共享表达式：当日 → 更早最近一条 → 更晚最近一条 → 兜底常量。
+ * 这里原来自己写了 `COALESCE(rate, 1)` —— 缺汇率时等于把 1 USD 当 1 CNY，
+ * 而利润引擎/宽表用的是兜底常量表，同一天会算出两个 GMV（口径分叉）。
+ */
+/** 订单维度（别名必须是 o）：展示用的汇率与实际相乘的汇率是同一个表达式，不会「显示 1、按 7.15 折」 */
+const RATE_RAW = rateToCnyExpr('o.currency', 'substr(o.order_time, 1, 10)');
+const RATE = RATE_RAW;
+/** 售后维度（别名必须是 r）：申请时间优先，缺失退回完成时间 */
+const RATE_RETURN = rateToCnyExpr('r.currency', 'COALESCE(substr(r.apply_time, 1, 10), substr(r.finish_time, 1, 10))');
 
 /** 以下聚合子查询全部挂在别名 o 上；只有 cost_matched=1 的明细进入金额口径 */
 const SUM_MATCHED_AMOUNT = `(SELECT COALESCE(SUM(i.item_amount), 0) FROM tk_order_item i WHERE i.order_id = o.id AND i.is_deleted = 0 AND i.cost_matched = 1)`;
 const SUM_UNMAPPED_AMOUNT = `(SELECT COALESCE(SUM(i.item_amount), 0) FROM tk_order_item i WHERE i.order_id = o.id AND i.is_deleted = 0 AND i.cost_matched = 0)`;
 const SUM_COMMISSION = `(SELECT COALESCE(SUM(i.est_commission), 0) FROM tk_order_item i WHERE i.order_id = o.id AND i.is_deleted = 0 AND i.cost_matched = 1)`;
 const SUM_COST = `(SELECT COALESCE(SUM(i.cost_snapshot), 0) FROM tk_order_item i WHERE i.order_id = o.id AND i.is_deleted = 0 AND i.cost_matched = 1)`;
-const SUM_REFUND = `(SELECT COALESCE(SUM(r.refund_amount), 0) FROM tk_return r WHERE r.order_id = o.id AND r.is_deleted = 0)`;
+/**
+ * 只累计「已完成」退款（PRD 4.2 场景 D / 方案 5.3 净 GMV 口径）。
+ * 以前没有状态过滤：PROCESSING / REJECTED 的售后也进退款，净 GMV 与利润被一起压低，
+ * 且退款一旦被关闭，历史订单的净 GMV 会**追溯性变大**（同一单昨天今天两个数）。
+ */
+const REFUND_DONE = `r.order_id = o.id AND r.is_deleted = 0 AND r.status = 'COMPLETED'`;
+const SUM_REFUND = `(SELECT COALESCE(SUM(r.refund_amount), 0) FROM tk_return r WHERE ${REFUND_DONE})`;
 const COUNT_ITEMS = `(SELECT COUNT(*) FROM tk_order_item i WHERE i.order_id = o.id AND i.is_deleted = 0)`;
 const COUNT_UNMAPPED = `(SELECT COUNT(*) FROM tk_order_item i WHERE i.order_id = o.id AND i.is_deleted = 0 AND i.cost_matched = 0)`;
 const COUNT_SETTLED = `(SELECT COUNT(*) FROM settlement_txn t WHERE t.tk_order_id = o.tk_order_id AND t.is_deleted = 0)`;
@@ -697,7 +701,7 @@ orderRouter.get(
     };
     const settlements = all<Record<string, unknown>>(
       `SELECT t.id, t.statement_id, t.statement_time, t.txn_type, t.amount, t.currency, t.payment_id, t.payment_status,
-              ROUND(t.amount * ${rateExprOf('t.currency', 'COALESCE(t.statement_time, t.created_at)')}, 2) AS amount_cny
+              ROUND(t.amount * ${rateToCnyExpr('t.currency', `COALESCE(substr(t.statement_time, 1, 10), substr(t.created_at, 1, 10))`)}, 2) AS amount_cny
          FROM settlement_txn t
         WHERE t.is_deleted = 0 AND t.tk_order_id = ?
         ORDER BY t.statement_time ASC, t.id ASC`,
@@ -820,7 +824,7 @@ orderRouter.get(
     const settledIncomeCny = round2(
       num(
         scalar<SqlParam>(
-          `SELECT COALESCE(SUM(t.amount * ${rateExprOf('t.currency', 'COALESCE(t.statement_time, t.created_at)')}), 0)
+          `SELECT COALESCE(SUM(t.amount * ${rateToCnyExpr('t.currency', `COALESCE(substr(t.statement_time, 1, 10), substr(t.created_at, 1, 10))`)}), 0)
              FROM settlement_txn t WHERE t.is_deleted = 0 AND t.tk_order_id = ? AND t.txn_type = 1`,
           tkOrderId,
         ),

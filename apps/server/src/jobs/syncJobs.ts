@@ -13,6 +13,7 @@
  */
 import { MAP_STATUS, normalizeHandle, round2, unitCostCny } from '@tk/shared';
 import { config } from '../config.js';
+import { countRateFallbacks, rebuildCreatorDaily, rebuildProductChannelDaily, rebuildShopChannelDaily, rebuildVideoDaily } from '../services/analytics.js';
 import { all, get, insert, run, scalar, tx, update } from '../core/db.js';
 import { sendAlert, writeOpLog } from '../core/oplog.js';
 import { buildShopCredential, createTiktokClient, type ShopCredential, type SyncWindow } from '../services/tiktok/client.js';
@@ -622,11 +623,26 @@ function pickAttributionTarget(shopId: number, a: PlatformAffiliateOrder): { id:
 /* ==================== 派生汇总刷新 ==================== */
 
 /**
- * 映射补齐后的两件事：
+ * 派生汇总刷新：映射纠偏 + 成本回填 + 四张分析宽表重建。
  *  1. listing.map_status 与 sku_id 保持一致（人工在库里直接改了 sku 也能纠偏）；
- *  2. 把 cost_matched=0（从来没有快照）且映射已补齐的历史明细按当前成本补一次，逐行写操作日志。
+ *  2. 把 cost_matched=0（从来没有快照）且映射已补齐的历史明细按当前成本补一次，逐行写操作日志；
+ *  3. 重建 analytics_*（§15.2 宽表）—— 以前「派生汇总刷新」根本不动宽表，
+ *     宽表只有夜里那条 cron 会重算，界面点完「刷新」数字还是旧的。
  * 已冻结过 cost_snapshot 的历史行绝不回溯（方案表 7 + 要点 5.1）。
+ *
+ * 窗口：这是全量重算，不是增量。调用方没给窗口时按**源数据实际跨度**（最早订单 → 现在）算，
+ * 并把生效窗口写进 sync_log；以前退化成 resolveWindow 的「最近 24 小时」，
+ * 在历史数据上等于什么都没算，日志却报「成功」——这就是 #33。
  */
+/** 源数据实际跨度（UTC）：宽表与成本回填都是全量重算，窗口必须覆盖到最早一单 */
+function fullDataWindow(): SyncWindow {
+  const span = get<{ lo: string | null; hi: string | null }>(
+    `SELECT MIN(order_time) AS lo, MAX(order_time) AS hi FROM tk_order WHERE is_deleted = 0`,
+  );
+  const now = utcStamp();
+  return { from: span?.lo ?? now, to: now };
+}
+
 export function refreshDerivedAggregates(opts: SyncOptions = {}, shopIds?: number[]): SyncResult {
   const startedAt = utcStamp();
   const user = opts.user_id ?? SYSTEM_USER_ID;
@@ -635,7 +651,7 @@ export function refreshDerivedAggregates(opts: SyncOptions = {}, shopIds?: numbe
   const orderShopFilter = scopedIds === undefined ? '' : scopedIds.length ? ` AND o.shop_id IN (${scopedIds.map(() => '?').join(',')})` : ' AND 1 = 0';
   const scopeParams = scopedIds ?? [];
   const logShopId = scopedIds?.length === 1 ? scopedIds[0]! : 0;
-  const window = resolveWindow('aggregate', logShopId, opts);
+  const window = opts.windowStart ? resolveWindow('aggregate', logShopId, opts) : fullDataWindow();
   const logId = insert('sync_log', {
     task_type: 'aggregate',
     shop_id: logShopId || null,
@@ -695,14 +711,33 @@ export function refreshDerivedAggregates(opts: SyncOptions = {}, shopIds?: numbe
     errorMsg = (e instanceof Error ? e.message : String(e)).slice(0, 500);
     sendAlert({ title: '派生汇总刷新失败', detail: errorMsg, level: 'error' });
   }
+
+  // 宽表重建：按生效窗口的日期区间全量重算，失败同样留痕
+  let analyticsAffected = 0;
+  let rateFallback = 0;
+  try {
+    const fromDay = window.from.slice(0, 10);
+    const toDay = window.to.slice(0, 10);
+    analyticsAffected =
+      rebuildShopChannelDaily(fromDay, toDay, user) +
+      rebuildProductChannelDaily(fromDay, toDay, user) +
+      rebuildCreatorDaily(fromDay, toDay, user) +
+      rebuildVideoDaily(fromDay, toDay, user);
+    rateFallback = countRateFallbacks(fromDay, toDay);
+  } catch (e) {
+    const msg = (e instanceof Error ? e.message : String(e)).slice(0, 500);
+    errorMsg = errorMsg ? `${errorMsg} / 宽表重建：${msg}` : `宽表重建：${msg}`;
+    sendAlert({ title: '分析宽表重建失败', detail: msg, level: 'error' });
+  }
+
   return finishSyncLog(logId, startedAt, window, {
-    fetched: listingFixed + itemBackfilled,
+    fetched: listingFixed + itemBackfilled + analyticsAffected,
     inserted: itemBackfilled,
-    updated: listingFixed,
+    updated: listingFixed + analyticsAffected,
     failed: errorMsg ? 1 : 0,
     status: errorMsg ? 3 : 1,
     error_msg: errorMsg,
-    detail: { listing_fixed: listingFixed, item_backfilled: itemBackfilled },
+    detail: { listing_fixed: listingFixed, item_backfilled: itemBackfilled, analytics_rows: analyticsAffected, rate_fallback_rows: rateFallback },
   }, logShopId, 'aggregate');
 }
 
@@ -855,6 +890,7 @@ export function registerSyncJobs(cron: CronLike): { name: string; expr: string }
     { name: 'affiliate', expr: '50 3 * * *', run: () => void runTaskForAllShops('affiliate_order').catch(safe('affiliate')) },
     { name: 'aggregate', expr: '55 3 * * *', run: () => void refreshDerivedAggregates() },
   ];
-  for (const j of jobs) cron.schedule(j.expr, j.run, { name: `sync:${j.name}` });
+  // 时区必须显式：不传时 node-cron 用服务器本地时区，同步窗口按 UTC 算就会错位
+  for (const j of jobs) cron.schedule(j.expr, j.run, { name: `sync:${j.name}`, timezone: config.jobTimezone });
   return jobs.map(({ name, expr }) => ({ name, expr }));
 }

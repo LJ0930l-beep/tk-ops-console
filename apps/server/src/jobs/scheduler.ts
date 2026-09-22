@@ -1,4 +1,5 @@
 import cron from 'node-cron';
+import { config } from '../config.js';
 import { registerSyncJobs } from './syncJobs.js';
 import { registerCreatorJobs } from './creatorJobs.js';
 import { registerAnalyticsJobs } from './analyticsJobs.js';
@@ -10,5 +11,5 @@ export function startScheduler(): void {
   const creator = registerCreatorJobs(cron).map((j) => `creator:${j.name} (${j.expression})`);
   const analytics = registerAnalyticsJobs(cron).map((j) => `analytics:${j.name} (${j.expr})`);
   const notifications = registerNotificationJobs(cron).map((j) => `notification:${j.name} (${j.expr})`);
-  for (const line of [...sync, ...creator, ...analytics, ...notifications]) console.log(`[jobs] 已注册 ${line}`);
+  for (const line of [...sync, ...creator, ...analytics, ...notifications]) console.log(`[jobs] 已注册 ${line} @${config.jobTimezone}`);
 }

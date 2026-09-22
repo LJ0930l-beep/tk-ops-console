@@ -2,13 +2,14 @@
  * V2.0 分析/规则定时任务：宽表重建 → 规则评估 → 效果回看（§19：规则任务失败要告警留痕）。
  * 与 syncJobs/creatorJobs 相同的注册约定：传入 cron 实例，返回已注册任务清单。
  */
+import { config } from '../config.js';
 import { insert, update } from '../core/db.js';
 import { rebuildAnalytics } from '../services/analytics.js';
 import { evaluateActionResults, evaluateRules } from '../services/rules/engine.js';
 import { sendAlert } from '../core/oplog.js';
 
 interface CronLike {
-  schedule: (expr: string, fn: () => void) => unknown;
+  schedule: (expr: string, fn: () => void, opts?: Record<string, unknown>) => unknown;
 }
 
 export interface RegisteredJob {
@@ -45,19 +46,21 @@ export function registerAnalyticsJobs(cron: CronLike): RegisteredJob[] {
   cron.schedule(jobs[0].expr, () => {
     try {
       const r = rebuildAnalytics(null);
-      console.log(`[jobs] analytics_rebuild 完成，回写 ${r.affected} 行`);
+      console.log(`[jobs] analytics_rebuild 完成，回写 ${r.affected} 行${r.rate_fallback_rows ? `（其中 ${r.rate_fallback_rows} 笔走兜底汇率）` : ''}`);
     } catch (e) {
       console.error(`[jobs] analytics_rebuild 失败：${(e as Error).message}`);
       sendAlert({ title: '分析宽表重建失败', detail: (e as Error).message, level: 'error' });
     }
-  });
+  }, { name: `analytics:${jobs[0].name}`, timezone: config.jobTimezone });
   cron.schedule(jobs[1].expr, () => {
     try {
       const r = runRulesCycle(null);
       console.log(`[jobs] rules_evaluate 完成，新增事件 ${r.events}，回看 ${r.results}`);
     } catch (e) {
+      // §19：规则任务失败必须留痕并告警，只写 console 等于静默失败
       console.error(`[jobs] rules_evaluate 失败：${(e as Error).message}`);
+      sendAlert({ title: '规则评估任务失败', detail: (e as Error).message, level: 'error' });
     }
-  });
+  }, { name: `analytics:${jobs[1].name}`, timezone: config.jobTimezone });
   return jobs;
 }

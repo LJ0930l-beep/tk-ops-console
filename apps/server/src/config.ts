@@ -83,6 +83,11 @@ export const config = {
   sampleContentDueDays: Number(process.env.SAMPLE_DUE_DAYS ?? 7),
   protectDefaultDays: Number(process.env.CREATOR_PROTECT_DAYS ?? 30),
   syncOverlapMinutes: Number(process.env.SYNC_OVERLAP_MIN ?? 5),
+  /**
+   * 定时任务的调度时区（node-cron 不设时区时用服务器本地时区 —— 换台机器同一句表达式就换触发时刻）。
+   * 数据统一存 UTC、报表按店铺时区切日，所以默认给 UTC，要改成站点时区用 JOB_TZ。
+   */
+  jobTimezone: process.env.JOB_TZ ?? 'UTC',
   /** 同步导出行数上限（PRD B8：一期只做同步导出，超了明确拒绝让人缩小范围） */
   exportMaxRows: num('EXPORT_MAX_ROWS', 20000),
   enableScheduler: process.env.ENABLE_SCHEDULER !== 'false',

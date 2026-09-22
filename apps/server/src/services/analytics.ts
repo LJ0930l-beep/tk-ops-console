@@ -1,16 +1,24 @@
 /**
  * V2.0 分析宽表层（§15.2）：事实表 → 日粒度宽表幂等重建 + ABC/漂移/衰减分析视图。
  *
- * 口径与 aggregate.ts / profit.ts 保持一致：
+ * 口径与 aggregate.ts / profit.ts / 订单列表保持一致，三件事不许分叉：
+ *  - **归日**：一律 `tz_day(时间, 店铺 timezone, 站点 region)` = 店铺 IANA 时区自然日（含夏令时）。
+ *    以前这里用 `substr(order_time,1,10)`（UTC 日），而利润引擎按店铺时区归日，
+ *    同一笔订单在「行动中心/宽表」和「利润报表」会落在不同天，两个页面永远对不上。
+ *  - **折人民币**：一律 `toCnySql()`（当日 → 更早 → 更晚 → `FALLBACK_RATE_TO_CNY` 常量），
+ *    与 JS 侧 `getRate()` 同一套规则。以前直接乘 `rateSqlExpr()`，缺汇率时表达式变 NULL，
+ *    `SUM(金额 * NULL)` 会**静默少算**这一行的金额——数字看着对，实际漏了。
  *  - CANCELLED 订单与样品单（is_sample_order=1）不计 GMV；待映射行计 GMV 不计利润（宽表只有 GMV 口径）。
- *  - 金额按订单日汇率折人民币（rateSqlExpr）；est_commission 为店铺币种，折算方式与利润引擎一致。
+ *  - 广告 `ad_daily.stat_date` 已是平台侧自然日，不再二次切日（与 ads.routes.ts 同一口径）。
  *  - 事实表没有的字段（visitors/impression/click/add_cart、直播分钟数据）本服务不造数，
  *    由导入或演示 seed 回填（source 列 fact/import/mock 区分）；重建只更新事实可推导列，
  *    保证「所有分析宽表都能追溯到事实表或同步批次」（§15.4）。
- *  - 每次重建写一条 sync_log(task_type='aggregate')，失败留痕。
+ *  - 每次重建写一条 sync_log(task_type='aggregate')，失败留痕；
+ *    窗口内存在「只能走兜底常量」的单据时发 alert（§6.1 汇率缺失必须可解释，不许悄悄折算）。
  */
 import { all, get, insert, run, update } from '../core/db.js';
-import { rateSqlExpr, todayUtc } from './rates.js';
+import { sendAlert } from '../core/oplog.js';
+import { rateMissingExpr, todayUtc, toCnySql } from './rates.js';
 import { ABC_DEFAULTS, channelOfContentType } from '@tk/shared';
 
 type Num = number | string | bigint | null;
@@ -29,9 +37,19 @@ void channelOfContentType; // 渠道映射在 SQL 侧内联（CH()），与 shar
 const CH = (ct = 'i.content_type', cr = 'i.creator_id'): string =>
   `CASE WHEN ${ct} IN (1,3) THEN 'video' WHEN ${ct} IN (2,4) THEN 'live' WHEN ${ct} = 5 THEN 'product_card' WHEN ${cr} IS NOT NULL THEN 'affiliate' ELSE 'organic' END`;
 
+/** 店铺 IANA 时区自然日；别名 s 必须是 tk_shop（tz_day 由 core/db.ts 注册，第三参是站点兜底偏移） */
+const DAY = (timeCol: string, s = 's'): string => `tz_day(${timeCol}, ${s}.timezone, ${s}.region)`;
+/** 与所在自然日同价的人民币金额表达式（dateCol 传 DAY(...)，保证「同一行同一价」） */
+const CNY = (amount: string, currency: string, day: string): string => toCnySql(amount, currency, day);
+/** 该笔单据是否只能走兜底常量（用于窗口内的汇率缺失告警计数） */
+const RATE_MISSED = (currency: string, day: string): string => rateMissingExpr(currency, day);
+
+const SHOP_JOIN = (col: string, as = 's'): string => `JOIN tk_shop ${as} ON ${as}.id = ${col} AND ${as}.is_deleted = 0`;
+
 const ORDER_WHERE = `i.is_deleted = 0 AND o.order_status <> 'CANCELLED' AND o.is_sample_order = 0`;
-const ORDER_RATE = rateSqlExpr('o.currency', 'substr(o.order_time, 1, 10)');
-const RETURN_RATE = rateSqlExpr('r.currency', 'substr(r.apply_time, 1, 10)');
+const RETURN_DONE = `r.is_deleted = 0 AND r.status = 'COMPLETED'`;
+/** 退款归日到申请时间（缺失时退回完成时间），与退款人民币口径同一天 */
+const RETURN_DAY = (s = 's'): string => DAY(`COALESCE(r.apply_time, r.finish_time)`, s);
 
 /** SQLite 幂等 upsert：命中部分唯一索引（WHERE is_deleted=0）则只更新事实推导列 */
 function upsert(
@@ -56,12 +74,14 @@ export function rebuildShopChannelDaily(start: string, end: string, userId: numb
     return v;
   };
 
+  const dayO = DAY('o.order_time');
   const orderRows = all<{ d: string; shop_id: number; channel: string; orders: Num; gmv: Num }>(
-    `SELECT substr(o.order_time, 1, 10) AS d, o.shop_id AS shop_id, ${CH()} AS channel,
-            COUNT(DISTINCT o.id) AS orders, ROUND(SUM(i.item_amount * ${ORDER_RATE}), 2) AS gmv
+    `SELECT ${dayO} AS d, o.shop_id AS shop_id, ${CH()} AS channel,
+            COUNT(DISTINCT o.id) AS orders, ROUND(SUM(${CNY('i.item_amount', 'o.currency', dayO)}), 2) AS gmv
        FROM tk_order_item i
        JOIN tk_order o ON o.id = i.order_id AND o.is_deleted = 0
-      WHERE ${ORDER_WHERE} AND substr(o.order_time, 1, 10) BETWEEN ? AND ?
+       ${SHOP_JOIN('o.shop_id')}
+      WHERE ${ORDER_WHERE} AND ${dayO} BETWEEN ? AND ?
       GROUP BY d, o.shop_id, channel`,
     start,
     end,
@@ -73,22 +93,24 @@ export function rebuildShopChannelDaily(start: string, end: string, userId: numb
   }
 
   // 已完成退款按行级关联归回渠道与申请日；无行级关联的退款不摊（与 video 聚合同一口径）
+  const dayR = RETURN_DAY();
   const refundRows = all<{ d: string; shop_id: number; channel: string; refund: Num }>(
-    `SELECT substr(r.apply_time, 1, 10) AS d, r.shop_id AS shop_id, ${CH()} AS channel,
-            ROUND(SUM(r.refund_amount * ${RETURN_RATE}), 2) AS refund
+    `SELECT ${dayR} AS d, r.shop_id AS shop_id, ${CH()} AS channel,
+            ROUND(SUM(${CNY('r.refund_amount', 'r.currency', dayR)}), 2) AS refund
        FROM tk_return r
        JOIN tk_order_item i ON i.id = r.tk_order_item_id
-      WHERE r.is_deleted = 0 AND r.status = 'COMPLETED' AND substr(r.apply_time, 1, 10) BETWEEN ? AND ?
+       ${SHOP_JOIN('r.shop_id')}
+      WHERE ${RETURN_DONE} AND ${dayR} BETWEEN ? AND ?
       GROUP BY d, r.shop_id, channel`,
     start,
     end,
   );
   for (const r of refundRows) touch(`${r.d}|${r.shop_id}|${r.channel}`).refund += n(r.refund);
 
-  const adRate = rateSqlExpr('a.currency', 'a.stat_date');
   const adRows = all<{ d: string; shop_id: number; orders: Num; ad_spend: Num; gmv: Num }>(
     `SELECT a.stat_date AS d, a.shop_id AS shop_id, SUM(a.conversions) AS orders,
-            ROUND(SUM(a.spend * ${adRate}), 2) AS ad_spend, ROUND(SUM(a.gmv * ${adRate}), 2) AS gmv
+            ROUND(SUM(${CNY('a.spend', 'a.currency', 'a.stat_date')}), 2) AS ad_spend,
+            ROUND(SUM(${CNY('a.gmv', 'a.currency', 'a.stat_date')}), 2) AS gmv
        FROM ad_daily a
       WHERE a.is_deleted = 0 AND a.stat_date BETWEEN ? AND ?
       GROUP BY d, a.shop_id`,
@@ -132,14 +154,16 @@ export function rebuildProductChannelDaily(start: string, end: string, userId: n
     return v;
   };
 
+  const dayO = DAY('o.order_time');
   const orderRows = all<{ d: string; shop_id: number; spu_id: number; channel: string; orders: Num; gmv: Num }>(
-    `SELECT substr(o.order_time, 1, 10) AS d, o.shop_id AS shop_id, k.spu_id AS spu_id, ${CH()} AS channel,
-            COUNT(DISTINCT o.id) AS orders, ROUND(SUM(i.item_amount * ${ORDER_RATE}), 2) AS gmv
+    `SELECT ${dayO} AS d, o.shop_id AS shop_id, k.spu_id AS spu_id, ${CH()} AS channel,
+            COUNT(DISTINCT o.id) AS orders, ROUND(SUM(${CNY('i.item_amount', 'o.currency', dayO)}), 2) AS gmv
        FROM tk_order_item i
        JOIN tk_order o ON o.id = i.order_id AND o.is_deleted = 0
+       ${SHOP_JOIN('o.shop_id')}
        JOIN shop_listing l ON l.id = i.listing_id
        JOIN product_sku k ON k.id = l.sku_id
-      WHERE ${ORDER_WHERE} AND k.spu_id IS NOT NULL AND substr(o.order_time, 1, 10) BETWEEN ? AND ?
+      WHERE ${ORDER_WHERE} AND k.spu_id IS NOT NULL AND ${dayO} BETWEEN ? AND ?
       GROUP BY d, o.shop_id, k.spu_id, channel`,
     start,
     end,
@@ -150,15 +174,17 @@ export function rebuildProductChannelDaily(start: string, end: string, userId: n
     v.gmv += n(r.gmv);
   }
 
+  const dayR = RETURN_DAY();
   const refundRows = all<{ d: string; shop_id: number; spu_id: number; channel: string; refund: Num }>(
-    `SELECT substr(r.apply_time, 1, 10) AS d, r.shop_id AS shop_id, k.spu_id AS spu_id, ${CH()} AS channel,
-            ROUND(SUM(r.refund_amount * ${RETURN_RATE}), 2) AS refund
+    `SELECT ${dayR} AS d, r.shop_id AS shop_id, k.spu_id AS spu_id, ${CH()} AS channel,
+            ROUND(SUM(${CNY('r.refund_amount', 'r.currency', dayR)}), 2) AS refund
        FROM tk_return r
        JOIN tk_order_item i ON i.id = r.tk_order_item_id
+       ${SHOP_JOIN('r.shop_id')}
        JOIN shop_listing l ON l.id = i.listing_id
        JOIN product_sku k ON k.id = l.sku_id
-      WHERE r.is_deleted = 0 AND r.status = 'COMPLETED' AND k.spu_id IS NOT NULL
-        AND substr(r.apply_time, 1, 10) BETWEEN ? AND ?
+      WHERE ${RETURN_DONE} AND k.spu_id IS NOT NULL
+        AND ${dayR} BETWEEN ? AND ?
       GROUP BY d, r.shop_id, k.spu_id, channel`,
     start,
     end,
@@ -195,13 +221,15 @@ export function rebuildCreatorDaily(start: string, end: string, userId: number |
     return v;
   };
 
+  const dayO = DAY('o.order_time');
   const orderRows = all<{ d: string; creator_id: number; shop_id: number; orders: Num; gmv: Num; commission: Num }>(
-    `SELECT substr(o.order_time, 1, 10) AS d, i.creator_id AS creator_id, MIN(o.shop_id) AS shop_id,
-            COUNT(DISTINCT o.id) AS orders, ROUND(SUM(i.item_amount * ${ORDER_RATE}), 2) AS gmv,
-            ROUND(SUM(i.est_commission * ${ORDER_RATE}), 2) AS commission
+    `SELECT ${dayO} AS d, i.creator_id AS creator_id, MIN(o.shop_id) AS shop_id,
+            COUNT(DISTINCT o.id) AS orders, ROUND(SUM(${CNY('i.item_amount', 'o.currency', dayO)}), 2) AS gmv,
+            ROUND(SUM(${CNY('i.est_commission', 'o.currency', dayO)}), 2) AS commission
        FROM tk_order_item i
        JOIN tk_order o ON o.id = i.order_id AND o.is_deleted = 0
-      WHERE ${ORDER_WHERE} AND i.creator_id IS NOT NULL AND substr(o.order_time, 1, 10) BETWEEN ? AND ?
+       ${SHOP_JOIN('o.shop_id')}
+      WHERE ${ORDER_WHERE} AND i.creator_id IS NOT NULL AND ${dayO} BETWEEN ? AND ?
       GROUP BY d, i.creator_id`,
     start,
     end,
@@ -214,26 +242,32 @@ export function rebuildCreatorDaily(start: string, end: string, userId: number |
     v.commission += n(r.commission);
   }
 
+  const dayR = RETURN_DAY();
   const refundRows = all<{ d: string; creator_id: number; refund: Num }>(
-    `SELECT substr(r.apply_time, 1, 10) AS d, i.creator_id AS creator_id,
-            ROUND(SUM(r.refund_amount * ${RETURN_RATE}), 2) AS refund
+    `SELECT ${dayR} AS d, i.creator_id AS creator_id,
+            ROUND(SUM(${CNY('r.refund_amount', 'r.currency', dayR)}), 2) AS refund
        FROM tk_return r
        JOIN tk_order_item i ON i.id = r.tk_order_item_id
-      WHERE r.is_deleted = 0 AND r.status = 'COMPLETED' AND i.creator_id IS NOT NULL
-        AND substr(r.apply_time, 1, 10) BETWEEN ? AND ?
+       ${SHOP_JOIN('r.shop_id')}
+      WHERE ${RETURN_DONE} AND i.creator_id IS NOT NULL
+        AND ${dayR} BETWEEN ? AND ?
       GROUP BY d, i.creator_id`,
     start,
     end,
   );
   for (const r of refundRows) touch(`${r.d}|${r.creator_id}`).refund += n(r.refund);
 
-  // 寄样成本（sample_cost/shipping_cost 落库即人民币快照），按发货日归集
+  // 寄样成本（sample_cost/shipping_cost 落库即人民币快照），按发货日归集；
+  // 有合作单时按合作店铺时区归日，没有合作单退化成 UTC 日（没有店铺可参照）
+  const dayS = DAY('sm.ship_time');
   const sampleRows = all<{ d: string; creator_id: number; c: Num }>(
-    `SELECT substr(s.ship_time, 1, 10) AS d, s.creator_id AS creator_id,
-            ROUND(SUM(s.sample_cost + s.shipping_cost), 2) AS c
-       FROM sample_shipment s
-      WHERE s.is_deleted = 0 AND s.ship_time IS NOT NULL AND substr(s.ship_time, 1, 10) BETWEEN ? AND ?
-      GROUP BY d, s.creator_id`,
+    `SELECT ${dayS} AS d, sm.creator_id AS creator_id,
+            ROUND(SUM(sm.sample_cost + sm.shipping_cost), 2) AS c
+       FROM sample_shipment sm
+       LEFT JOIN collaboration c ON c.id = sm.collab_id
+       LEFT JOIN tk_shop s ON s.id = c.shop_id
+      WHERE sm.is_deleted = 0 AND sm.ship_time IS NOT NULL AND ${dayS} BETWEEN ? AND ?
+      GROUP BY d, sm.creator_id`,
     start,
     end,
   );
@@ -271,14 +305,16 @@ export function rebuildVideoDaily(start: string, end: string, userId: number | n
     return v;
   };
 
+  const dayO = DAY('o.order_time');
   const orderRows = all<{ d: string; video_id: number; orders: Num; gmv: Num }>(
-    `SELECT substr(o.order_time, 1, 10) AS d, v.id AS video_id,
-            COUNT(DISTINCT o.id) AS orders, ROUND(SUM(i.item_amount * ${ORDER_RATE}), 2) AS gmv
+    `SELECT ${dayO} AS d, v.id AS video_id,
+            COUNT(DISTINCT o.id) AS orders, ROUND(SUM(${CNY('i.item_amount', 'o.currency', dayO)}), 2) AS gmv
        FROM tk_order_item i
        JOIN tk_order o ON o.id = i.order_id AND o.is_deleted = 0
+       ${SHOP_JOIN('o.shop_id')}
        JOIN video v ON v.tk_video_id = i.content_id AND v.is_deleted = 0
       WHERE ${ORDER_WHERE} AND i.content_type IN (1, 3)
-        AND substr(o.order_time, 1, 10) BETWEEN ? AND ?
+        AND ${dayO} BETWEEN ? AND ?
       GROUP BY d, v.id`,
     start,
     end,
@@ -289,23 +325,24 @@ export function rebuildVideoDaily(start: string, end: string, userId: number | n
     v.gmv += n(r.gmv);
   }
 
+  const dayR = RETURN_DAY();
   const refundRows = all<{ d: string; video_id: number; refund: Num }>(
-    `SELECT substr(r.apply_time, 1, 10) AS d, v.id AS video_id,
-            ROUND(SUM(r.refund_amount * ${RETURN_RATE}), 2) AS refund
+    `SELECT ${dayR} AS d, v.id AS video_id,
+            ROUND(SUM(${CNY('r.refund_amount', 'r.currency', dayR)}), 2) AS refund
        FROM tk_return r
        JOIN tk_order_item i ON i.id = r.tk_order_item_id
+       ${SHOP_JOIN('r.shop_id')}
        JOIN video v ON v.tk_video_id = i.content_id AND v.is_deleted = 0
-      WHERE r.is_deleted = 0 AND r.status = 'COMPLETED' AND i.content_type IN (1, 3)
-        AND substr(r.apply_time, 1, 10) BETWEEN ? AND ?
+      WHERE ${RETURN_DONE} AND i.content_type IN (1, 3)
+        AND ${dayR} BETWEEN ? AND ?
       GROUP BY d, v.id`,
     start,
     end,
   );
   for (const r of refundRows) touch(`${r.d}|${r.video_id}`).refund += n(r.refund);
 
-  const adRate = rateSqlExpr('a.currency', 'a.stat_date');
   const adRows = all<{ d: string; video_id: number; ad_spend: Num }>(
-    `SELECT a.stat_date AS d, a.video_id AS video_id, ROUND(SUM(a.spend * ${adRate}), 2) AS ad_spend
+    `SELECT a.stat_date AS d, a.video_id AS video_id, ROUND(SUM(${CNY('a.spend', 'a.currency', 'a.stat_date')}), 2) AS ad_spend
        FROM ad_daily a
       WHERE a.is_deleted = 0 AND a.ad_type = 3 AND a.video_id IS NOT NULL AND a.stat_date BETWEEN ? AND ?
       GROUP BY d, a.video_id`,
@@ -337,11 +374,37 @@ export function rebuildVideoDaily(start: string, end: string, userId: number | n
 
 /* ==================== 重建入口（调度器 / 同步页共用） ==================== */
 
+/**
+ * 窗口内「exchange_rate 查不到当天价、只能走兜底常量」的单据数。
+ * PRD §6.1 要求汇率缺失可解释：宁可报出来让人补价，也不能让金额静默变形。
+ */
+export function countRateFallbacks(start: string, end: string): number {
+  const dayO = DAY('o.order_time');
+  const dayR = RETURN_DAY();
+  const count = (sql: string): number => Number(get<{ c: Num }>(sql, start, end)?.c ?? 0);
+  const orders = count(
+    `SELECT COUNT(*) AS c FROM tk_order_item i
+       JOIN tk_order o ON o.id = i.order_id AND o.is_deleted = 0
+       ${SHOP_JOIN('o.shop_id')}
+      WHERE ${ORDER_WHERE} AND ${dayO} BETWEEN ? AND ? AND ${RATE_MISSED('o.currency', dayO)}`,
+  );
+  const refunds = count(
+    `SELECT COUNT(*) AS c FROM tk_return r
+       JOIN tk_order_item i ON i.id = r.tk_order_item_id
+       ${SHOP_JOIN('r.shop_id')}
+      WHERE ${RETURN_DONE} AND ${dayR} BETWEEN ? AND ? AND ${RATE_MISSED('r.currency', dayR)}`,
+  );
+  const ads = count(`SELECT COUNT(*) AS c FROM ad_daily a WHERE a.is_deleted = 0 AND a.stat_date BETWEEN ? AND ? AND ${RATE_MISSED('a.currency', 'a.stat_date')}`);
+  return orders + refunds + ads;
+}
+
 export interface RebuildOutcome {
   task: 'analytics';
   affected: number;
   window: { start: string; end: string };
   sync_log_id: number;
+  /** 走兜底汇率的单据数（>0 时同步发 ALERT，提示去汇率页补价后重跑） */
+  rate_fallback_rows: number;
 }
 
 export function rebuildAnalytics(user: { id?: number } | null = null, range: { start?: string; end?: string } = {}): RebuildOutcome {
@@ -362,8 +425,16 @@ export function rebuildAnalytics(user: { id?: number } | null = null, range: { s
       rebuildProductChannelDaily(start, end, userId) +
       rebuildCreatorDaily(start, end, userId) +
       rebuildVideoDaily(start, end, userId);
-    update('sync_log', logId, { updated: affected, status: 1, finished_at: stamp() } as never);
-    return { task: 'analytics', affected, window: { start, end }, sync_log_id: logId };
+    const fallback = countRateFallbacks(start, end);
+    if (fallback > 0) {
+      sendAlert({
+        level: 'warn',
+        title: `宽表有 ${fallback} 笔单据缺当日汇率，已按兜底常量折算`,
+        detail: `窗口 ${start}~${end}：这些行的人民币金额用的是 FALLBACK_RATE_TO_CNY 常量而不是当日牌价，请在汇率页补录后重跑「派生汇总刷新」。`,
+      });
+    }
+    update('sync_log', logId, { updated: affected, status: fallback > 0 ? 2 : 1, failed: fallback, finished_at: stamp() } as never);
+    return { task: 'analytics', affected, window: { start, end }, sync_log_id: logId, rate_fallback_rows: fallback };
   } catch (e) {
     update('sync_log', logId, { failed: 1, status: 3, error_msg: (e as Error).message, finished_at: stamp() } as never);
     throw e;
@@ -759,4 +830,4 @@ export function liveMinutes(liveSessionId: number) {
   );
 }
 
-void get;
+

@@ -1,5 +1,6 @@
 import { collabRoi, num, round2 } from '@tk/shared';
 import { all, get, type SqlParam } from '../../core/db.js';
+import { fallbackRateSql } from '../rates.js';
 
 /**
  * 达人 / 合作单 / BD 投产比（方案 6.1 收尾）
@@ -9,7 +10,9 @@ import { all, get, type SqlParam } from '../../core/db.js';
  * 口径说明（方案「要点 3」：时间统一 UTC，金额统一人民币）：
  *   - 净 GMV = 归因到该达人 / 该合作单的 tk_order_item.item_amount − 对应行退款，
  *     并排除 is_sample_order = 1（表 6 注明「达人免费样品单：不计入 GMV」）与已取消订单；
- *   - 订单金额、退款、预估佣金按订单币种 × 当天下单汇率折 CNY，缺当天汇率取该币种最近一条；
+ *   - 订单金额、退款、预估佣金按订单币种折 CNY，取价顺序与 JS 侧 getRate() 逐条一致：
+ *     当日 → 更早最近一条 → 更晚最近一条 → FALLBACK_RATE_TO_CNY 常量；
+ *     以前缺价时乘的是 COALESCE(rate, 1)，等于把 1 USD 当 1 CNY，达人 ROI 会整体失真；
  *   - sample_cost / shipping_cost / expense.amount_cny 本身已是 CNY，不再乘汇率。
  *
  * 归因两条路径（tk_order_item 上没有 collab_id，达人可来自明细也来自视频）：
@@ -21,7 +24,7 @@ import { all, get, type SqlParam } from '../../core/db.js';
 /** 可参与带货归因的订单 */
 export const ATTRIBUTABLE_ORDER = `o.is_deleted = 0 AND o.is_sample_order = 0 AND o.order_status <> 'CANCELLED'`;
 
-/** 逐单汇率：下单当天优先，取不到用该币种最近一条 */
+/** 逐单汇率：下单当天优先 → 更早最近一条（再落空由 ORDER_RATE_CNY 兜后续两档） */
 export const RATE_JOIN = `LEFT JOIN exchange_rate er ON er.currency = o.currency AND er.is_deleted = 0
    AND er.id = (SELECT e2.id FROM exchange_rate e2
                  WHERE e2.currency = o.currency AND e2.is_deleted = 0
@@ -33,10 +36,20 @@ const REFUND_JOIN = `LEFT JOIN (SELECT r.tk_order_item_id AS item_id, SUM(r.refu
                     FROM tk_return r WHERE r.is_deleted = 0 AND r.status = 'COMPLETED' GROUP BY r.tk_order_item_id) rf ON rf.item_id = i.id`;
 export { REFUND_JOIN };
 
+/**
+ * 生效汇率（依赖别名 o / er）：JOIN 命中用表价；否则退回「更晚最近一条」；再否则用兜底常量。
+ * COALESCE 短路，后两档只在 JOIN 落空时求值，不影响主路径性能。
+ */
+export const ORDER_RATE_CNY = `COALESCE(er.rate_to_cny,
+    (SELECT e5.rate_to_cny FROM exchange_rate e5
+      WHERE e5.is_deleted = 0 AND e5.currency = o.currency AND e5.rate_date > substr(o.order_time, 1, 10)
+      ORDER BY e5.rate_date ASC, e5.id ASC LIMIT 1),
+    ${fallbackRateSql('o.currency')})`;
+
 /** 人民币口径表达式（依赖别名 i / o / er / rf） */
-export const AMOUNT_CNY = `i.item_amount * COALESCE(er.rate_to_cny, 1)`;
-export const REFUND_CNY = `COALESCE(rf.refund_amount, 0) * COALESCE(er.rate_to_cny, 1)`;
-export const COMMISSION_CNY = `i.est_commission * COALESCE(er.rate_to_cny, 1)`;
+export const AMOUNT_CNY = `i.item_amount * ${ORDER_RATE_CNY}`;
+export const REFUND_CNY = `COALESCE(rf.refund_amount, 0) * ${ORDER_RATE_CNY}`;
+export const COMMISSION_CNY = `i.est_commission * ${ORDER_RATE_CNY}`;
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 /** 日期字面量：先校验格式再内联，避免子查询里的 ? 打乱参数顺序 */

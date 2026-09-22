@@ -129,17 +129,36 @@ export function fallbackRateSql(currencyCol: string): string {
   return `CASE ${whens} ELSE 1 END`;
 }
 
-/** 取价 SQL 表达式：当日 → 更早最近一条 → 兜底常量（用于必须留在 SQL 里的汇总回写） */
+/**
+ * 取价 SQL 表达式：当日 → 更早最近一条 → 更晚最近一条，全部落空则 NULL。
+ * 顺序与 `getRate()` 逐条对齐（JS 与 SQL 同一口径，报表与列表才不会差几分钱）。
+ * 需要「一定有值」的折算请用 `rateToCnyExpr()`，别直接乘这个（NULL 会把金额静默吞掉）。
+ */
 export function rateSqlExpr(currencyCol: string, dateCol: string): string {
-  return `(SELECT e.rate_to_cny FROM exchange_rate e
-            WHERE e.is_deleted = 0 AND e.currency = ${currencyCol} AND e.rate_date <= ${dateCol}
-            ORDER BY e.rate_date DESC, e.id DESC LIMIT 1)`;
+  const day = `NULLIF(${dateCol}, '')`;
+  const before = `(SELECT e.rate_to_cny FROM exchange_rate e
+                    WHERE e.is_deleted = 0 AND e.currency = ${currencyCol} AND e.rate_date <= ${day}
+                    ORDER BY e.rate_date DESC, e.id DESC LIMIT 1)`;
+  const after = `(SELECT e.rate_to_cny FROM exchange_rate e
+                   WHERE e.is_deleted = 0 AND e.currency = ${currencyCol} AND e.rate_date > ${day}
+                   ORDER BY e.rate_date ASC, e.id ASC LIMIT 1)`;
+  return `COALESCE(${before}, ${after})`;
+}
+
+/** 生效汇率：表里有价用表价，没有则用兜底常量（与 `getRate()` 的 missing 分支一致） */
+export function rateToCnyExpr(currencyCol: string, dateCol: string): string {
+  return `IFNULL(${rateSqlExpr(currencyCol, dateCol)}, ${fallbackRateSql(currencyCol)})`;
+}
+
+/** 该笔金额是否走了兜底常量（1=是）：报表用它给出「汇率缺失」提示，而不是让数字静默变形 */
+export function rateMissingExpr(currencyCol: string, dateCol: string): string {
+  return `(${rateSqlExpr(currencyCol, dateCol)} IS NULL)`;
 }
 
 /** 带汇率折算的 SQL 表达式（CNY 直接返回原金额） */
 export function toCnySql(amountCol: string, currencyCol: string, dateCol: string): string {
   return `(CASE WHEN ${currencyCol} = 'CNY' THEN ${amountCol}
-           ELSE ${amountCol} * IFNULL(${rateSqlExpr(currencyCol, dateCol)}, ${fallbackRateSql(currencyCol)}) END)`;
+           ELSE ${amountCol} * ${rateToCnyExpr(currencyCol, dateCol)} END)`;
 }
 
 export interface RateRow {

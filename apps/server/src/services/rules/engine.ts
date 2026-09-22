@@ -9,7 +9,7 @@
 import { all, get, insert, update } from '../../core/db.js';
 import { badRequest, notFound } from '../../core/http.js';
 import { DEFAULT_ALERT_RULES } from '@tk/shared';
-import { rateSqlExpr, todayUtc } from '../rates.js';
+import { rateToCnyExpr, todayUtc } from '../rates.js';
 import { scanCreatorTrends, scanProductChannels, scanVideoDecay } from '../analytics.js';
 
 type Num = number | string | bigint | null;
@@ -242,14 +242,14 @@ function evalVideoDecay(rule: RuleRow, end: string): Hit[] {
 
 function evalAdsLoss(rule: RuleRow, end: string): Hit[] {
   const start = addDays(end, -(rule.window_days - 1));
-  const adRate = rateSqlExpr('a.currency', 'a.stat_date');
+  const adRate = rateToCnyExpr('a.currency', 'a.stat_date');
   const ads = all<{ shop_id: number; spend: Num; gmv: Num }>(
     `SELECT a.shop_id, ROUND(SUM(a.spend * ${adRate}), 2) AS spend, ROUND(SUM(a.gmv * ${adRate}), 2) AS gmv
        FROM ad_daily a WHERE a.is_deleted = 0 AND a.stat_date BETWEEN ? AND ? GROUP BY a.shop_id`,
     start,
     end,
   );
-  const orderRate = rateSqlExpr('o.currency', 'substr(o.order_time, 1, 10)');
+  const orderRate = rateToCnyExpr('o.currency', 'substr(o.order_time, 1, 10)');
   const margins = all<{ shop_id: number; gmv: Num; cost: Num; commission: Num }>(
     `SELECT o.shop_id, ROUND(SUM(i.item_amount * ${orderRate}), 2) AS gmv,
             ROUND(SUM(i.cost_snapshot), 2) AS cost, ROUND(SUM(i.est_commission * ${orderRate}), 2) AS commission
@@ -441,7 +441,7 @@ export function metricSnapshot(targetType: string, targetId: number | null, end 
     return { metric: 'days_since_sign', value: Number.isFinite(t) ? Math.floor((Date.parse(`${end}T00:00:00Z`) - t) / 86400_000) : 0 };
   }
   if (targetType === 'ads' && targetId !== null) {
-    const adRate = rateSqlExpr('a.currency', 'a.stat_date');
+    const adRate = rateToCnyExpr('a.currency', 'a.stat_date');
     const row = get<{ spend: Num; gmv: Num }>(
       `SELECT ROUND(SUM(a.spend * ${adRate}), 2) AS spend, ROUND(SUM(a.gmv * ${adRate}), 2) AS gmv
          FROM ad_daily a WHERE a.is_deleted = 0 AND a.shop_id = ? AND a.stat_date BETWEEN ? AND ?`,

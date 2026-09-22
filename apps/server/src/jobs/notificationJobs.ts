@@ -1,8 +1,9 @@
+import { config } from '../config.js';
 import { sendAlert } from '../core/oplog.js';
 import { reconcileDueAlertNotifications } from '../services/notifications.js';
 
 interface CronLike {
-  schedule: (expr: string, fn: () => void) => unknown;
+  schedule: (expr: string, fn: () => void, opts?: Record<string, unknown>) => unknown;
 }
 
 export interface NotificationJob {
@@ -28,6 +29,6 @@ export function registerNotificationJobs(cron: CronLike): NotificationJob[] {
       console.error(`[jobs] ${job.name} 失败：${message}`);
       sendAlert({ title: '个人到期提醒任务失败', detail: message, level: 'error' });
     }
-  });
+  }, { name: `notification:${job.name}`, timezone: config.jobTimezone });
   return [job];
 }

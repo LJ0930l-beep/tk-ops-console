@@ -11,7 +11,10 @@
 import ExcelJS from 'exceljs';
 import type { Request, Response } from 'express';
 import { config } from '../config.js';
+import { all, get } from './db.js';
 import { badRequest } from './http.js';
+import { writeOpLog } from './oplog.js';
+import type { Q } from './query.js';
 
 export type ExportCell = string | number | boolean | null | undefined;
 export type ExportFormat = 'csv' | 'xlsx';
@@ -66,6 +69,54 @@ async function sendXlsx(res: Response, t: ExportTable): Promise<void> {
   }
   await sheet.commit();
   await workbook.commit();
+}
+
+/**
+ * 列表页导出出口：与列表接口共用同一份 FROM / SELECT / 查询条件（由调用方传进来），
+ * 这里只加三件事——取全量（带上限护栏）、按调用方的列定义出表、写 action='export' 留痕。
+ *
+ * 为什么非要共用：只要导出自己写一份 WHERE，就一定会和列表漂移
+ * （本轮已经为此修过三处：ROI 死路径、字典整页 500、同步下拉枚举对不上）。
+ */
+export function exportFromList(
+  req: Request,
+  res: Response,
+  opts: {
+    module: string;
+    targetTable: string;
+    filename: string;
+    from: string;
+    select: string;
+    /** 与列表接口同一个 Q（含数据范围与全部筛选） */
+    q: Q;
+    orderBy?: string;
+    columns: readonly (string | { key: string; label: string })[];
+    /** 逐行加工（掩码、字典翻译等），与列表的 map 保持同一个函数 */
+    decorate?: (row: Record<string, unknown>) => Record<string, unknown>;
+    /** 行数上限，默认 config.exportMaxRows */
+    cap?: number;
+    /** 额外记进日志的筛选条件（不写敏感值） */
+    filters?: Record<string, unknown>;
+  },
+): void {
+  const cap = opts.cap ?? config.exportMaxRows;
+  const total = Number(get<{ c: number }>(`SELECT COUNT(*) AS c FROM ${opts.from}${opts.q.whereSql}`, ...opts.q.params)?.c ?? 0);
+  if (total > cap) throw badRequest(`导出行数 ${total} 超过上限 ${cap} 行，请缩小时间区间或加筛选条件后重试`);
+  const rows = all<Record<string, unknown>>(
+    `SELECT ${opts.select} FROM ${opts.from}${opts.q.whereSql} ORDER BY ${opts.orderBy ?? 'id DESC'} LIMIT ?`,
+    ...opts.q.params,
+    cap,
+  ).map((r) => (opts.decorate ? opts.decorate(r) : r));
+  const cols = opts.columns.map((c) => (typeof c === 'string' ? { key: c, label: c } : c));
+  writeOpLog({
+    user_id: (req as { user?: { id?: number } }).user?.id ?? 0,
+    module: opts.module,
+    action: 'export',
+    target_table: opts.targetTable,
+    after: { rows: rows.length, filters: opts.filters ?? {}, format: exportFormat(req), cap },
+    ip: req.ip,
+  });
+  void sendTable(res, { filename: opts.filename, headers: cols.map((c) => c.label), rows: rows.map((r) => cols.map((c) => r[c.key] as ExportCell)) }, exportFormat(req));
 }
 
 /** 导出唯一出口：格式由调用方从 exportFormat(req) 取，写日志与权限把关仍在各路由里 */

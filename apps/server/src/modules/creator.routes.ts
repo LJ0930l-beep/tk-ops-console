@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, type Request } from 'express';
 import { z } from 'zod';
 import {
   COLLAB_STATUS,
@@ -18,8 +18,9 @@ import { config } from '../config.js';
 import { all, get, insert, run, scalar, softDelete, tx, update, type SqlParam } from '../core/db.js';
 import { AppError, badRequest, forbidden, notFound, ok, parseBody, qv, wrap } from '../core/http.js';
 import { Q, queryList, queryPage, toParam } from '../core/query.js';
-import { maskFields, personScope, requireMenu, type AuthedRequest } from '../core/auth.js';
+import { maskFields, personScope, requireExport, requireMenu, type AuthedRequest } from '../core/auth.js';
 import { logIfChanged, writeOpLog } from '../core/oplog.js';
+import { exportFromList } from '../core/export.js';
 import {
   checkOverdueSamples,
   markCollabPublished,
@@ -194,32 +195,81 @@ const creatorListSelect = `c.*, u.real_name AS owner_name`;
  * 统一列表。scope=pool 公海 | mine 我的私海 | cooperating 合作中 | blacklist 黑名单 | all（默认，按可见范围）
  * BD 只能看到公海 + 自己私海；他人私海达人在可见范围外，联系方式一律 ***。
  */
+/**
+ * 达人 / 合作单 / 寄样：列表与导出共用同一份筛选条件（导出绝不另写 WHERE，
+ * 否则两边口径一定会漂——本轮已为此修过 ROI 死路径、字典整页 500、同步下拉枚举三处）。
+ * 返回的 Q 已含私海/可见性范围，别名固定为 c / l / sm。
+ */
+function creatorListQ(req: Request, user: CurrentUser): Q {
+  const vis = creatorScope(user);
+  const scope = (qv(req, 'scope') ?? 'all').toLowerCase();
+  const q = new Q('c.is_deleted = 0').and(condOf(vis.sql), ...vis.params);
+  if (scope === 'pool') q.eq('c.pool_status', POOL_STATUS.PUBLIC);
+  else if (scope === 'mine') q.and('c.owner_id = ?', user.id).and('c.pool_status <> ?', POOL_STATUS.PUBLIC);
+  else if (scope === 'cooperating') q.eq('c.pool_status', POOL_STATUS.COOPERATING);
+  else if (scope === 'blacklist') q.eq('c.pool_status', POOL_STATUS.BLACKLIST);
+  else if (scope !== 'all') throw badRequest(`scope 不识别：${scope}（可用 pool/mine/cooperating/blacklist/all）`);
+
+  q.like(`c.handle LIKE ? OR c.nickname LIKE ?`, qv(req, 'keyword'))
+    .eq('c.region', qv(req, 'region'), false)
+    .eq('c.pool_status', qv(req, 'pool_status'))
+    .eq('c.owner_id', qv(req, 'owner_id'))
+    .eq('c.gmv_level', qv(req, 'gmv_level'), false)
+    .eq('c.source', qv(req, 'source'))
+    .and('c.followers >= ?', intOf(qv(req, 'followers_min')))
+    .and('c.followers <= ?', intOf(qv(req, 'followers_max')))
+    .between('c.protect_until', qv(req, 'protect_until_from'), qv(req, 'protect_until_to'))
+    .between('c.created_at', qv(req, 'created_from'), qv(req, 'created_to'));
+  for (const tag of String(qv(req, 'category_tags') ?? '').split(',')) q.like('c.category_tags LIKE ?', tag.trim());
+  if (qv(req, 'no_owner') === '1') q.and('c.owner_id IS NULL');
+  return q;
+}
+
+/**
+ * 达人档案导出列（PRD D13 九类之一）。
+ * 故意不含 email / whatsapp：PRD §8.2 与 D13 要求个人信息默认禁止导出 ——
+ * 有 can_see_contact 也只能在界面里看，不能整表拖走出公司。
+ */
+const CREATOR_EXPORT_COLUMNS = [
+  { key: 'handle', label: '达人账号' },
+  { key: 'nickname', label: '昵称' },
+  { key: 'region', label: '国家地区' },
+  { key: 'followers', label: '粉丝数' },
+  { key: 'avg_views', label: '平均播放' },
+  { key: 'gmv_level', label: '带货等级' },
+  { key: 'category_tags', label: '内容分类' },
+  { key: 'pool_status', label: '池状态' },
+  { key: 'owner_name', label: '负责人' },
+  { key: 'protect_until', label: '保护期至' },
+  { key: 'source', label: '来源' },
+  { key: 'created_at', label: '建档时间' },
+];
+
+creatorRouter.get(
+  '/export',
+  requireExport,
+  wrap((req, res) => {
+    const user = current(req);
+    exportFromList(req, res, {
+      module: '达人建联',
+      targetTable: 'creator',
+      filename: `creators-${String(qv(req, 'created_to') ?? '').slice(0, 10) || 'all'}`,
+      from: creatorListFrom,
+      select: creatorListSelect,
+      q: creatorListQ(req, user),
+      orderBy: 'c.id DESC',
+      columns: CREATOR_EXPORT_COLUMNS,
+      decorate: (r) => decorateCreator(user, r),
+      filters: { scope: qv(req, 'scope'), region: qv(req, 'region'), keyword: qv(req, 'keyword'), gmv_level: qv(req, 'gmv_level') },
+    });
+  }),
+);
+
 creatorRouter.get(
   '/',
   wrap((req, res) => {
     const user = current(req);
-    const vis = creatorScope(user);
-    const scope = (qv(req, 'scope') ?? 'all').toLowerCase();
-    const q = new Q('c.is_deleted = 0').and(condOf(vis.sql), ...vis.params);
-    if (scope === 'pool') q.eq('c.pool_status', POOL_STATUS.PUBLIC);
-    else if (scope === 'mine') q.and('c.owner_id = ?', user.id).and('c.pool_status <> ?', POOL_STATUS.PUBLIC);
-    else if (scope === 'cooperating') q.eq('c.pool_status', POOL_STATUS.COOPERATING);
-    else if (scope === 'blacklist') q.eq('c.pool_status', POOL_STATUS.BLACKLIST);
-    else if (scope !== 'all') throw badRequest(`scope 不识别：${scope}（可用 pool/mine/cooperating/blacklist/all）`);
-
-    q.like(`c.handle LIKE ? OR c.nickname LIKE ?`, qv(req, 'keyword'))
-      .eq('c.region', qv(req, 'region'), false)
-      .eq('c.pool_status', qv(req, 'pool_status'))
-      .eq('c.owner_id', qv(req, 'owner_id'))
-      .eq('c.gmv_level', qv(req, 'gmv_level'), false)
-      .eq('c.source', qv(req, 'source'))
-      .and('c.followers >= ?', intOf(qv(req, 'followers_min')))
-      .and('c.followers <= ?', intOf(qv(req, 'followers_max')))
-      .between('c.protect_until', qv(req, 'protect_until_from'), qv(req, 'protect_until_to'))
-      .between('c.created_at', qv(req, 'created_from'), qv(req, 'created_to'));
-    for (const tag of String(qv(req, 'category_tags') ?? '').split(',')) q.like('c.category_tags LIKE ?', tag.trim());
-    if (qv(req, 'no_owner') === '1') q.and('c.owner_id IS NULL');
-
+    const q = creatorListQ(req, user);
     const page = queryPage(req, {
       from: creatorListFrom,
       select: creatorListSelect,
@@ -907,21 +957,67 @@ function loadCollab(id: number, user: CurrentUser): Record<string, unknown> {
 }
 
 /** 合作单列表：JOIN 达人 handle / 店铺名 / SPU 名 / 负责 BD，附视频数与寄样数 */
+function collabQ(req: Request, user: CurrentUser): Q {
+  const scope = collabScope(user);
+  const q = new Q('l.is_deleted = 0').and(condOf(scope.sql), ...scope.params);
+  q.eq('l.creator_id', qv(req, 'creator_id'))
+    .eq('l.shop_id', qv(req, 'shop_id'))
+    .eq('l.spu_id', qv(req, 'spu_id'))
+    .eq('l.status', qv(req, 'status'))
+    .eq('l.coop_type', qv(req, 'coop_type'))
+    .eq('l.owner_id', qv(req, 'owner_id'))
+    .between('l.deadline', qv(req, 'deadline_from'), qv(req, 'deadline_to'))
+    .between('l.created_at', qv(req, 'created_from'), qv(req, 'created_to'))
+    .like(`l.collab_no LIKE ? OR c.handle LIKE ? OR c.nickname LIKE ? OR s.shop_name LIKE ?`, qv(req, 'keyword'));
+  return q;
+}
+
+/** 合作单导出（PRD D13 九类之一）：坑位费/佣金等成本列走 decorateCollab 的同一份掩码 */
+const COLLAB_EXPORT_COLUMNS = [
+  { key: 'collab_no', label: '合作单号' },
+  { key: 'creator_handle', label: '达人账号' },
+  { key: 'creator_nickname', label: '达人昵称' },
+  { key: 'shop_name', label: '店铺' },
+  { key: 'spu_code', label: 'SPU编码' },
+  { key: 'spu_name', label: 'SPU' },
+  { key: 'coop_type', label: '合作方式' },
+  { key: 'status', label: '状态' },
+  { key: 'commission_rate', label: '佣金率' },
+  { key: 'fixed_fee', label: '坑位费' },
+  { key: 'fee_cny', label: '已发生费用(CNY)' },
+  { key: 'promised_videos', label: '约定视频数' },
+  { key: 'video_count', label: '实际视频数' },
+  { key: 'videos_gap', label: '视频缺口' },
+  { key: 'deadline', label: '交付截止' },
+  { key: 'owner_name', label: '负责BD' },
+  { key: 'created_at', label: '建单时间' },
+];
+
+creatorRouter.get(
+  '/collab/export',
+  requireExport,
+  wrap((req, res) => {
+    const user = current(req);
+    exportFromList(req, res, {
+      module: '达人建联',
+      targetTable: 'collaboration',
+      filename: `collabs-${String(qv(req, 'created_to') ?? '').slice(0, 10) || 'all'}`,
+      from: collabFrom,
+      select: collabSelect,
+      q: collabQ(req, user),
+      orderBy: 'l.id DESC',
+      columns: COLLAB_EXPORT_COLUMNS,
+      decorate: (r) => decorateCollab(user, r),
+      filters: { status: qv(req, 'status'), coop_type: qv(req, 'coop_type'), shop_id: qv(req, 'shop_id'), creator_id: qv(req, 'creator_id'), keyword: qv(req, 'keyword') },
+    });
+  }),
+);
+
 creatorRouter.get(
   '/collab',
   wrap((req, res) => {
     const user = current(req);
-    const scope = collabScope(user);
-    const q = new Q('l.is_deleted = 0').and(condOf(scope.sql), ...scope.params);
-    q.eq('l.creator_id', qv(req, 'creator_id'))
-      .eq('l.shop_id', qv(req, 'shop_id'))
-      .eq('l.spu_id', qv(req, 'spu_id'))
-      .eq('l.status', qv(req, 'status'))
-      .eq('l.coop_type', qv(req, 'coop_type'))
-      .eq('l.owner_id', qv(req, 'owner_id'))
-      .between('l.deadline', qv(req, 'deadline_from'), qv(req, 'deadline_to'))
-      .between('l.created_at', qv(req, 'created_from'), qv(req, 'created_to'))
-      .like(`l.collab_no LIKE ? OR c.handle LIKE ? OR c.nickname LIKE ? OR s.shop_name LIKE ?`, qv(req, 'keyword'));
+    const q = collabQ(req, user);
     const page = queryPage(req, {
       from: collabFrom,
       select: collabSelect,
@@ -1216,23 +1312,68 @@ function advanceCollab(collabId: unknown, to: number, user: CurrentUser): void {
 }
 
 /** 寄样列表（超期判定：status=3 已签收且 sign_time + sampleContentDueDays 已过且无关联视频） */
+function sampleQ(req: Request, user: CurrentUser): Q {
+  const vis = creatorScope(user, 'c');
+  const q = new Q('sm.is_deleted = 0').and(condOf(vis.sql), ...vis.params);
+  q.eq('sm.status', qv(req, 'status'))
+    .eq('sm.creator_id', qv(req, 'creator_id'))
+    .eq('sm.collab_id', qv(req, 'collab_id'))
+    .eq('sm.ship_method', qv(req, 'ship_method'))
+    .eq('sm.sku_id', qv(req, 'sku_id'))
+    .between('sm.ship_time', qv(req, 'ship_time_from'), qv(req, 'ship_time_to'))
+    .between('sm.sign_time', qv(req, 'sign_time_from'), qv(req, 'sign_time_to'))
+    .like(`c.handle LIKE ? OR l.collab_no LIKE ? OR sm.tracking_no LIKE ? OR sk.sku_code LIKE ?`, qv(req, 'keyword'));
+  if (qv(req, 'overdue') === '1') {
+    q.and(`sm.status = ${SAMPLE_STATUS.SIGNED} AND sm.sign_time IS NOT NULL AND date(sm.sign_time, ?) < date('now')`, `+${config.sampleContentDueDays} day`);
+  }
+  return q;
+}
+
+/** 寄样导出（PRD D13 九类之一）：样品成本/运费同样过 decorateSample 的成本掩码 */
+const SAMPLE_EXPORT_COLUMNS = [
+  { key: 'creator_handle', label: '达人账号' },
+  { key: 'creator_nickname', label: '达人昵称' },
+  { key: 'collab_no', label: '合作单号' },
+  { key: 'sku_code', label: 'SKU编码' },
+  { key: 'spu_name', label: 'SPU' },
+  { key: 'quantity', label: '件数' },
+  { key: 'ship_method', label: '发货方式' },
+  { key: 'tracking_no', label: '运单号' },
+  { key: 'sample_cost', label: '样品成本(CNY)' },
+  { key: 'shipping_cost', label: '运费(CNY)' },
+  { key: 'status', label: '状态' },
+  { key: 'ship_time', label: '发货时间' },
+  { key: 'sign_time', label: '签收时间' },
+  { key: 'due_date', label: '出内容截止' },
+  { key: 'video_count', label: '已出视频数' },
+  { key: 'created_by_name', label: '登记人' },
+];
+
+creatorRouter.get(
+  '/sample/export',
+  requireExport,
+  wrap((req, res) => {
+    const user = current(req);
+    exportFromList(req, res, {
+      module: '达人建联',
+      targetTable: 'sample_shipment',
+      filename: `samples-${String(qv(req, 'ship_time_to') ?? '').slice(0, 10) || 'all'}`,
+      from: sampleFrom,
+      select: sampleSelect,
+      q: sampleQ(req, user),
+      orderBy: 'sm.id DESC',
+      columns: SAMPLE_EXPORT_COLUMNS,
+      decorate: (r) => decorateSample(user, r),
+      filters: { status: qv(req, 'status'), creator_id: qv(req, 'creator_id'), overdue: qv(req, 'overdue'), keyword: qv(req, 'keyword') },
+    });
+  }),
+);
+
 creatorRouter.get(
   '/sample',
   wrap((req, res) => {
     const user = current(req);
-    const vis = creatorScope(user, 'c');
-    const q = new Q('sm.is_deleted = 0').and(condOf(vis.sql), ...vis.params);
-    q.eq('sm.status', qv(req, 'status'))
-      .eq('sm.creator_id', qv(req, 'creator_id'))
-      .eq('sm.collab_id', qv(req, 'collab_id'))
-      .eq('sm.ship_method', qv(req, 'ship_method'))
-      .eq('sm.sku_id', qv(req, 'sku_id'))
-      .between('sm.ship_time', qv(req, 'ship_time_from'), qv(req, 'ship_time_to'))
-      .between('sm.sign_time', qv(req, 'sign_time_from'), qv(req, 'sign_time_to'))
-      .like(`c.handle LIKE ? OR l.collab_no LIKE ? OR sm.tracking_no LIKE ? OR sk.sku_code LIKE ?`, qv(req, 'keyword'));
-    if (qv(req, 'overdue') === '1') {
-      q.and(`sm.status = ${SAMPLE_STATUS.SIGNED} AND sm.sign_time IS NOT NULL AND date(sm.sign_time, ?) < date('now')`, `+${config.sampleContentDueDays} day`);
-    }
+    const q = sampleQ(req, user);
     const page = queryPage(req, {
       from: sampleFrom,
       select: sampleSelect,

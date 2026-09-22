@@ -241,13 +241,12 @@ if (String(before) === String(sample('SELECT COUNT(*) AS v FROM creator WHERE is
 }
 
 /* 导出：CSV 必须 200 + BOM；XLSX 必须 200 + PK 魔数（真的能打开的 Excel，不是 200 就算过） */
-const exportPaths = [
-  '/api/products/export/sku',
-  '/api/orders/export',
-  '/api/ads/export',
-  '/api/finance/profit/export',
-  '/api/finance/settlement/reconcile/export',
-];
+/** 导出面自动从路由清单里发现（新增导出接口不必再回来改这份硬编码清单） */
+const exportPaths = (collectRoutes() as { method: string; path: string }[])
+  .filter((r) => r.method === 'GET' && /\/export(?:[/?]|$)/.test(r.path))
+  .map((r) => r.path)
+  .sort();
+if (exportPaths.length < 10) fails.push({ route: '导出面覆盖', role: 'chain', status: 0, note: `只发现 ${exportPaths.length} 个导出接口，路由清单解析可能漏了` });
 for (const p of exportPaths) {
   for (const format of ['csv', 'xlsx'] as const) {
     const res = await fetch(`${BASE}${p}?format=${format}&${DEFAULT_QUERY}`, { headers: { authorization: `Bearer ${tokens.boss}` } });

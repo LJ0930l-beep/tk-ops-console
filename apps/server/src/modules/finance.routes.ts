@@ -27,7 +27,7 @@ import {
   type ProfitDim,
   type ReconcileRow,
 } from '../services/profit.js';
-import { exportFormat, sendTable } from '../core/export.js';
+import { exportFormat, sendTable, exportFromList } from '../core/export.js';
 import { createRateConverter, fetchPublicRates, getRate, InvalidRateRequestError, latestRates, listCurrencies, listRates, MAX_RATE_TO_CNY, PublicRateSourceError, RATE_SOURCE, rateDay, toCnySql, upsertRate, validIsoDay } from '../services/rates.js';
 
 const current = (req: Request): CurrentUser => (req as AuthedRequest).user;
@@ -604,6 +604,43 @@ const EXPENSE_FROM = `expense t
        LEFT JOIN creator c ON c.id = cb.creator_id
        LEFT JOIN product_spu sp ON sp.id = cb.spu_id`;
 const EXPENSE_SELECT = `t.*, s.shop_name, cb.collab_no, c.handle AS creator_handle, sp.name_cn AS spu_name`;
+
+/** 费用台账导出（PRD D13 九类之一）：与 /expense 同一份筛选条件 */
+const EXPENSE_EXPORT_COLUMNS = [
+  { key: 'expense_date', label: '费用日期' },
+  { key: 'expense_type', label: '费用类型' },
+  { key: 'title', label: '事项' },
+  { key: 'shop_name', label: '归属店铺' },
+  { key: 'collab_no', label: '关联合作单' },
+  { key: 'creator_handle', label: '达人' },
+  { key: 'spu_name', label: 'SPU' },
+  { key: 'amount', label: '金额(原币)' },
+  { key: 'currency', label: '币种' },
+  { key: 'amount_cny', label: '金额(CNY)' },
+  { key: 'status', label: '状态' },
+  { key: 'payee', label: '收款方' },
+  { key: 'remark', label: '备注' },
+  { key: 'created_at', label: '登记时间' },
+];
+
+financeRouter.get(
+  '/expense/export',
+  requireMenu('finance'),
+  requireExport,
+  wrap((req, res) => {
+    exportFromList(req, res, {
+      module: '财务中心',
+      targetTable: 'expense',
+      filename: `finance-expense-${String(qv(req, 'from') ?? '').slice(0, 10) || 'all'}`,
+      from: EXPENSE_FROM,
+      select: EXPENSE_SELECT,
+      q: expenseQuery(req),
+      orderBy: 't.expense_date DESC, t.id DESC',
+      columns: EXPENSE_EXPORT_COLUMNS,
+      filters: { from: qv(req, 'from'), to: qv(req, 'to'), shop_id: qv(req, 'shop_id'), expense_type: qv(req, 'expense_type'), status: qv(req, 'status'), keyword: qv(req, 'keyword') },
+    });
+  }),
+);
 
 financeRouter.get(
   '/expense',

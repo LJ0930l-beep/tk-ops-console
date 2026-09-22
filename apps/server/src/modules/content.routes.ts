@@ -1,10 +1,11 @@
-import { Router } from 'express';
+import { Router, type Request } from 'express';
 import { z } from 'zod';
 import { COLLAB_STATUS, CONTENT_TYPE, DATA_SCOPE, POOL_STATUS, SAMPLE_STATUS, num, parseVideoId, round2, type CurrentUser } from '@tk/shared';
 import { all, get, insert, run, scalar, softDelete, tx, update, type SqlParam } from '../core/db.js';
 import { AppError, badRequest, forbidden, notFound, ok, parseBody, qv, wrap } from '../core/http.js';
 import { Q, queryList, queryPage } from '../core/query.js';
-import { personScope, requireMenu, shopScope, type AuthedRequest } from '../core/auth.js';
+import { exportFromList } from '../core/export.js';
+import { personScope, requireExport, requireMenu, shopScope, type AuthedRequest } from '../core/auth.js';
 import { writeOpLog } from '../core/oplog.js';
 import { linkVideoToCollab, nowStr, tsOf } from '../services/creator/protect.js';
 import { ATTRIBUTABLE_ORDER, AMOUNT_CNY, RATE_JOIN, REFUND_CNY, REFUND_JOIN, exchangeRate } from '../services/creator/roi.js';
@@ -170,24 +171,141 @@ function assertCollabUsable(user: CurrentUser, collabId: number, editorId: numbe
 }
 
 /** 视频库列表：筛发布方 / 达人 / 账号 / 合作单 / SPU / 店铺 / 剪辑 / 时间，排序支持 views|gmv|orders */
+/**
+ * 列表与导出共用同一份筛选条件：导出绝不另写 WHERE，否则两边口径一定会漂
+ * （本轮已经为此修过三处：ROI 死路径、字典整页 500、同步下拉枚举对不上）。
+ * 返回的 Q 已含数据范围，别名固定为 v / l。
+ */
+function videoQ(req: Request, user: CurrentUser): Q {
+  const scope = videoScope(user);
+  const q = new Q('v.is_deleted = 0').and(scope.sql || '', ...scope.params);
+  q.eq('v.publisher_type', qv(req, 'publisher_type'))
+    .eq('v.creator_id', qv(req, 'creator_id'))
+    .eq('v.account_id', qv(req, 'account_id'))
+    .eq('v.collab_id', qv(req, 'collab_id'))
+    .eq('v.spu_id', qv(req, 'spu_id'))
+    .eq('v.shop_id', qv(req, 'shop_id'))
+    .eq('v.editor_id', qv(req, 'editor_id'))
+    .eq('v.status', qv(req, 'status'))
+    .between('v.publish_time', qv(req, 'publish_time_from'), qv(req, 'publish_time_to'))
+    .between('v.publish_time', qv(req, 'start_date'), qv(req, 'end_date'))
+    .like(`v.tk_video_id LIKE ? OR v.video_url LIKE ? OR c.handle LIKE ? OR a.handle LIKE ? OR p.name_cn LIKE ?`, qv(req, 'keyword'));
+  if (qv(req, 'with_orders') === '1') q.and('v.orders > 0');
+  return q;
+}
+
+function liveQ(req: Request, user: CurrentUser): Q {
+  const scope = liveScope(user);
+  const q = new Q('l.is_deleted = 0').and(scope.sql || '', ...scope.params);
+  q.eq('l.shop_id', qv(req, 'shop_id'))
+    .eq('l.account_id', qv(req, 'account_id'))
+    .eq('l.host_id', qv(req, 'host_id'))
+    .eq('l.assistant_id', qv(req, 'assistant_id'))
+    .eq('l.creator_id', qv(req, 'creator_id'))
+    .eq('l.status', qv(req, 'status'))
+    .between('l.plan_start', qv(req, 'plan_start_from') ?? qv(req, 'start_date'), qv(req, 'plan_start_to') ?? qv(req, 'end_date'))
+    .like(`a.handle LIKE ? OR s.shop_name LIKE ? OR h.real_name LIKE ? OR c.handle LIKE ?`, qv(req, 'keyword'));
+  return q;
+}
+
+/** 导出列：key 必须是 decorate* 输出里真实存在的键（用例逐类导出反解核对表头与行数） */
+const VIDEO_EXPORT_COLUMNS = [
+  { key: 'tk_video_id', label: '视频ID' },
+  { key: 'video_url', label: '视频链接' },
+  { key: 'creator_handle', label: '达人账号' },
+  { key: 'account_handle', label: '发布账号' },
+  { key: 'collab_no', label: '合作单号' },
+  { key: 'spu_name', label: 'SPU' },
+  { key: 'shop_name', label: '店铺' },
+  { key: 'editor_name', label: '剪辑' },
+  { key: 'publish_time', label: '发布时间' },
+  { key: 'views', label: '播放' },
+  { key: 'likes', label: '点赞' },
+  { key: 'orders', label: '订单数' },
+  { key: 'gmv', label: '带货额(原币)' },
+  { key: 'gpm', label: '千次播放成交额' },
+  { key: 'status', label: '状态' },
+];
+
+const LIVE_EXPORT_COLUMNS = [
+  { key: 'plan_start', label: '计划开播' },
+  { key: 'actual_start', label: '实际开播' },
+  { key: 'actual_end', label: '结束时间' },
+  { key: 'shop_name', label: '店铺' },
+  { key: 'region', label: '站点' },
+  { key: 'account_handle', label: '直播账号' },
+  { key: 'host_name', label: '主播' },
+  { key: 'assistant_name', label: '助播' },
+  { key: 'creator_handle', label: '出镜达人' },
+  { key: 'viewers', label: '观看人次' },
+  { key: 'peak_online', label: '峰值在线' },
+  { key: 'orders', label: '订单数' },
+  { key: 'gmv', label: '成交额(原币)' },
+  { key: 'gmv_cny', label: '成交额(CNY)' },
+  { key: 'ad_spend', label: '直播投放消耗' },
+  { key: 'status', label: '状态' },
+];
+
+/** 视频导出（PRD D13 九类之一）：与 /videos 同一份筛选、同一份装饰（含成本掩码） */
+contentRouter.get(
+  '/videos/export',
+  requireMenu('content'),
+  requireExport,
+  wrap((req, res) => {
+    const user = current(req);
+    exportFromList(req, res, {
+      module: '内容直播',
+      targetTable: 'video',
+      filename: `content-videos-${String(qv(req, 'start_date') ?? '').slice(0, 10) || 'all'}`,
+      from: videoFrom,
+      select: videoSelect,
+      q: videoQ(req, user),
+      orderBy: 'v.publish_time DESC, v.id DESC',
+      columns: VIDEO_EXPORT_COLUMNS,
+      decorate: (r) => decorateVideo(user, r),
+      filters: {
+        start_date: qv(req, 'start_date'),
+        end_date: qv(req, 'end_date'),
+        shop_id: qv(req, 'shop_id'),
+        creator_id: qv(req, 'creator_id'),
+        keyword: qv(req, 'keyword'),
+      },
+    });
+  }),
+);
+
+/** 直播场次导出（PRD D13 九类之一） */
+contentRouter.get(
+  '/lives/export',
+  requireMenu('content'),
+  requireExport,
+  wrap((req, res) => {
+    const user = current(req);
+    exportFromList(req, res, {
+      module: '内容直播',
+      targetTable: 'live_session',
+      filename: `content-lives-${String(qv(req, 'start_date') ?? '').slice(0, 10) || 'all'}`,
+      from: liveFrom,
+      select: liveSelect,
+      q: liveQ(req, user),
+      orderBy: 'l.plan_start DESC, l.id DESC',
+      columns: LIVE_EXPORT_COLUMNS,
+      decorate: (r) => decorateLive(user, r),
+      filters: {
+        start_date: qv(req, 'start_date'),
+        end_date: qv(req, 'end_date'),
+        shop_id: qv(req, 'shop_id'),
+        host_id: qv(req, 'host_id'),
+      },
+    });
+  }),
+);
+
 contentRouter.get(
   '/videos',
   wrap((req, res) => {
     const user = current(req);
-    const scope = videoScope(user);
-    const q = new Q('v.is_deleted = 0').and(scope.sql || '', ...scope.params);
-    q.eq('v.publisher_type', qv(req, 'publisher_type'))
-      .eq('v.creator_id', qv(req, 'creator_id'))
-      .eq('v.account_id', qv(req, 'account_id'))
-      .eq('v.collab_id', qv(req, 'collab_id'))
-      .eq('v.spu_id', qv(req, 'spu_id'))
-      .eq('v.shop_id', qv(req, 'shop_id'))
-      .eq('v.editor_id', qv(req, 'editor_id'))
-      .eq('v.status', qv(req, 'status'))
-      .between('v.publish_time', qv(req, 'publish_time_from'), qv(req, 'publish_time_to'))
-      .between('v.publish_time', qv(req, 'start_date'), qv(req, 'end_date'))
-      .like(`v.tk_video_id LIKE ? OR v.video_url LIKE ? OR c.handle LIKE ? OR a.handle LIKE ? OR p.name_cn LIKE ?`, qv(req, 'keyword'));
-    if (qv(req, 'with_orders') === '1') q.and('v.orders > 0');
+    const q = videoQ(req, user);
     const page = queryPage(req, {
       from: videoFrom,
       select: videoSelect,
@@ -499,16 +617,7 @@ contentRouter.get(
   '/lives',
   wrap((req, res) => {
     const user = current(req);
-    const scope = liveScope(user);
-    const q = new Q('l.is_deleted = 0').and(scope.sql || '', ...scope.params);
-    q.eq('l.shop_id', qv(req, 'shop_id'))
-      .eq('l.account_id', qv(req, 'account_id'))
-      .eq('l.host_id', qv(req, 'host_id'))
-      .eq('l.assistant_id', qv(req, 'assistant_id'))
-      .eq('l.creator_id', qv(req, 'creator_id'))
-      .eq('l.status', qv(req, 'status'))
-      .between('l.plan_start', qv(req, 'plan_start_from') ?? qv(req, 'start_date'), qv(req, 'plan_start_to') ?? qv(req, 'end_date'))
-      .like(`a.handle LIKE ? OR s.shop_name LIKE ? OR h.real_name LIKE ? OR c.handle LIKE ?`, qv(req, 'keyword'));
+    const q = liveQ(req, user);
     const page = queryPage(req, {
       from: liveFrom,
       select: liveSelect,

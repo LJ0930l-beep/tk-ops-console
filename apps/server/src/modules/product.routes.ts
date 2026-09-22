@@ -15,6 +15,8 @@ import { badRequest, forbidden, notFound, ok, parseBody, qv, wrap } from '../cor
 import { Q, queryList, queryPage } from '../core/query.js';
 import { maskFields, requireExport, requireMenu, shopScope, type AuthedRequest } from '../core/auth.js';
 import { logIfChanged, writeOpLog } from '../core/oplog.js';
+import { exportFromList } from '../core/export.js';
+import { rateToCnyExpr } from '../services/rates.js';
 import { sendTable, type ExportCell } from '../core/export.js';
 
 const MODULE = '商品中心';
@@ -33,12 +35,12 @@ function rowOf(body: object): Record<string, SqlParam> {
 /** shopScope 给的是 'AND xxx IN (?)'，Q 内部自己拼 AND，所以并条件时要剥掉前缀（scope 为空则不产生条件） */
 const withScope = (q: Q, scope: { sql: string; params: number[] }): Q => q.and(scope.sql.replace(/^\s*AND\s+/i, ''), ...scope.params);
 
-/** 按订单日期取汇率，取不到用该币种最近一天，再取不到用 1（与订单中心 /unmapped 同一口径） */
-const RATE_TO_CNY = `(SELECT e.rate_to_cny
-             FROM exchange_rate e
-            WHERE e.currency = o.currency AND e.is_deleted = 0
-            ORDER BY (e.rate_date <= COALESCE(substr(o.order_time, 1, 10), '9999-12-31')) DESC, e.rate_date DESC
-            LIMIT 1)`;
+/**
+ * 按订单日期取汇率：当日 → 更早最近一条 → 更晚最近一条 → 兜底常量（rates.ts 单一来源）。
+ * 与订单中心/宽表/利润引擎同一口径；原来这里以 `COALESCE(rate, 1)` 收尾，
+ * 缺汇率时等于把 1 USD 当 1 CNY，待映射清单的影响金额会小一个数量级。
+ */
+const RATE_TO_CNY = rateToCnyExpr('o.currency', 'substr(o.order_time, 1, 10)');
 
 /** 该店铺是否落在当前用户的数据范围内（写接口与显式 shop_id 筛选用） */
 function assertShopInScope(user: CurrentUser, shopId: number | null | undefined): void {
@@ -119,22 +121,49 @@ function spuListQ(req: Parameters<typeof current>[0]): { q: Q } {
   return { q };
 }
 
+/** SPU 列表与导出共用同一份 FROM/SELECT（导出绝不另写 SQL，否则两边口径一定会漂） */
+const SPU_FROM = `product_spu p LEFT JOIN sys_user u ON u.id = p.owner_id`;
+const SPU_SELECT = `p.*, u.real_name AS owner_name,
+                 (SELECT COUNT(*) FROM product_sku k WHERE k.spu_id = p.id AND k.is_deleted = 0) AS sku_count,
+                 (SELECT COUNT(*) FROM shop_listing l JOIN product_sku k2 ON k2.id = l.sku_id
+                   WHERE k2.spu_id = p.id AND l.is_deleted = 0 AND k2.is_deleted = 0) AS listing_count`;
+const SPU_EXPORT_COLUMNS = [
+  { key: 'spu_code', label: 'SPU编码' },
+  { key: 'name_cn', label: '品名(中)' },
+  { key: 'name_en', label: '品名(英)' },
+  { key: 'category', label: '类目' },
+  { key: 'status', label: '状态' },
+  { key: 'owner_name', label: '负责人' },
+  { key: 'sku_count', label: 'SKU数' },
+  { key: 'listing_count', label: '在架店铺数' },
+  { key: 'created_at', label: '创建时间' },
+];
+
 productRouter.get(
   '/spu',
   wrap((req, res) => {
     const { q } = spuListQ(req);
-    ok(
-      res,
-      queryPage(req, {
-        from: `product_spu p LEFT JOIN sys_user u ON u.id = p.owner_id`,
-        select: `p.*, u.real_name AS owner_name,
-                 (SELECT COUNT(*) FROM product_sku k WHERE k.spu_id = p.id AND k.is_deleted = 0) AS sku_count,
-                 (SELECT COUNT(*) FROM shop_listing l JOIN product_sku k2 ON k2.id = l.sku_id
-                   WHERE k2.spu_id = p.id AND l.is_deleted = 0 AND k2.is_deleted = 0) AS listing_count`,
-        q,
-        orderBy: 'p.id DESC',
-      }),
-    );
+    ok(res, queryPage(req, { from: SPU_FROM, select: SPU_SELECT, q, orderBy: 'p.id DESC' }));
+  }),
+);
+
+/** SPU 导出（PRD D13 九类之一） */
+productRouter.get(
+  '/spu/export',
+  requireExport,
+  wrap((req, res) => {
+    const { q } = spuListQ(req);
+    exportFromList(req, res, {
+      module: MODULE,
+      targetTable: 'product_spu',
+      filename: `product-spu-${String(qv(req, 'created_to') ?? '').slice(0, 10) || 'all'}`,
+      from: SPU_FROM,
+      select: SPU_SELECT,
+      q,
+      orderBy: 'p.id DESC',
+      columns: SPU_EXPORT_COLUMNS,
+      filters: { keyword: qv(req, 'keyword'), category: qv(req, 'category'), status: qv(req, 'status'), owner_id: qv(req, 'owner_id'), shop_id: qv(req, 'shop_id') },
+    });
   }),
 );
 
@@ -624,6 +653,48 @@ const UNMAPPED_AMOUNT_SUB = `(SELECT COALESCE(SUM(oi.item_amount), 0) FROM tk_or
 const UNMAPPED_COUNT = `${UNMAPPED_ITEMS_SUB} AS unmatched_item_count`;
 const UNMAPPED_AMOUNT = `${UNMAPPED_AMOUNT_SUB} AS unmatched_amount`;
 
+/** 待映射清单：列表与导出共用（FROM/SELECT/Q 三份都只有一份，两边口径才不会漂） */
+const UNMAPPED_FROM = `shop_listing l JOIN tk_shop s ON s.id = l.shop_id`;
+const UNMAPPED_SELECT = `l.*, s.shop_name, s.currency, s.region, ${UNMAPPED_COUNT}, ${UNMAPPED_AMOUNT}`;
+
+function unmappedQ(req: Parameters<typeof current>[0], scope: { sql: string; params: number[] }): Q {
+  return withScope(new Q(`l.is_deleted = 0 AND l.map_status = ${MAP_STATUS.UNMAPPED}`), scope)
+    .like('(l.product_name LIKE ? OR l.seller_sku LIKE ? OR l.tk_sku_id LIKE ?)', qv(req, 'keyword'))
+    .eq('l.shop_id', qv(req, 'shop_id'));
+}
+
+const UNMAPPED_EXPORT_COLUMNS = [
+  { key: 'tk_sku_id', label: '平台SKU' },
+  { key: 'seller_sku', label: '店内编码' },
+  { key: 'product_name', label: '平台商品名' },
+  { key: 'shop_name', label: '店铺' },
+  { key: 'region', label: '站点' },
+  { key: 'currency', label: '币种' },
+  { key: 'unmatched_item_count', label: '未匹配订单行数' },
+  { key: 'unmatched_amount', label: '未匹配金额(原币)' },
+  { key: 'map_status', label: '映射状态' },
+  { key: 'updated_at', label: '更新时间' },
+];
+
+productRouter.get(
+  '/unmapped/export',
+  requireExport,
+  wrap((req, res) => {
+    const user = current(req);
+    exportFromList(req, res, {
+      module: MODULE,
+      targetTable: 'shop_listing',
+      filename: 'product-unmapped',
+      from: UNMAPPED_FROM,
+      select: UNMAPPED_SELECT,
+      q: unmappedQ(req, shopScope(user, 'l.shop_id')),
+      orderBy: 'unmatched_item_count DESC, l.id DESC',
+      columns: UNMAPPED_EXPORT_COLUMNS,
+      filters: { keyword: qv(req, 'keyword'), shop_id: qv(req, 'shop_id') },
+    });
+  }),
+);
+
 /**
  * 待映射清单 = map_status=2 的 listing + 其未匹配订单行数与影响金额；
  * rows 里额外给出所有「没有成本快照」的订单行，供运营定位到底是哪几笔单算不出利润。
@@ -635,19 +706,17 @@ productRouter.get(
     const scope = shopScope(user, 'l.shop_id');
     const orderScope = { sql: scope.sql.replace(/l\.shop_id/g, 'o.shop_id'), params: scope.params };
     const page = queryPage(req, {
-      from: `shop_listing l JOIN tk_shop s ON s.id = l.shop_id`,
-      select: `l.*, s.shop_name, s.currency, s.region, ${UNMAPPED_COUNT}, ${UNMAPPED_AMOUNT}`,
-      q: withScope(new Q(`l.is_deleted = 0 AND l.map_status = ${MAP_STATUS.UNMAPPED}`), scope)
-        .like('(l.product_name LIKE ? OR l.seller_sku LIKE ? OR l.tk_sku_id LIKE ?)', qv(req, 'keyword'))
-        .eq('l.shop_id', qv(req, 'shop_id')),
+      from: UNMAPPED_FROM,
+      select: UNMAPPED_SELECT,
+      q: unmappedQ(req, scope),
       orderBy: 'unmatched_item_count DESC, l.id DESC',
     });
     const rows = all<Record<string, unknown>>(
       `SELECT oi.id AS item_id, o.id AS order_id, o.tk_order_id, o.order_time, o.order_status, o.currency,
               o.shop_id, s.shop_name, l.id AS listing_id, l.tk_sku_id, l.seller_sku, l.product_name,
               oi.quantity, oi.unit_price, oi.item_amount,
-              ROUND(oi.item_amount * COALESCE(${RATE_TO_CNY}, 1), 2) AS item_amount_cny,
-              COALESCE(${RATE_TO_CNY}, 1) AS rate_to_cny
+              ROUND(oi.item_amount * ${RATE_TO_CNY}, 2) AS item_amount_cny,
+              ${RATE_TO_CNY} AS rate_to_cny
          FROM tk_order_item oi
          JOIN tk_order o ON o.id = oi.order_id AND o.is_deleted = 0
          JOIN tk_shop s ON s.id = o.shop_id

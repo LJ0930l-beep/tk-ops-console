@@ -41,6 +41,9 @@
         <el-button v-if="hasFee(row)" link type="success" size="small" :loading="feeBusy === Number(row.id)" @click="genExpense(row, reload)">生成费用</el-button>
         <el-button link type="primary" size="small" :loading="roiBusy === Number(row.id)" @click="showRoi(row)">投产比</el-button>
       </template>
+      <template #toolbar="{ query }">
+        <ExportButton url="/creators/collab/export" name="creators-collab" :params="query" />
+      </template>
     </ResourcePage>
   </div>
 </template>
@@ -53,6 +56,7 @@ import { ArrowDown, Star } from '@element-plus/icons-vue';
 import { COLLAB_STATUS, MASK } from '@tk/shared';
 import { apiGet, apiPost, errMsg } from '@/api/client';
 import ResourcePage from '@/components/ResourcePage.vue';
+import ExportButton from '@/components/ExportButton.vue';
 import type { ColumnDef, FormFieldDef, OptionDef, SearchDef } from '@/components/ResourcePage.vue';
 import { useDictStore } from '@/stores/dict';
 

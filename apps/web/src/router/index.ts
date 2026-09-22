@@ -40,6 +40,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'ads/daily', name: 'ad-daily', component: () => import('@/views/ads/AdDaily.vue'), meta: { title: '广告日报', menu: 'ads' } },
 
       { path: 'finance/settlement', name: 'settlement', component: () => import('@/views/finance/SettlementList.vue'), meta: { title: '结算对账', menu: 'finance' } },
+      { path: 'finance/reconcile', name: 'reconcile', component: () => import('@/views/finance/SettlementReconcile.vue'), meta: { title: '逐单对账', menu: 'finance' } },
       { path: 'finance/expense', name: 'expense', component: () => import('@/views/finance/ExpenseList.vue'), meta: { title: '费用登记', menu: 'finance' } },
       { path: 'finance/rate', name: 'rate', component: () => import('@/views/finance/RateList.vue'), meta: { title: '汇率维护', menu: 'finance' } },
       { path: 'finance/profit', name: 'profit', component: () => import('@/views/finance/ProfitReport.vue'), meta: { title: '利润报表', menu: 'finance' } },

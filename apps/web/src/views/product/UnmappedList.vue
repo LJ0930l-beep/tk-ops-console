@@ -26,7 +26,10 @@
             <template #actions="{ row }">
               <el-button link type="primary" size="small" @click="openBind(row)">去绑定</el-button>
             </template>
-          </ResourcePage>
+            <template #toolbar="{ query }">
+        <ExportButton url="/products/unmapped/export" name="product-unmapped" :params="query" />
+      </template>
+    </ResourcePage>
         </el-tab-pane>
 
         <el-tab-pane label="B. 已出单但取不到成本的订单行" name="order-item">
@@ -127,6 +130,7 @@ import { useRouter } from 'vue-router';
 import { apiGet, apiPut, errMsg, type Paged } from '@/api/client';
 import { useDictStore } from '@/stores/dict';
 import ResourcePage, { type ColumnDef, type OptionDef, type SearchDef } from '@/components/ResourcePage.vue';
+import ExportButton from '@/components/ExportButton.vue';
 
 const router = useRouter();
 const dict = useDictStore();

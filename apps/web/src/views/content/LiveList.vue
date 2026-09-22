@@ -32,6 +32,7 @@
         <el-form-item>
           <el-button type="primary" :icon="Search" @click="reload(1)">查询</el-button>
           <el-button :icon="RefreshLeft" @click="resetQuery">重置</el-button>
+          <ExportButton url="/content/lives/export" name="content-lives" :params="query" />
           <ImportDialog table="live_session" button-text="导入直播数据" @done="() => reload()" />
         </el-form-item>
       </el-form>

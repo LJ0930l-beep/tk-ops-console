@@ -10,7 +10,8 @@
     dialog-width="720px"
     :action-width="140"
   >
-    <template #toolbar="{ reload }">
+    <template #toolbar="{ reload, query }">
+      <ExportButton url="/content/videos/export" name="content-videos" :params="query" />
       <ImportDialog table="video" button-text="导入视频数据" @done="() => reload()" />
     </template>
 
@@ -42,6 +43,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
 import ResourcePage, { type ColumnDef, type FormFieldDef, type OptionDef, type SearchDef } from '@/components/ResourcePage.vue';
+import ExportButton from '@/components/ExportButton.vue';
 import ImportDialog from '@/components/ImportDialog.vue';
 import { parseVideoId, round2 } from '@tk/shared';
 import { apiGet } from '@/api/client';

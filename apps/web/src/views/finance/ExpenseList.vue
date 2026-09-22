@@ -37,6 +37,9 @@
       </el-button>
       <el-button v-if="row.voucher" link type="primary" size="small" @click="openVoucher(row)">凭证</el-button>
     </template>
+    <template #toolbar="{ query }">
+      <ExportButton url="/finance/expense/export" name="finance-expense" :params="query" />
+    </template>
   </ResourcePage>
 </template>
 
@@ -44,6 +47,7 @@
 import { computed, onMounted, ref } from 'vue';
 import { ElMessage } from 'element-plus';
 import ResourcePage, { type ColumnDef, type FormFieldDef, type OptionDef, type SearchDef } from '@/components/ResourcePage.vue';
+import ExportButton from '@/components/ExportButton.vue';
 import { apiPut, errMsg } from '@/api/client';
 import { useDictStore } from '@/stores/dict';
 

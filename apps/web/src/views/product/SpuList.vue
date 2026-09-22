@@ -27,6 +27,9 @@
           </div>
         </el-form-item>
       </template>
+      <template #toolbar="{ query }">
+        <ExportButton url="/products/spu/export" name="product-spu" :params="query" />
+      </template>
     </ResourcePage>
   </div>
 </template>
@@ -37,6 +40,7 @@ import { useAuthStore } from '@/stores/auth';
 import { useDictStore } from '@/stores/dict';
 import { apiGet, type Paged } from '@/api/client';
 import ResourcePage, { type ColumnDef, type FormFieldDef, type OptionDef, type SearchDef } from '@/components/ResourcePage.vue';
+import ExportButton from '@/components/ExportButton.vue';
 
 const auth = useAuthStore();
 const dict = useDictStore();

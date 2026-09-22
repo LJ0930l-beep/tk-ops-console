@@ -7,7 +7,7 @@
  * 断言「无 404（路由没挂）、无 500（SQL/口径炸了）」，403 属于正常的越权拦截。
  */
 import { describe, it, expect, beforeAll } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 // @ts-expect-error 纯 JS 脚本，无类型声明
 import { collectRoutes } from '../../../scripts/route-inventory.mjs';
@@ -118,5 +118,37 @@ describe('看板与利润的切日口径', () => {
     expect(data.list.length).toBeGreaterThan(0);
     expect(data.sum_check).toBe(0);
     expect(data.rate_missing).toBe(false);
+  });
+});
+
+/** 递归收集 .vue（不引依赖，测试里够用就好） */
+function walkVue(dir: string, acc: string[] = []): string[] {
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const full = `${dir}/${e.name}`;
+    if (e.isDirectory()) walkVue(full, acc);
+    else if (e.name.endsWith('.vue')) acc.push(full);
+  }
+  return acc;
+}
+
+describe('导出接口必须在界面上点得到', () => {
+  const exportPaths = routes
+    .filter((r: { path: string }) => /\/export(?:[/?]|$)/.test(r.path))
+    .map((r: { path: string }) => r.path.replace(/^\/api/, ''))
+    .sort();
+
+  it('路由清单里的导出接口够多（解析没坏）', () => {
+    expect(exportPaths.length).toBeGreaterThanOrEqual(13);
+  });
+
+  it('每个导出接口都有对应的 ExportButton（本轮发现过「接口写了、页面一个按钮都没有」）', () => {
+    const wired = new Set<string>();
+    for (const f of [...walkVue(`${ROOT}/apps/web/src/views`), ...walkVue(`${ROOT}/apps/web/src/components`)]) {
+      const text = readFileSync(f, 'utf8');
+      for (const m of text.matchAll(/url="(\/[^"]*\/export[^"]*)"/g)) wired.add(m[1]);
+      for (const m of text.matchAll(/'(\/[^']*\/export)'/g)) wired.add(m[1]);
+    }
+    const missing = exportPaths.filter((p: string) => !wired.has(p));
+    expect(missing, `界面没有出口按钮的导出接口：${missing.join(', ')}`).toEqual([]);
   });
 });

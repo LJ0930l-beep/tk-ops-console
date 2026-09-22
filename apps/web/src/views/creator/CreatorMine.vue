@@ -34,6 +34,9 @@
           <template #reference><el-button link type="warning" size="small">退回公海</el-button></template>
         </el-popconfirm>
       </template>
+      <template #toolbar="{ query }">
+        <ExportButton url="/creators/export" name="creators-mine" :params="{ ...(query ?? {}), 'scope': 'mine' }" />
+      </template>
     </ResourcePage>
   </div>
 </template>
@@ -46,6 +49,7 @@ import { Star } from '@element-plus/icons-vue';
 import { POOL_STATUS, normalizeHandle } from '@tk/shared';
 import { apiPost, errMsg } from '@/api/client';
 import ResourcePage from '@/components/ResourcePage.vue';
+import ExportButton from '@/components/ExportButton.vue';
 import type { ColumnDef, FormFieldDef, OptionDef, SearchDef } from '@/components/ResourcePage.vue';
 import { useAuthStore } from '@/stores/auth';
 import { useDictStore } from '@/stores/dict';

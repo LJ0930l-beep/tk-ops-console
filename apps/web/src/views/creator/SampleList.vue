@@ -36,6 +36,9 @@
           <template #reference><el-button link type="danger" size="small">丢件</el-button></template>
         </el-popconfirm>
       </template>
+      <template #toolbar="{ query }">
+        <ExportButton url="/creators/sample/export" name="creators-sample" :params="query" />
+      </template>
     </ResourcePage>
 
     <!-- 发货 / 签收 -->
@@ -75,6 +78,7 @@ import { Star } from '@element-plus/icons-vue';
 import { SAMPLE_STATUS } from '@tk/shared';
 import { apiGet, apiPost, apiPut, errMsg } from '@/api/client';
 import ResourcePage from '@/components/ResourcePage.vue';
+import ExportButton from '@/components/ExportButton.vue';
 import type { ColumnDef, FormFieldDef, OptionDef, SearchDef } from '@/components/ResourcePage.vue';
 
 type Row = Record<string, unknown>;

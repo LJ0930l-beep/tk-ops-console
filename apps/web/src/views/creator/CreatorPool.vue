@@ -32,6 +32,9 @@
           <template #reference><el-button link type="danger" size="small">黑名单</el-button></template>
         </el-popconfirm>
       </template>
+      <template #toolbar="{ query }">
+        <ExportButton url="/creators/export" name="creators-pool" :params="{ ...(query ?? {}), 'scope': 'pool' }" />
+      </template>
     </ResourcePage>
   </div>
 </template>
@@ -42,6 +45,7 @@ import { ElMessage } from 'element-plus';
 import { POOL_STATUS, normalizeHandle } from '@tk/shared';
 import { apiPost, errMsg } from '@/api/client';
 import ResourcePage from '@/components/ResourcePage.vue';
+import ExportButton from '@/components/ExportButton.vue';
 import ImportDialog from '@/components/ImportDialog.vue';
 import type { ColumnDef, FormFieldDef, OptionDef, SearchDef } from '@/components/ResourcePage.vue';
 import { useDictStore } from '@/stores/dict';

@@ -46,9 +46,18 @@ export default defineConfig({
       command: 'npm run dev:server',
       url: `${API}/api/health`,
       // 调度器关掉：cron 会在测试中途改宽表/规则状态，断言就没有确定性了。
-      // 登录限流放宽容：一条 e2e 序列会把同一个账号登录十几次，10 次/15 分钟的防爆破阈值会先把测试锁在门外
-      // （限流本身另有 apps/server/tests/rate-limit.spec.ts 在 HTTP 层守，不靠 e2e 证明）。
-      env: { DB_FILE: E2E_DB, PORT: '8787', TIKTOK_API_MODE: 'mock', SEED_DEMO: 'true', ENABLE_SCHEDULER: 'false', RATE_LIMIT_LOGIN_MAX: '500' },
+      // 限流阈值放宽：一条 e2e 序列要登录十几次、遍历 36 个页面（每个页面还发若干请求），
+      // 默认的登录 10 次/15 分钟与全局 600 次/15 分钟都会把测试锁在门外。
+      // 限流本身由 apps/server/tests/rate-limit.spec.ts 在 HTTP 层守，不靠 e2e 证明。
+      env: {
+        DB_FILE: E2E_DB,
+        PORT: '8787',
+        TIKTOK_API_MODE: 'mock',
+        SEED_DEMO: 'true',
+        ENABLE_SCHEDULER: 'false',
+        RATE_LIMIT_LOGIN_MAX: '500',
+        RATE_LIMIT_MAX: '100000',
+      },
       reuseExistingServer: !process.env.CI,
       timeout: 120_000,
       stdout: 'ignore',

@@ -66,6 +66,7 @@ declare module 'vue' {
     ElUpload: typeof import('element-plus/es')['ElUpload']
     ExportButton: typeof import('./components/ExportButton.vue')['default']
     ImportDialog: typeof import('./components/ImportDialog.vue')['default']
+    RecordHistoryDrawer: typeof import('./components/RecordHistoryDrawer.vue')['default']
     ResourcePage: typeof import('./components/ResourcePage.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']

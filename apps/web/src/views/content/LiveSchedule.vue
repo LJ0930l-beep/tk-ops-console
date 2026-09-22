@@ -168,11 +168,13 @@ import { ArrowLeft, ArrowRight, Plus, RefreshLeft, Search } from '@element-plus/
 import type { LiveSession, PageResult } from '@tk/shared';
 import { apiGet, apiPost, apiPut, errMsg } from '@/api/client';
 import { useDictStore } from '@/stores/dict';
+import { useAuthStore } from '@/stores/auth';
 import type { RowLike } from '@/types/row';
 
 type Row = LiveSession & Record<string, unknown>;
 
 const dict = useDictStore();
+const auth = useAuthStore();
 const route = useRoute();
 const router = useRouter();
 
@@ -223,8 +225,14 @@ function statusType(v: unknown): 'primary' | 'success' | 'info' | 'danger' | 'wa
 }
 
 /* ---- 时间工具：后端存 UTC 文本，前端按浏览器时区展示 ---- */
-const pad = (n: number) => String(n).padStart(2, '0');
-const dayText = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+// 必须是函数声明：pickedDay 在 setup 顶部就调用 todayText()，
+// 用 const 箭头函数写在这里会因为暂时性死区直接整页白屏（e2e 的全页面遍历抓到的）。
+function pad(n: number): string {
+  return String(n).padStart(2, '0');
+}
+function dayText(d: Date): string {
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
 function parseUtc(v: unknown): Date | null {
   const s = String(v ?? '').trim();
   if (!s) return null;
@@ -409,12 +417,12 @@ onMounted(async () => {
     .shopOptions()
     .then((s) => (shops.value = s.map((x) => ({ id: x.id, shop_name: x.shop_name }))))
     .catch(() => undefined);
-  const [acc, usr, cre] = await Promise.allSettled([
-    apiGet<PageResult<Record<string, unknown>>>('/accounts', { page: 1, pageSize: 200 }),
-    apiGet<PageResult<Record<string, unknown>>>('/system/users', { page: 1, pageSize: 200 }),
-    apiGet<PageResult<Record<string, unknown>>>('/creators', { page: 1, pageSize: 200 }),
+  const [acc, usr, cre] = await Promise.all([
+    auth.fetchScoped<PageResult<Record<string, unknown>>>('shop', '/accounts', { page: 1, pageSize: 200 }),
+    auth.fetchScoped<PageResult<Record<string, unknown>>>('system', '/system/users', { page: 1, pageSize: 200 }),
+    auth.fetchScoped<PageResult<Record<string, unknown>>>('creator', '/creators', { page: 1, pageSize: 200 }),
   ]);
-  const list = (r: PromiseSettledResult<{ list: Record<string, unknown>[] }>) => (r.status === 'fulfilled' ? (r.value.list ?? []) : []);
+  const list = (r: PageResult<Record<string, unknown>> | null) => r?.list ?? [];
   accounts.value = list(acc) as { id: number; handle: string }[];
   users.value = list(usr) as { id: number; real_name: string; dept?: string | null }[];
   creators.value = list(cre) as { id: number; handle: string }[];

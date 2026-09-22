@@ -29,7 +29,7 @@
 import { reactive, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
-import { User, Lock } from '@element-plus/icons-vue';
+import { Lock, Promotion, User } from '@element-plus/icons-vue';
 import { useAuthStore } from '@/stores/auth';
 import { errMsg } from '@/api/client';
 

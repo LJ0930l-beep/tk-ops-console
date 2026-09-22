@@ -10827,6 +10827,62 @@
         ]
       }
     },
+    "/api/system/oplog/history": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "operationId": "get_system_oplog_history",
+        "description": "单条记录的字段级变更历史（选项 9 的可落地小步）：扁平的 /oplog 列表答不出\n「这条记录为什么变成现在这样」，这里按 target_table + target_id 聚合，并把\nbefore/after 原文 diff 成「哪个字段从什么改成什么」。\n权限沿用本段开头的整段守卫（与列表同一条）：日志里有别人的操作与改前改后原文，\n只有能读全量审计日志的角色才能按记录查 —— 不能因为「查的是同一条记录」就放宽到该记录的可见范围。\n空变更的条目照样返回（动作本身要留痕）；凭证列只报「改过」，值一律不出接口。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "table",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "x-router": "system.routes.ts#opLogRouter",
+        "x-menu": [
+          "system"
+        ]
+      }
+    },
     "/api/system/roles": {
       "get": {
         "tags": [

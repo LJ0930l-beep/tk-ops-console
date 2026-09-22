@@ -21,7 +21,8 @@ export default defineConfig({
   ],
   resolve: { alias: { '@': path.resolve(__dirname, 'src'), '@tk/shared': path.resolve(__dirname, '../../packages/shared/src/index.ts') } },
   server: {
-    port: 5173,
+    // 默认端口被别的进程占着时，e2e 可以用 WEB_PORT 换一条端口跑，不必抢人工 dev 的口子
+    port: Number(process.env.WEB_PORT ?? 5173),
     proxy: { '/api': { target: 'http://127.0.0.1:8787', changeOrigin: true } },
   },
   build: {

@@ -23,7 +23,8 @@ describe('前端路由表', () => {
     }
   });
 
-  it('每个懒加载组件都能真的解析（文件名拼错 / 页面被删会在这里红）', async () => {
+  // 一次性点开 30 多个页面（每张页面都会拉自己的组件图），5 秒默认超时在并发跑测试的机器上会假红
+  it('每个懒加载组件都能真的解析（文件名拼错 / 页面被删会在这里红）', { timeout: 60_000 }, async () => {
     const broken: string[] = [];
     for (const r of routes) {
       const loader = (r.components?.default ?? r.components) as unknown;

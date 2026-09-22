@@ -213,6 +213,7 @@ import { num, round2 } from '@tk/shared';
 import { apiGet, apiPut, errMsg } from '@/api/client';
 import ImportDialog from '@/components/ImportDialog.vue';
 import { useDictStore } from '@/stores/dict';
+import { useAuthStore } from '@/stores/auth';
 import type { RowLike } from '@/types/row';
 
 type Row = LiveSession & Record<string, unknown>;
@@ -231,6 +232,7 @@ interface ReviewForm {
 }
 
 const dict = useDictStore();
+const auth = useAuthStore();
 const route = useRoute();
 const router = useRouter();
 
@@ -498,12 +500,8 @@ onMounted(async () => {
     .shopOptions()
     .then((s) => (shops.value = s.map((x) => ({ id: x.id, shop_name: x.shop_name }))))
     .catch(() => undefined);
-  try {
-    const usr = await apiGet<PageResult<Record<string, unknown>>>('/system/users', { page: 1, pageSize: 200 });
-    users.value = (usr.list ?? []) as { id: number; real_name: string }[];
-  } catch {
-    /* 无 system 菜单权限时静默：主播筛选不可用 */
-  }
+  const usr = await auth.fetchScoped<PageResult<Record<string, unknown>>>('system', '/system/users', { page: 1, pageSize: 200 });
+  users.value = (usr?.list ?? []) as { id: number; real_name: string }[];
   if (route.query.status) query.status = Number(route.query.status);
   await reload(1);
   const id = route.query.id ? Number(route.query.id) : 0;

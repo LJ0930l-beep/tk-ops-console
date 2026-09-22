@@ -182,6 +182,7 @@ export const API_PATHS = [
   '/system/jobs/drain',
   '/system/menus',
   '/system/oplog',
+  '/system/oplog/history',
   '/system/roles',
   '/system/roles/:id',
   '/system/synclog',
@@ -369,6 +370,7 @@ export type ApiPath =
   | '/system/jobs/drain'
   | '/system/menus'
   | '/system/oplog'
+  | '/system/oplog/history'
   | '/system/roles'
   | `/system/roles/${string}`
   | '/system/synclog'

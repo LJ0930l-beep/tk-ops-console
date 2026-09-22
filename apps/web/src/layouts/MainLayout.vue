@@ -32,7 +32,7 @@
       <el-header style="display: flex; align-items: center; justify-content: space-between; background: #fff; border-bottom: 1px solid #e4e7ed; height: 56px">
         <div style="display: flex; align-items: center; gap: 12px">
           <el-icon style="cursor: pointer" size="18" @click="collapsed = !collapsed">
-            <component :is="collapsed ? 'Expand' : 'Fold'" />
+            <component :is="collapsed ? Expand : Fold" />
           </el-icon>
           <span style="font-size: 15px; font-weight: 600">{{ routeTitle }}</span>
         </div>
@@ -104,6 +104,7 @@
 </template>
 
 <script setup lang="ts">
+import { ArrowDown, Bell, Expand, Fold, Promotion } from '@element-plus/icons-vue';
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';

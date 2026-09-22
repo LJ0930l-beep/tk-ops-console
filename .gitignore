@@ -11,3 +11,6 @@ apps/data/*.db-wal
 apps/data/*.db-shm
 coverage/
 outputs/
+test-results/
+playwright-report/
+node_modules/.cache/

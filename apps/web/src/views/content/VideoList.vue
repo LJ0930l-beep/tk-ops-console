@@ -48,8 +48,10 @@ import ImportDialog from '@/components/ImportDialog.vue';
 import { parseVideoId, round2 } from '@tk/shared';
 import { apiGet } from '@/api/client';
 import { useDictStore } from '@/stores/dict';
+import { useAuthStore } from '@/stores/auth';
 
 const dict = useDictStore();
+const auth = useAuthStore();
 const shops = ref<{ id: number; shop_name: string }[]>([]);
 const accounts = ref<{ id: number; handle: string }[]>([]);
 const creators = ref<{ id: number; handle: string; nickname?: string | null }[]>([]);
@@ -140,13 +142,12 @@ onMounted(async () => {
     .shopOptions()
     .then((s) => (shops.value = s.map((x) => ({ id: x.id, shop_name: x.shop_name }))))
     .catch(() => undefined);
-  const [acc, cre, usr] = await Promise.allSettled([
-    apiGet<{ list: Record<string, unknown>[] }>('/accounts', { page: 1, pageSize: 200 }),
-    apiGet<{ list: Record<string, unknown>[] }>('/creators', { page: 1, pageSize: 200 }),
-    apiGet<{ list: Record<string, unknown>[] }>('/system/users', { page: 1, pageSize: 200 }),
+  const [acc, cre, usr] = await Promise.all([
+    auth.fetchScoped<{ list: Record<string, unknown>[] }>('shop', '/accounts', { page: 1, pageSize: 200 }),
+    auth.fetchScoped<{ list: Record<string, unknown>[] }>('creator', '/creators', { page: 1, pageSize: 200 }),
+    auth.fetchScoped<{ list: Record<string, unknown>[] }>('system', '/system/users', { page: 1, pageSize: 200 }),
   ]);
-  const pick = (r: PromiseSettledResult<{ list: Record<string, unknown>[] }>): Record<string, unknown>[] =>
-    r.status === 'fulfilled' ? (r.value.list ?? []) : [];
+  const pick = (r: { list: Record<string, unknown>[] } | null): Record<string, unknown>[] => r?.list ?? [];
   accounts.value = pick(acc) as { id: number; handle: string }[];
   creators.value = pick(cre) as { id: number; handle: string; nickname?: string | null }[];
   editors.value = pick(usr) as { id: number; real_name: string }[];

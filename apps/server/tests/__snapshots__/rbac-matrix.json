@@ -1,0 +1,145 @@
+[
+  {
+    "role_key": "ads",
+    "role_name": "投放",
+    "data_scope": 4,
+    "can_see_cost": 0,
+    "can_see_contact": 0,
+    "can_export": 0,
+    "menus": [
+      "ads",
+      "dashboard",
+      "order"
+    ]
+  },
+  {
+    "role_key": "bd",
+    "role_name": "达人 BD",
+    "data_scope": 3,
+    "can_see_cost": 0,
+    "can_see_contact": 1,
+    "can_export": 0,
+    "menus": [
+      "content",
+      "creator",
+      "dashboard"
+    ]
+  },
+  {
+    "role_key": "bd_manager",
+    "role_name": "BD 主管",
+    "data_scope": 2,
+    "can_see_cost": 0,
+    "can_see_contact": 1,
+    "can_export": 1,
+    "menus": [
+      "content",
+      "creator",
+      "dashboard"
+    ]
+  },
+  {
+    "role_key": "boss",
+    "role_name": "老板",
+    "data_scope": 1,
+    "can_see_cost": 1,
+    "can_see_contact": 1,
+    "can_export": 1,
+    "menus": [
+      "ads",
+      "content",
+      "creator",
+      "dashboard",
+      "finance",
+      "order",
+      "product",
+      "shop",
+      "stock",
+      "system"
+    ]
+  },
+  {
+    "role_key": "content",
+    "role_name": "内容(编导/剪辑)",
+    "data_scope": 3,
+    "can_see_cost": 0,
+    "can_see_contact": 0,
+    "can_export": 0,
+    "menus": [
+      "content",
+      "dashboard"
+    ]
+  },
+  {
+    "role_key": "finance",
+    "role_name": "财务",
+    "data_scope": 1,
+    "can_see_cost": 1,
+    "can_see_contact": 0,
+    "can_export": 1,
+    "menus": [
+      "ads",
+      "dashboard",
+      "finance",
+      "order"
+    ]
+  },
+  {
+    "role_key": "host",
+    "role_name": "主播/场控",
+    "data_scope": 3,
+    "can_see_cost": 0,
+    "can_see_contact": 0,
+    "can_export": 0,
+    "menus": [
+      "content",
+      "dashboard"
+    ]
+  },
+  {
+    "role_key": "ops",
+    "role_name": "运营",
+    "data_scope": 4,
+    "can_see_cost": 0,
+    "can_see_contact": 0,
+    "can_export": 0,
+    "menus": [
+      "content",
+      "dashboard",
+      "order",
+      "product",
+      "shop"
+    ]
+  },
+  {
+    "role_key": "ops_manager",
+    "role_name": "运营主管",
+    "data_scope": 2,
+    "can_see_cost": 1,
+    "can_see_contact": 0,
+    "can_export": 1,
+    "menus": [
+      "ads",
+      "content",
+      "dashboard",
+      "finance",
+      "order",
+      "product",
+      "shop",
+      "system"
+    ]
+  },
+  {
+    "role_key": "warehouse",
+    "role_name": "仓库/发货",
+    "data_scope": 1,
+    "can_see_cost": 0,
+    "can_see_contact": 0,
+    "can_export": 0,
+    "menus": [
+      "creator",
+      "dashboard",
+      "stock"
+    ]
+  }
+]

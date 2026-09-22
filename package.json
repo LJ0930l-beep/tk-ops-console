@@ -8,14 +8,20 @@
     "packages/*"
   ],
   "scripts": {
+    "build:shared": "npm run build -w @tk/shared",
+    "predev": "npm run build:shared",
     "dev": "npm-run-all --parallel dev:server dev:web",
     "dev:server": "npm run dev -w @tk/server",
     "dev:web": "npm run dev -w @tk/web",
-    "build": "npm run build -w @tk/shared && npm run build -w @tk/server && npm run build -w @tk/web",
+    "build": "npm run build:shared && npm run build -w @tk/server && npm run build -w @tk/web",
+    "pretest": "npm run build:shared",
     "test": "npm run test -w @tk/server && npm run test -w @tk/web",
+    "presmoke": "npm run build:shared",
     "smoke": "tsx --disable-warning=ExperimentalWarning scripts/smoke.mts",
     "openapi": "tsx --disable-warning=ExperimentalWarning scripts/openapi.mts",
+    "pree2e": "npm run build:shared",
     "e2e": "playwright test",
+    "prelint": "npm run build:shared",
     "lint": "npm run lint -w @tk/server && npm run lint -w @tk/web",
     "db:init": "node --disable-warning=ExperimentalWarning apps/server/dist/db/cli.js init",
     "db:seed": "node --disable-warning=ExperimentalWarning apps/server/dist/db/cli.js seed"

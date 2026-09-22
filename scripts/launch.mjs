@@ -66,8 +66,12 @@ function ensureRuntimeDb() {
 }
 
 function ensureBuild() {
-  if (!FORCE_BUILD && existsSync(WEB_DIST)) return;
-  say('· 构建前端产物与后端 dist（npm run build）');
+  // @tk/shared 的 main/types 指向它自己的 dist（gitignore 的产物）；
+  // 只判断前端产物会漏掉「web/dist 在、shared/dist 没了」这种半新半旧状态，
+  // 后果是后端 tsx 起不来 / tsc 报 108 个 Cannot find module '@tk/shared'
+  const sharedEntry = path.join(ROOT, 'packages/shared/dist/index.js');
+  if (!FORCE_BUILD && existsSync(WEB_DIST) && existsSync(sharedEntry)) return;
+  say('· 构建共享包与前后端产物（npm run build）');
   const r = run('npm', ['run', 'build']);
   if (r.status !== 0) {
     say('✗ 构建失败');

@@ -33,6 +33,10 @@ jobs:
       - name: 安装依赖（锁文件必须与 package.json 同步）
         run: npm ci
 
+      # 注意：@tk/shared 的 main/types 指向它自己的 dist（gitignore 的产物）。
+      # 干净环境里必须先构建它，否则 tsc 报 108 个 Cannot find module '@tk/shared'、
+      # 后端 tsx 起不来连带 webServer 超时。root package.json 的 prelint/pretest/... 已经兜住，
+      # 所以这里不要"优化"成直接调 npx vitest / npx tsc。
       - name: 类型检查（服务端 tsc + web vue-tsc）
         run: npm run lint
 
@@ -81,8 +85,10 @@ jobs:
 
       # playwright.config.ts 自己起 dev:server + dev:web，
       # 并把库指到 node_modules/.cache/tk-e2e 下的临时文件（绝不碰仓库里那份演示库）
+      # 用 npm run e2e 而不是 npx playwright test：前者的 pree2e 会先构建 @tk/shared，
+      # 否则后端 tsx 起不来 → webServer 120s 超时
       - name: 端到端测试
-        run: npx playwright test
+        run: npm run e2e
 
       - name: 失败时留痕（trace / 截图 / 录像 / HTML 报告）
         if: ${{ !cancelled() }}

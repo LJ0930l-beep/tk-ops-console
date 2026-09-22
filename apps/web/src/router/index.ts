@@ -1,4 +1,5 @@
 import { createRouter, createWebHashHistory, type RouteRecordRaw } from 'vue-router';
+import { ElMessage } from 'element-plus';
 import { useAuthStore } from '@/stores/auth';
 import MainLayout from '@/layouts/MainLayout.vue';
 
@@ -75,11 +76,37 @@ router.beforeEach(async (to) => {
   }
   const menu = to.meta.menu as string | undefined;
   if (menu && auth.user && !auth.user.menu_perms.includes(menu as never) && auth.user.role_key !== 'boss') {
+    // 不吭声地弹回看板，用户读到的是「这个菜单坏了」；说清楚是谁挡的
+    ElMessage.warning(`你的角色没有「${String(to.meta.title ?? to.path)}」权限，已回到经营看板`);
     return { path: '/dashboard' };
   }
   return true;
 });
 
+/**
+ * 懒加载 chunk 拉不到时必须自愈。
+ *
+ * 不处理的后果就是「点了没反应」：vue-router 遇到 import() 失败只放弃这次导航，
+ * 而 el-menu 的高亮已经跳过去了 —— 用户看到的是界面死了，实际是服务端重启过 / 端口连错了 /
+ * 部署换了产物（本项目真踩过：5173 被另一个 React 项目占着，所有模块请求回来的都是 HTML）。
+ * 只重载一次，避免服务端真不在时陷入刷新循环。
+ */
+const CHUNK_RELOAD_KEY = 'tk_chunk_reloaded';
+
+router.onError((error) => {
+  const msg = String((error as Error)?.message ?? error);
+  if (!/Failed to fetch dynamically imported module|Importing a module script failed|error loading dynamically imported module/i.test(msg)) return;
+  if (sessionStorage.getItem(CHUNK_RELOAD_KEY)) {
+    sessionStorage.removeItem(CHUNK_RELOAD_KEY);
+    ElMessage.error('页面资源加载失败：请确认后端服务在跑、地址是 http://127.0.0.1:8787，然后重新刷新');
+    return;
+  }
+  sessionStorage.setItem(CHUNK_RELOAD_KEY, '1');
+  window.location.reload();
+});
+
 router.afterEach((to) => {
   document.title = `${String(to.meta.title ?? '')} · TikTok 运营管理后台`;
+  // 这次导航成功了，就把「只重载一次」的闸门重新打开
+  sessionStorage.removeItem(CHUNK_RELOAD_KEY);
 });

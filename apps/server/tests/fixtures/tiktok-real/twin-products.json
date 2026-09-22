@@ -1,0 +1,120 @@
+[
+  {
+    "code": 0,
+    "message": "success",
+    "request_id": "recorded-offline-0001",
+    "data": {
+      "products": [
+        {
+          "id": "2288700001",
+          "product_id": "2288700001",
+          "status": "ACTIVATED",
+          "category_id": "100000",
+          "title": "对拍商品一",
+          "main_images": [
+            "https://cdn.example.com/mock/28.jpg"
+          ],
+          "update_time": 1790087435,
+          "skus": [
+            {
+              "id": "2288710001",
+              "sku_code": "ORICO-66059-01",
+              "seller_sku": "ORICO-66059-01",
+              "price": {
+                "amount": "45.90",
+                "currency": "USD"
+              },
+              "stock": 314,
+              "status": "ACTIVATED"
+            }
+          ]
+        },
+        {
+          "id": "2288700002",
+          "product_id": "2288700002",
+          "status": "ACTIVATED",
+          "category_id": "100000",
+          "title": "对拍商品二",
+          "main_images": [
+            "https://cdn.example.com/mock/29.jpg"
+          ],
+          "update_time": 1790087435,
+          "skus": [
+            {
+              "id": "2288710002",
+              "sku_code": "ORICO-66059-02",
+              "seller_sku": "ORICO-66059-02",
+              "price": {
+                "amount": "89.44",
+                "currency": "USD"
+              },
+              "stock": 384,
+              "status": "ACTIVATED"
+            }
+          ]
+        },
+        {
+          "id": "574110900014",
+          "product_id": "574110900014",
+          "status": "ACTIVATED",
+          "category_id": "100000",
+          "title": "自动可匹配的新品 ORICO-CB2P-01",
+          "main_images": [],
+          "update_time": 1790087435,
+          "skus": [
+            {
+              "id": "574110900021",
+              "sku_code": "ORICO-CB2P-01",
+              "seller_sku": "ORICO-CB2P-01",
+              "price": {
+                "amount": "54.00",
+                "currency": "USD"
+              },
+              "stock": 88,
+              "status": "ACTIVATED"
+            }
+          ]
+        }
+      ],
+      "total_count": 4,
+      "next_page_token": "PAGE-TOKEN-2",
+      "has_more": true
+    }
+  },
+  {
+    "code": 0,
+    "message": "success",
+    "request_id": "recorded-offline-0001",
+    "data": {
+      "products": [
+        {
+          "id": "574110900007",
+          "product_id": "574110900007",
+          "status": "ACTIVATED",
+          "category_id": "100000",
+          "title": "错填卖家 SKU 的平台商品（待人工映射）",
+          "main_images": [
+            "https://cdn.example.com/mock/typo.jpg"
+          ],
+          "update_time": 1790087435,
+          "skus": [
+            {
+              "id": "574110900000",
+              "sku_code": "WRONG_SELLER_SKU_9999",
+              "seller_sku": "WRONG_SELLER_SKU_9999",
+              "price": {
+                "amount": "49.90",
+                "currency": "USD"
+              },
+              "stock": 30,
+              "status": "ACTIVATED"
+            }
+          ]
+        }
+      ],
+      "total_count": 4,
+      "next_page_token": "",
+      "has_more": false
+    }
+  }
+]

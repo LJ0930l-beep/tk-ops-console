@@ -15,6 +15,7 @@ import { MAP_STATUS, normalizeHandle, round2, unitCostCny } from '@tk/shared';
 import { config } from '../config.js';
 import { countRateFallbacks, rebuildCreatorDaily, rebuildProductChannelDaily, rebuildShopChannelDaily, rebuildVideoDaily } from '../services/analytics.js';
 import { all, get, insert, run, scalar, tx, update } from '../core/db.js';
+import { maskError } from '../core/redact.js';
 import { sendAlert, writeOpLog } from '../core/oplog.js';
 import { buildShopCredential, createTiktokClient, type ShopCredential, type SyncWindow } from '../services/tiktok/client.js';
 import { flag, formatUtc, money, parseUtc, unixToUtc, utcToUnix } from '../services/tiktok/types.js';
@@ -53,7 +54,8 @@ export interface SyncResult {
   detail: Record<string, number>;
 }
 
-interface Counters {
+/** 落库计数器：real/mock 报文对拍要连它一起比（unmapped_items 这类计数就是运营看到的告警数） */
+export interface Counters {
   fetched: number;
   inserted: number;
   updated: number;
@@ -62,12 +64,13 @@ interface Counters {
   errors: string[];
 }
 
-const newCounters = (): Counters => ({ fetched: 0, inserted: 0, updated: 0, failed: 0, detail: {}, errors: [] });
+export const newCounters = (): Counters => ({ fetched: 0, inserted: 0, updated: 0, failed: 0, detail: {}, errors: [] });
 const bump = (c: Counters, key: string, by = 1): void => {
   c.detail[key] = (c.detail[key] ?? 0) + by;
 };
+/** 上游报错可能整段带出凭证，落 sync_log / 告警之前一律过 maskError（与 services/jobs/queue.ts 同一口径） */
 const pushError = (c: Counters, msg: string): void => {
-  if (c.errors.length < 5) c.errors.push(msg.slice(0, 300));
+  if (c.errors.length < 5) c.errors.push(maskError(msg));
 };
 
 /* ==================== 窗口与店铺 ==================== */
@@ -108,6 +111,43 @@ import {
 
 export { normalizeContentType, normalizeFulfillment, normalizeListingStatus, normalizeOrderStatus, normalizeReturnType };
 
+/**
+ * 平台报文 → tk_order 头表列（纯计算，不碰库）。
+ * 单独导出是给 real/mock 报文对拍用的：真实店铺联调之前，
+ * 「同一个逻辑单据在两种报文形态下落成同一行」这件事只能靠这段映射被直接断言，
+ * 藏在 upsert 里就没有可拍的入口。
+ */
+export function orderHeadOf(shopId: number, o: PlatformOrder, syncedAt = utcStamp()): Record<string, unknown> {
+  const currency = String(o.currency ?? '').slice(0, 3).toUpperCase() || 'USD';
+  const subtotal = money(o.products_amount);
+  const sellerDiscount = money(o.seller_discount ?? o.discount_amount);
+  const shipping = money(o.shipping_fee);
+  const totalPaid = money(o.total_amount) || round2(subtotal - sellerDiscount + shipping);
+  const tracking = o.tracking_info?.tracking_no ?? o.tracking_no ?? null;
+  const courier = o.tracking_info?.courier_name;
+  const carrier = (typeof courier === 'string' ? courier : courier?.name) ?? o.carrier ?? null;
+  return {
+    shop_id: shopId,
+    tk_order_id: String(o.order_id ?? '').trim(),
+    order_status: normalizeOrderStatus(o.status ?? o.sub_status),
+    order_time: unixToUtc(o.create_time),
+    paid_time: unixToUtc(o.payment_time),
+    ship_time: unixToUtc(o.ship_time),
+    buyer_region: String(o.buyer_user_info?.country ?? o.buyer_user_info?.region ?? '').slice(0, 8) || null,
+    currency,
+    subtotal,
+    seller_discount: sellerDiscount,
+    platform_discount: money(o.platform_discount),
+    shipping_fee: shipping,
+    total_paid: totalPaid,
+    fulfillment_type: normalizeFulfillment(o.fulfillment_type),
+    carrier: carrier ? String(carrier).slice(0, 64) : null,
+    tracking_no: tracking ? String(tracking).slice(0, 64) : null,
+    is_sample_order: flag(o.is_sample_order ?? (String(o.order_type ?? '').toUpperCase().includes('SAMPLE') ? 1 : 0)),
+    synced_at: syncedAt,
+  };
+}
+
 /* ==================== 订单落库 ==================== */
 
 interface ResolvedItem {
@@ -147,7 +187,7 @@ export function snapshotCost(sku: { purchase_cost: number; first_leg_cost: numbe
  * 已存在的订单只刷新状态与物流节点，**不重写历史 cost_snapshot / 映射结果**（方案表 7「冻结」），
  * 映射后补齐的历史行由 refreshDerivedAggregates 统一处理并留痕。
  */
-function upsertPlatformOrder(shopId: number, o: PlatformOrder, c: Counters): void {
+export function upsertPlatformOrder(shopId: number, o: PlatformOrder, c: Counters): void {
   const tkOrderId = String(o.order_id ?? '').trim();
   if (!tkOrderId) throw new Error('平台订单缺少 order_id');
   const exist = get<{ id: number; shop_id: number; is_deleted: number }>(`SELECT id, shop_id, is_deleted FROM tk_order WHERE tk_order_id = ?`, tkOrderId);
@@ -159,35 +199,7 @@ function upsertPlatformOrder(shopId: number, o: PlatformOrder, c: Counters): voi
     // closed instead of silently re-parenting the existing order and its cost/attribution history.
     throw new Error('已有订单号归属其他店铺，已拒绝跨店改写');
   }
-  const currency = String(o.currency ?? '').slice(0, 3).toUpperCase() || 'USD';
-  const subtotal = money(o.products_amount);
-  const sellerDiscount = money(o.seller_discount ?? o.discount_amount);
-  const shipping = money(o.shipping_fee);
-  const totalPaid = money(o.total_amount) || round2(subtotal - sellerDiscount + shipping);
-  const tracking = o.tracking_info?.tracking_no ?? o.tracking_no ?? null;
-  const courier = o.tracking_info?.courier_name;
-  const carrier = (typeof courier === 'string' ? courier : courier?.name) ?? o.carrier ?? null;
-  const isSample = flag(o.is_sample_order ?? (String(o.order_type ?? '').toUpperCase().includes('SAMPLE') ? 1 : 0));
-  const head = {
-    shop_id: shopId,
-    tk_order_id: tkOrderId,
-    order_status: normalizeOrderStatus(o.status ?? o.sub_status),
-    order_time: unixToUtc(o.create_time),
-    paid_time: unixToUtc(o.payment_time),
-    ship_time: unixToUtc(o.ship_time),
-    buyer_region: String(o.buyer_user_info?.country ?? o.buyer_user_info?.region ?? '').slice(0, 8) || null,
-    currency,
-    subtotal,
-    seller_discount: sellerDiscount,
-    platform_discount: money(o.platform_discount),
-    shipping_fee: shipping,
-    total_paid: totalPaid,
-    fulfillment_type: normalizeFulfillment(o.fulfillment_type),
-    carrier: carrier ? String(carrier).slice(0, 64) : null,
-    tracking_no: tracking ? String(tracking).slice(0, 64) : null,
-    is_sample_order: isSample,
-    synced_at: utcStamp(),
-  };
+  const head = orderHeadOf(shopId, o);
 
   let orderId: number;
   if (exist) {
@@ -436,7 +448,24 @@ export async function syncListingsForShop(shopId: number, opts: SyncOptions = {}
 
 /* ==================== 售后 → tk_return ==================== */
 
-function upsertPlatformReturn(shopId: number, r: PlatformReturn, c: Counters): void {
+/** 售后报文 → tk_return 列（纯计算，同上：real/mock 对拍的入口） */
+export function returnPayloadOf(shopId: number, r: PlatformReturn, orderId: number | null, itemId: number | null): Record<string, unknown> {
+  return {
+    shop_id: shopId,
+    order_id: orderId,
+    tk_return_id: String(r.return_id ?? '').trim(),
+    tk_order_item_id: itemId,
+    return_type: normalizeReturnType(r.return_type ?? r.type),
+    reason: String(r.reason ?? r.customer_service_reason ?? '').slice(0, 200) || null,
+    refund_amount: money(r.refund_amount ?? r.return_amount),
+    currency: String(r.currency ?? '').slice(0, 3).toUpperCase() || 'USD',
+    status: String(r.status ?? 'PROCESSING').toUpperCase(),
+    apply_time: unixToUtc(r.apply_time ?? r.create_time ?? r.delivery_time),
+    finish_time: unixToUtc(r.finish_time),
+  };
+}
+
+export function upsertPlatformReturn(shopId: number, r: PlatformReturn, c: Counters): void {
   const returnId = String(r.return_id ?? '').trim();
   if (!returnId) throw new Error('平台售后单缺少 return_id');
   const tkOrderId = String(r.order_id ?? '').trim();
@@ -461,19 +490,7 @@ function upsertPlatformReturn(shopId: number, r: PlatformReturn, c: Counters): v
         itemRef,
       )
     : undefined;
-  const payload = {
-    shop_id: shopId,
-    order_id: order?.id ?? null,
-    tk_return_id: returnId,
-    tk_order_item_id: item?.id ?? null,
-    return_type: normalizeReturnType(r.return_type ?? r.type),
-    reason: String(r.reason ?? r.customer_service_reason ?? '').slice(0, 200) || null,
-    refund_amount: money(r.refund_amount ?? r.return_amount),
-    currency: String(r.currency ?? '').slice(0, 3).toUpperCase() || 'USD',
-    status: String(r.status ?? 'PROCESSING').toUpperCase(),
-    apply_time: unixToUtc(r.apply_time ?? r.create_time ?? r.delivery_time),
-    finish_time: unixToUtc(r.finish_time),
-  };
+  const payload = returnPayloadOf(shopId, r, order?.id ?? null, item?.id ?? null);
   const exist = get<{ id: number; shop_id: number; is_deleted: number }>(`SELECT id, shop_id, is_deleted FROM tk_return WHERE tk_return_id = ?`, returnId);
   if (exist) {
     if (Number(exist.is_deleted) !== 0) {
@@ -483,6 +500,7 @@ function upsertPlatformReturn(shopId: number, r: PlatformReturn, c: Counters): v
       throw new Error('已有售后单号归属其他店铺，已拒绝跨店改写');
     }
     const patch: Record<string, unknown> = { ...payload };
+    delete patch.tk_return_id; // 业务主键不随同步改写
     if (r.has_returned !== undefined) patch.is_restocked = flag(r.has_returned);
     update('tk_return', Number(exist.id), patch as never);
     c.updated += 1;
@@ -518,6 +536,30 @@ export async function syncReturnsForShop(shopId: number, opts: SyncOptions = {})
 
 /* ==================== 联盟归因回填 ==================== */
 
+/**
+ * 联盟报文 → tk_order_item 归因列（纯计算，real/mock 报文对拍的入口）。
+ * 归因是「更新已有明细行」而不是插新行，所以报文一旦换字段名不会报错，
+ * 只会静默把佣金算成 0 —— 比插不上行更难发现，必须能被单独断言。
+ * `matched` 保留原来的三档计数口径（达人建档 / 自营号 / 都没建档）。
+ */
+export function attributionOf(
+  a: PlatformAffiliateOrder,
+  target: { id: number; item_amount: number },
+): { creator_id: number | null; content_type: number; content_id: string | null; commission_rate: number; est_commission: number; matched: 'creator' | 'own_account' | 'none' } {
+  const handle = normalizeHandle(String(a.creator_handle ?? ''));
+  const creator = handle ? get<{ id: number }>(`SELECT id FROM creator WHERE handle = ? AND is_deleted = 0`, handle) : undefined;
+  const ownAccount = !creator && handle ? get<{ id: number }>(`SELECT id FROM tk_account WHERE handle = ? AND is_deleted = 0`, handle) : undefined;
+  const rate = round2(Number(a.seller_commission_rate ?? a.commission_rate ?? 0) || 0);
+  return {
+    creator_id: creator?.id ?? null,
+    content_type: normalizeContentType(a.content_type, Boolean(creator)),
+    content_id: String(a.video_id ?? a.live_id ?? '').trim() || null,
+    commission_rate: rate,
+    est_commission: round2((Number(target.item_amount) * rate) / 100),
+    matched: creator ? 'creator' : ownAccount ? 'own_account' : 'none',
+  };
+}
+
 export async function applyAffiliateAttribution(shopId: number, opts: SyncOptions = {}): Promise<SyncResult> {
   return withSyncLog('affiliate_order', shopId, opts, async (c, window) => {
     const shop = buildShopCredential(shopId);
@@ -530,21 +572,17 @@ export async function applyAffiliateAttribution(shopId: number, opts: SyncOption
         bump(c, 'order_not_found');
         continue;
       }
-      const handle = normalizeHandle(String(a.creator_handle ?? ''));
-      const creator = handle ? get<{ id: number }>(`SELECT id FROM creator WHERE handle = ? AND is_deleted = 0`, handle) : undefined;
-      const ownAccount = !creator && handle ? get<{ id: number }>(`SELECT id FROM tk_account WHERE handle = ? AND is_deleted = 0`, handle) : undefined;
-      const rate = round2(Number(a.seller_commission_rate ?? a.commission_rate ?? 0) || 0);
-      const contentId = String(a.video_id ?? a.live_id ?? '').trim() || null;
+      const patch = attributionOf(a, target);
       update('tk_order_item', target.id, {
-        creator_id: creator?.id ?? null,
-        content_type: normalizeContentType(a.content_type, Boolean(creator)),
-        content_id: contentId,
-        commission_rate: rate,
-        est_commission: round2((Number(target.item_amount) * rate) / 100),
+        creator_id: patch.creator_id,
+        content_type: patch.content_type,
+        content_id: patch.content_id,
+        commission_rate: patch.commission_rate,
+        est_commission: patch.est_commission,
       } as never);
       c.updated += 1;
-      if (creator) bump(c, 'creator_matched');
-      else if (ownAccount) bump(c, 'own_account');
+      if (patch.matched === 'creator') bump(c, 'creator_matched');
+      else if (patch.matched === 'own_account') bump(c, 'own_account');
       else bump(c, 'creator_unmatched');
     }
     const missing = c.detail.order_not_found ?? 0;
@@ -563,7 +601,7 @@ export async function applyAffiliateAttribution(shopId: number, opts: SyncOption
   });
 }
 
-function pickAttributionTarget(shopId: number, a: PlatformAffiliateOrder): { id: number; item_amount: number } | undefined {
+export function pickAttributionTarget(shopId: number, a: PlatformAffiliateOrder): { id: number; item_amount: number } | undefined {
   const tkOrderId = String(a.order_id ?? '').trim();
   if (!tkOrderId) return undefined;
   const skuId = a.sku_id === undefined || a.sku_id === null ? '' : String(a.sku_id);
@@ -764,7 +802,8 @@ async function withSyncLog(taskType: SyncTaskType, shopId: number, opts: SyncOpt
     await body(c, window);
   } catch (e) {
     status = 3;
-    errorMsg = (e instanceof Error ? e.message : String(e)).slice(0, 500);
+    // 这里的原文可能来自平台报文（上游 message 会回显入参），必须先脱敏再进 sync_log 与告警
+    errorMsg = maskError(e instanceof Error ? e.message : String(e));
     sendAlert({ title: `同步任务 ${taskType} 失败（店铺 #${shopId}）`, detail: errorMsg, level: 'error' });
   }
   // 「平时每天有单、今天 0 条」按失败处理（方案 6.4）

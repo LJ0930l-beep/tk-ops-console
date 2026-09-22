@@ -1,0 +1,85 @@
+[
+  {
+    "code": 0,
+    "message": "success",
+    "request_id": "recorded-offline-0001",
+    "data": {
+      "affiliate_orders": [
+        {
+          "order_id": "574110000001003",
+          "item_id": "2288710001",
+          "sku_id": "2288710001",
+          "seller_sku": "ORICO-66059-01",
+          "creator_handle": "@AISYAH.TECH",
+          "content_type": "VIDEO",
+          "video_id": "75230000364",
+          "seller_commission_rate": 10,
+          "seller_commission_amount": {
+            "amount": "4.36",
+            "currency": "USD"
+          },
+          "create_time": 1788998400
+        },
+        {
+          "order_id": "574110000001002",
+          "item_id": "574110900028",
+          "creator_handle": "@KEVINREVIEWS",
+          "content_type": "VIDEO",
+          "video_id": "75230000273",
+          "seller_commission_rate": 12,
+          "seller_commission_amount": {
+            "amount": "5.69",
+            "currency": "USD"
+          },
+          "create_time": 1788998400
+        },
+        {
+          "order_id": "574110000001001",
+          "item_id": "574110900035",
+          "creator_handle": "@MANGBERTOYS",
+          "content_type": "LIVE",
+          "live_id": "75230000273",
+          "seller_commission_rate": 15,
+          "seller_commission_amount": {
+            "amount": "14.75",
+            "currency": "USD"
+          },
+          "create_time": 1788998400
+        },
+        {
+          "order_id": "574110000001000",
+          "item_id": "2288710002",
+          "sku_id": "2288710002",
+          "seller_sku": "ORICO-66059-02",
+          "creator_handle": "@COSY.PH",
+          "content_type": "VIDEO",
+          "video_id": "75230000091",
+          "seller_commission_rate": 18,
+          "seller_commission_amount": {
+            "amount": "30.28",
+            "currency": "USD"
+          },
+          "create_time": 1788998400
+        },
+        {
+          "order_id": "574110000001000",
+          "item_id": "2288710001",
+          "sku_id": "2288710001",
+          "seller_sku": "ORICO-66059-01",
+          "creator_handle": "@Ghost.Creator.999",
+          "content_type": "VIDEO",
+          "video_id": "75230000000",
+          "seller_commission_rate": 10,
+          "seller_commission_amount": {
+            "amount": "8.72",
+            "currency": "USD"
+          },
+          "create_time": 1788998400
+        }
+      ],
+      "total_count": 5,
+      "next_page_token": "",
+      "has_more": false
+    }
+  }
+]

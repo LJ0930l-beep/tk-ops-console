@@ -19,7 +19,7 @@
 - **剩余风险 / 后续选项**：计数在单进程内存里，多实例部署会各算各的 → 届时换 Redis store；
   部署在 nginx 后**必须**设 `TRUST_PROXY=1`，否则全站共用一个计数桶（已写进 `docs/development-standards.md` §6.1.1）。
 
-## 2. 压首屏体积 ⬜ 待做（任务 #36）
+## 2. 压首屏体积 ✅ 已落地（`20f23de`，任务 #36）
 
 - **现状（实测）**：`apps/web/dist/assets/` 两个 index chunk 分别 **1,262,848B（gzip 409,085B）** 与 **1,126,635B（gzip 377,339B）**。
   原因在 `apps/web/src/main.ts`：`import ElementPlus from 'element-plus'` 全量引入 + `import 'element-plus/dist/index.css'` 全量样式 + `for (const [name, comp] of Object.entries(ElIcons)) app.component(name, comp)` 把**全部图标**注册成全局组件；echarts 被 3 个页面（DashboardView / LiveList / ProductAbc）直接引入。路由已是懒加载（`LiveList-*.js` 只有 15KB），所以体积几乎全是 vendor。
@@ -39,7 +39,7 @@
   `/api/finance/settlement/reconcile/export` 有接口但**没有页面承载**（结算逐单对账页缺失）；超 2 万行的异步导出任务 + 站内提示（B8 的二期）。
   做法：新导出接口一律走 `sendTable`，别再自己拼字符串；异步导出可复用 `sync_log` 的写法（一条任务记录 + 状态轮询）。
 
-## 4. OpenAPI 契约与前端类型安全 ⬜ 待做（中期）
+## 4. OpenAPI 契约与前端类型安全 ✅ 已落地（`77ae21d`，任务 #37）
 
 - **现状**：212 条路由没有机器可读的契约。本轮冒烟抓到的三个缺陷（`/api/creators/roi` 死路径、`/api/system/dict` 整页 500、同步任务下拉 4 项后端不认）本质都是**前后端契约漂移**，靠人读代码发现。
   目前只有过渡手段：`scripts/route-inventory.mjs` 扫源码出路由清单 + `tests/route-contract.spec.ts` 把清单整体打一遍断言无 404/500，并解析 `SyncLogList.vue` 的下拉常量逐个真发请求。
@@ -48,7 +48,7 @@
 - **工作量**：3–5 人日（按模块渐进，不必一次全改）。**验收**：`docs/openapi.json` 进仓库并由 CI 校验「生成物与代码一致」；前端不再有手写响应类型；新增一条契约测试：OpenAPI 里的路径集合 === `collectRoutes()` 的路径集合。
 - **风险**：渐进迁移期会存在「一半路由有 schema、一半没有」，要给未迁移路由留兜底；`@tk/shared` 里已有的枚举/类型要继续作为单一来源，别让生成物和它打架。
 
-## 5. Playwright 端到端 ⬜ 待做（中期，任务 #6/#7 的自动化替代）
+## 5. Playwright 端到端 ✅ 已落地（`npm run e2e`，50 例，任务 #38）
 
 - **现状**：浏览器验收全靠人工（任务 #6、#7 至今 pending）。冒烟只覆盖 HTTP 层，**页面渲染、表单联动、下载、权限可见性**没有任何自动化。
 - **做法**：[Playwright](https://playwright.dev/) 起 3 条关键路径就够回本：① 九个账号登录 → 断言菜单与页面可见性符合角色（RBAC 回归）；
@@ -58,7 +58,7 @@
 - **注意**：e2e 必须跑在**独立的临时库**上（`DB_FILE` 指到临时文件），绝不能碰仓库里那份演示库 `apps/data/tk_ops.db`（项目红线）；
   headless 环境下 Element Plus 的下拉/弹层要点开才能断言，优先用 `data-testid` 而不是文案选择器。
 
-## 6. SQLite → PostgreSQL/MySQL 迁移路径 ⬜ 待做（任务 #31 的一项）
+## 6. SQLite → PostgreSQL/MySQL 迁移路径 🟡 地基已落地（任务 #39）
 
 - **现状**：`apps/server/src/db/schema.mysql.sql` **已经存在**（37 张表，与 `schema.sqlite.sql` 数量一致），但没有任何代码加载它——运行时只有 `node:sqlite` 的 `DatabaseSync` 一条路，SQL 里也是 SQLite 写法（`datetime('now')`、`IFNULL`、`substr(order_time,1,10)`）。也就是说：那份 MySQL DDL 现在只是文档，既没有驱动/迁移路径，也没有「两份 schema 是否已经漂移」的校验。
 - **做法**：① 先加一条**漂移校验**（两份 DDL 的表名/列名集合对拍，进 `npm test`），否则那份 MySQL DDL 会继续悄悄过期；
@@ -67,7 +67,7 @@
 - **工作量**：漂移校验 0.5 人日；数据搬迁 0.5 人日；方言收口 3–5 人日。**验收**：同一套测试（243 例）在两种库上都绿；`npm run smoke` 在 PG 上跑通。
 - **建议时机**：只有真的要多人并发写、或数据量超过单机 SQLite 舒适区时才做；否则先用 WAL + 定期备份顶着。
 
-## 7. 后台任务队列 ⬜ 待做（按需）
+## 7. 后台任务队列 ✅ 已落地（`d6e3685`，任务 #41）
 
 - **现状**：`jobs/scheduler.ts` 用 `node-cron` 在**同一个进程**里跑同步/聚合/规则评估；重活（一键全量补跑）是请求内同步执行，HTTP 会一直挂着。
 - **做法**：两条路——① [BullMQ](https://bullmq.io/)（重试、延迟、并发控制齐全，代价是引入 Redis）；
@@ -82,14 +82,14 @@
 - **不建议**：替换现有实现。现在的写法与 SQL 拼装是一体的（`shopScope` 直接产出 `AND ...` 片段与参数），换成中间件式策略引擎反而要把数据范围二次翻译成 SQL。
 - **可落地的小步**：加一条测试，把「角色 × 菜单 × 数据范围 × 成本可见」的矩阵与 `constants.ts` 对拍，防止改角色定义时静默放权。
 
-## 9. 字段级权限与审计范本 📖 仅参考
+## 9. 字段级权限与审计范本 🟡 已落地最小版（任务 #43）
 
 - **可借鉴**：[NocoBase 的 RBAC 设计](https://github.com/nocobase/nocobase)（数据范围按「创建人/本部门/全部」分级 + 操作级权限）与本项目几乎一一对应，可对照检查有没有漏掉的操作级开关；
   [Directus](https://github.com/directus/directus) 的 `directus_revisions`/`activity` 双表是审计日志的成熟范本——本项目 `sys_op_log` 只有 before/after JSON，没有「哪次改动造成的」链路，做数据回溯时不如双表清晰。
 - **现状差距**：`can_see_cost`/`can_see_contact`/`can_export` 三个开关是**角色级**的，没有字段级白名单；`sys_op_log` 无更新删除入口（符合 PRD §审计要求），但也没有按记录聚合的「这条 SKU 的成本被谁改过几次」视图。
 - **可落地的小步**：给成本类字段做一份集中式字段白名单（现在散在各路由的 `maskFields` 调用里），并加一个「单条记录的变更历史」查询页（`sys_op_log` 按 `target_table + target_id` 聚合即可，无需改表）。
 
-## 10. TikTok 官方 SDK 与 real 模式校准 ⬜ 待做（阻塞项）
+## 10. TikTok 官方 SDK 与 real 模式校准 🟡 脚手架已就绪，联调仍待授权（任务 #42）
 
 - **现状**：`config.tiktokMode` 默认 `mock`；`services/tiktok/realClient.ts` 的签名与按店铺 access token 已按文档修过一轮（任务 #19），但**从未与真实店铺联调**——这是整个项目最大的未验证假设。
 - **做法**：按 [官方 Node.js SDK 与文档](https://partner.tiktokshop.com/docv2/page/integrate-node-js-sdk) 逐个接口对齐签名、错误码、分页游标与限流规则；
@@ -115,22 +115,25 @@
 | 选项 | 任务 | PRD/规范锚点 | 状态 |
 | --- | --- | --- | --- |
 | 1 限流 | #34 | 规范 §6.1.1（本轮新增） | ✅ `136c865` |
-| 2 首屏体积 | #36 | — | ⬜ |
-| 3 XLSX / 导出中心 | #35（已完成）、#30（九类导出与对账页） | PRD B8、D13、§8.2 | 🟡 `3f822cc` |
-| 4 OpenAPI 契约 | #37 | 规范 §6 | ⬜ 过渡手段已进门禁（`route-contract.spec.ts`） |
-| 5 Playwright | #38（与 #6、#7 的人工验收重叠） | PRD §7 DoD | ⬜ 过渡手段已进门禁（`npm run smoke`） |
-| 6 库迁移路径 | #39（与 #31 同源） | 规范 §5 | ⬜ |
-| 7 任务队列 | #41 | PRD 6.2/6.4 | ⬜ 按需 |
-| 8/9/11 参考项的可落地小步 | #43 | 规范 §9 | 📖 |
-| 10 real 模式联调 | #42（#19 的后续） | PRD §6.1 | ⬜ **阻塞：需真实店铺授权** |
+| 2 首屏体积 | #36 | — | ✅ `20f23de` 首屏 gzip 786KB → 179KB |
+| 3 XLSX / 导出中心 | #35、#30 | PRD B8、D13、§8.2 | ✅ 13 个导出接口全部在界面上有按钮（`3f822cc`/`f826b1b`/`5bd18da`） |
+| 4 OpenAPI 契约 | #37 | 规范 §6 | ✅ `77ae21d` 186 路径 / 226 操作 + 前端 `ApiPath` 类型化 + 契约漂移门禁 |
+| 5 Playwright | #38 | PRD §7 DoD | ✅ `npm run e2e` 50 例：RBAC 可见性 / 导入中心 / 行动中心闭环 / 全页面遍历 |
+| 6 库迁移路径 | #39（与 #31 同源） | 规范 §5 | 🟡 两份 DDL 对拍 + 方言债棘轮 + `docs/db-migration.md`；方言收口按判断暂缓 |
+| 7 任务队列 | #41 | PRD 6.2/6.4 | ✅ `d6e3685` 表即队列 + `POST /sync/run {async:true}` + 队列面板 |
+| 8/9/11 参考项的可落地小步 | #43 | 规范 §9 | 🟡 权限矩阵快照 + 字段级变更历史（`GET /system/oplog/history` + 抽屉）已落地；Casbin 仍仅参考 |
+| 10 real 模式联调 | #42（#19 的后续） | PRD §6.1 | 🟡 录制夹具 + mock↔real 对拍 + 联调清单已就绪；**真实店铺联调仍阻塞：需授权** |
 | 12 业务知识检索入口 | — | — | 📖 不建任务，排路线图时查 |
 
-**与选项无关但仍待修的既有缺陷**（审验轮记录，优先级高于上面大部分选项）：
-#28 宽表汇率缺失静默吞金额 + 宽表按 UTC 切日而利润引擎按店铺 IANA 时区（同一天两个口径）+ cron 时区不一致；
-#29 财务费用写入/改归属不校验数据范围、按单结算读订单不收敛；
-#30 `COALESCE(er.rate_to_cny, 1)` 三处（`services/creator/roi.ts:37-39`：GMV / 退款 / 佣金）把「缺汇率」当成 1:1、售后退款汇总缺 `status='COMPLETED'` 过滤、`live_session` 缺唯一键；
-#31 通知去重唯一键漏 `is_deleted`、seed reset 会清 `schema_migration`、`GET /notifications` 里写库、`due_at` 两处类型不一致、前端 25 处 `catch {}`（其中 11 处直接吞成空数组）；
-#33 「派生汇总刷新」不填窗口只算最近 24 小时，在历史数据上是空跑。
+**审验轮记录的既有缺陷（P0–P2）—— 本轮已全部修完**，每一项都有对应 spec 钉住，不是「改完就算」：
+#28 宽表汇率缺失静默吞金额 + 宽表按 UTC 切日而利润引擎按店铺 IANA 时区 + cron 时区不一致
+ → 汇率口径收敛到 `services/rates.ts` 一处、宽表改用 `tz_day()` 与利润引擎同源，由 `caliber-parity.spec.ts` 对拍 JS/SQL 两条路径；
+#29 财务费用写入/改归属不校验数据范围、按单结算读订单不收敛 → `finance-scope.spec.ts`；
+#30 `COALESCE(er.rate_to_cny, 1)` 三处把「缺汇率」当 1:1、售后退款缺 `status='COMPLETED'` 过滤、`live_session` 缺唯一键
+ → 缺汇率改为「显式标记 + 告警」（`RebuildOutcome.rate_fallback_rows` 进 sync_log），退款口径与唯一键由 `v2-hardening.spec.ts` / `schema-drift.spec.ts` 守住；
+#31 通知去重唯一键漏 `is_deleted`、seed reset 会清 `schema_migration`、`GET /notifications` 里写库、`due_at` 两处类型不一致
+ → 前四项已修（迁移 `2026-09-22-notification-dedupe-soft-delete-v1` 等）；「MySQL 无迁移路径」这一项归到选项 6；
+#33 「派生汇总刷新」不填窗口只算最近 24 小时导致空跑 → 改为按订单全区间，`aggregate-window.spec.ts` 守住。
 
 **建议顺序**：#28 → #29 → #30 → #36（选项 2）→ #38（选项 5）→ #37（选项 4）→ #42（选项 10，等到有真实店铺授权）；#39/#41 按触发条件排，#43 可穿插做。
 理由：前三个是「数字不对/越权」，属于正确性与安全；#36 是用户天天感知的体验；#38/#37 是防回归的基础设施；#42 有外部依赖，排不上就由它排。

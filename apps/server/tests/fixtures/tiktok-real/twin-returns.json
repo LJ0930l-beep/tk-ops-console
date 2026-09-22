@@ -1,0 +1,48 @@
+[
+  {
+    "code": 0,
+    "message": "success",
+    "request_id": "recorded-offline-0001",
+    "data": {
+      "returns": [
+        {
+          "return_id": "574110000002000",
+          "order_id": "574110000001002",
+          "item_id": "574110900028",
+          "return_type": "RETURN_AND_REFUND",
+          "reason": "Item was damaged during shipping",
+          "refund_amount": {
+            "amount": "49.40",
+            "currency": "USD"
+          },
+          "currency": "USD",
+          "status": "COMPLETED",
+          "create_time": 1789008074,
+          "finish_time": 1789041600,
+          "return_qty": 1,
+          "has_returned": true
+        },
+        {
+          "return_id": "574110000002001",
+          "order_id": "574110000001001",
+          "item_id": "",
+          "return_type": "ONLY_REFUND",
+          "reason": "Item was damaged during shipping",
+          "refund_amount": {
+            "amount": "39.33",
+            "currency": "USD"
+          },
+          "currency": "USD",
+          "status": "PROCESSING",
+          "create_time": 1789005692,
+          "finish_time": 0,
+          "return_qty": 1,
+          "has_returned": false
+        }
+      ],
+      "total_count": 2,
+      "next_page_token": "",
+      "has_more": false
+    }
+  }
+]

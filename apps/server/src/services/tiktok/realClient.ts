@@ -18,6 +18,7 @@
 import crypto from 'node:crypto';
 import { config } from '../../config.js';
 import { AppError } from '../../core/http.js';
+import { maskError } from '../../core/redact.js';
 import type { TikTokApiMode, ProductPage, ShopCredential, SyncWindow, TikTokShopClient } from './client.js';
 import type {
   PlatformAffiliateOrder,
@@ -28,9 +29,8 @@ import type {
 } from './types.js';
 import { utcToUnix } from './types.js';
 
-const HTTP_TIMEOUT_MS = 15_000;
-const MAX_PAGES = 50;
-const MAX_RETRY = 2;
+const HTTP_RETRY_BACKOFF_MS = 500;
+const HTTP_RETRY_BACKOFF_CAP_MS = 5_000;
 
 const ORDER_SEARCH_PATH = '/order/202309/orders/search';
 const PRODUCT_SEARCH_PATH = '/product/202309/products/search';
@@ -114,17 +114,44 @@ function pageList<T>(data: PlatformEnvelope<unknown>['data'], key: string): T[] 
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * 出站调用的最小面：只用 status / headers.get / text()。
+ * 注入点存在的原因是「录制的平台报文要能离线复现」——
+ * 真实店铺联调被授权挡着，但报文形态对不对必须天天在 CI 里对拍（tests/real-mode.spec.ts +
+ * docs/tiktok-real-mode-mapping.md）。测试传自己的 transport，生产默认 globalThis.fetch，行为不变。
+ * 注意：transport 收到的 url 含 app_key 与 sign，桩实现不要把 url 原样回存到断言对象里。
+ */
+export interface RawResponse {
+  status: number;
+  headers: { get: (name: string) => string | null };
+  text: () => Promise<string>;
+}
+
+export interface TransportInit {
+  method: string;
+  headers: Record<string, string>;
+  body?: string;
+  signal?: AbortSignal;
+}
+
+export type Transport = (url: string, init: TransportInit) => Promise<RawResponse>;
+
+const httpTransport: Transport = (url, init) => fetch(url, init);
+
 export class RealTikTokShopClient implements TikTokShopClient {
   readonly mode: TikTokApiMode = 'real';
 
   private readonly baseUrl: string;
 
-  constructor(baseUrl: string = config.tiktokBaseUrl) {
+  private readonly transport: Transport;
+
+  constructor(baseUrl: string = config.tiktokBaseUrl, fetchImpl: Transport = httpTransport) {
     this.baseUrl = baseUrl.replace(/\/+$/, '');
+    this.transport = fetchImpl;
   }
 
   /**
-   * 一次签名请求。网络异常 / 非 2xx / 平台 code≠0 都抛错；429、5xx、平台繁忙最多重试 2 次。
+   * 一次签名请求。网络异常 / 非 2xx / 平台 code≠0 都抛错；429、5xx、平台繁忙最多重试 config.tiktokMaxRetry 次。
    * opts.body 只序列化一次，签名与发包共用同一串字节。
    */
   private async request<T>(
@@ -138,10 +165,11 @@ export class RealTikTokShopClient implements TikTokShopClient {
     if (!shop.accessToken) {
       throw new AppError(400, `店铺「${shop.shopName}」未授权 access token，请在店铺页重新授权`, 40020);
     }
+    const maxRetry = config.tiktokMaxRetry;
     const rawBody = opts.body === undefined ? '' : JSON.stringify(opts.body);
     let lastErr: TikTokApiError | undefined;
 
-    for (let attempt = 0; attempt <= MAX_RETRY; attempt++) {
+    for (let attempt = 0; attempt <= maxRetry; attempt++) {
       // timestamp 每次重试都要重新取，避免重试耗时导致令牌时间戳过期
       const params: Record<string, QueryValue> = {
         ...opts.query,
@@ -155,27 +183,29 @@ export class RealTikTokShopClient implements TikTokShopClient {
       let status = 0;
       let raw = '';
       try {
-        const res = await fetch(url, {
+        const res = await this.transport(url, {
           method: opts.method,
           headers: {
             'x-tts-access-token': shop.accessToken,
             ...(rawBody ? { 'content-type': 'application/json; charset=utf-8' } : {}),
           },
           ...(rawBody ? { body: rawBody } : {}),
-          signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+          signal: AbortSignal.timeout(config.tiktokTimeoutMs),
         });
         status = res.status;
         raw = await res.text();
         const retryAfter = Number(res.headers.get('retry-after'));
-        if ((status === 429 || status >= 500) && attempt < MAX_RETRY) {
-          await sleep(Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter * 1000, 5000) : 500 * (attempt + 1));
+        if ((status === 429 || status >= 500) && attempt < maxRetry) {
+          await sleep(Number.isFinite(retryAfter) && retryAfter > 0
+            ? Math.min(retryAfter * 1000, HTTP_RETRY_BACKOFF_CAP_MS)
+            : HTTP_RETRY_BACKOFF_MS * (attempt + 1));
           continue;
         }
       } catch (e) {
         const reason = e instanceof Error ? (e.name === 'TimeoutError' ? '请求超时' : e.message) : String(e);
         lastErr = new TikTokApiError(path, 0, this.safe(shop, `网络异常（${reason}）`));
-        if (attempt < MAX_RETRY) {
-          await sleep(500 * (attempt + 1));
+        if (attempt < maxRetry) {
+          await sleep(HTTP_RETRY_BACKOFF_MS * (attempt + 1));
           continue;
         }
         throw lastErr;
@@ -191,8 +221,8 @@ export class RealTikTokShopClient implements TikTokShopClient {
       if (failed) {
         const why = describeFailure(body?.code, body?.message, status);
         lastErr = new TikTokApiError(path, status, this.safe(shop, why), body?.request_id ?? '');
-        if (isRetryable(status, body?.code, body?.message) && attempt < MAX_RETRY) {
-          await sleep(500 * (attempt + 1));
+        if (isRetryable(status, body?.code, body?.message) && attempt < maxRetry) {
+          await sleep(HTTP_RETRY_BACKOFF_MS * (attempt + 1));
           continue;
         }
         throw lastErr;
@@ -202,19 +232,21 @@ export class RealTikTokShopClient implements TikTokShopClient {
     throw lastErr ?? new TikTokApiError(path, 0, '重试次数用尽');
   }
 
-  /** 兜底脱敏：即便平台把入参回显在 message 里，也不会把凭证带进日志 */
+  /** 兜底脱敏：即便平台把入参回显在 message 里，也不会把凭证带进日志。
+   *  先整串替换本店铺已知凭证，再走 core/redact.ts 的通用口径（credential=值 / 32 位以上长串），
+   *  免得「平台回显了我们没存过的那一份 token」从错误文案里漏出去。 */
   private safe(shop: ShopCredential, text: string): string {
     let out = text;
     for (const secret of [shop.appSecret, shop.appKey, shop.accessToken, shop.shopCipher]) {
       if (secret && secret.length > 3) out = out.split(secret).join('***');
     }
-    return out.replace(/sign=[^&\s]+/gi, 'sign=***').slice(0, 300);
+    return maskError(out);
   }
 
   async getOrders(shop: ShopCredential, window: SyncWindow): Promise<PlatformOrder[]> {
     const out: PlatformOrder[] = [];
     let cursor: string | undefined;
-    for (let page = 0; page < MAX_PAGES; page++) {
+    for (let page = 0; page < config.tiktokMaxPages; page++) {
       const body = await this.request<PlatformEnvelope<PlatformOrder>>(shop, ORDER_SEARCH_PATH, {
         method: 'POST',
         query: { page_size: Math.min(100, window.limit ?? 100), page_token: cursor },
@@ -240,7 +272,7 @@ export class RealTikTokShopClient implements TikTokShopClient {
   async getReturns(shop: ShopCredential, window: SyncWindow): Promise<PlatformReturn[]> {
     const out: PlatformReturn[] = [];
     let cursor: string | undefined;
-    for (let page = 0; page < MAX_PAGES; page++) {
+    for (let page = 0; page < config.tiktokMaxPages; page++) {
       const body = await this.request<PlatformEnvelope<PlatformReturn>>(shop, RETURN_SEARCH_PATH, {
         method: 'POST',
         query: { page_size: 50, page_token: cursor },

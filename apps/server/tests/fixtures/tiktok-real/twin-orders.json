@@ -1,0 +1,282 @@
+[
+  {
+    "code": 0,
+    "message": "success",
+    "request_id": "recorded-offline-0001",
+    "data": {
+      "orders": [
+        {
+          "order_id": "574110000001000",
+          "status": "TO_BE_SHIPPED",
+          "order_type": "NORMAL",
+          "create_time": 1789023478,
+          "payment_time": 1789023478,
+          "ship_time": 0,
+          "currency": "USD",
+          "products_amount": {
+            "amount": "268.90",
+            "currency": "USD"
+          },
+          "seller_discount": {
+            "amount": "13.45",
+            "currency": "USD"
+          },
+          "platform_discount": {
+            "amount": "0.00",
+            "currency": "USD"
+          },
+          "discount_amount": {
+            "amount": "13.45",
+            "currency": "USD"
+          },
+          "shipping_fee": {
+            "amount": "0.00",
+            "currency": "USD"
+          },
+          "total_amount": {
+            "amount": "255.45",
+            "currency": "USD"
+          },
+          "fulfillment_type": "FULFILLMENT_BY_PLATFORM",
+          "buyer_user_info": {
+            "country": "US"
+          },
+          "is_sample_order": false,
+          "items": [
+            {
+              "id": "57411000000100000",
+              "sku_id": "2288710001",
+              "product_id": "2288700001",
+              "seller_sku": "ORICO-66059-01",
+              "product_name": "对拍商品一",
+              "sku_name": "SKU-1",
+              "price": {
+                "amount": "45.90",
+                "currency": "USD"
+              },
+              "quantity": 2,
+              "seller_discount": {
+                "amount": "4.59",
+                "currency": "USD"
+              },
+              "currency": "USD"
+            },
+            {
+              "id": "57411000000100001",
+              "sku_id": "2288710002",
+              "product_id": "2288700002",
+              "seller_sku": "ORICO-66059-02",
+              "product_name": "对拍商品二",
+              "sku_name": "SKU-2",
+              "price": {
+                "amount": "88.55",
+                "currency": "USD"
+              },
+              "quantity": 2,
+              "seller_discount": {
+                "amount": "8.86",
+                "currency": "USD"
+              },
+              "currency": "USD"
+            }
+          ]
+        },
+        {
+          "order_id": "574110000001001",
+          "status": "TO_BE_SHIPPED",
+          "order_type": "NORMAL",
+          "create_time": 1789023958,
+          "payment_time": 1789023958,
+          "ship_time": 0,
+          "currency": "USD",
+          "products_amount": {
+            "amount": "103.50",
+            "currency": "USD"
+          },
+          "seller_discount": {
+            "amount": "5.18",
+            "currency": "USD"
+          },
+          "platform_discount": {
+            "amount": "0.00",
+            "currency": "USD"
+          },
+          "discount_amount": {
+            "amount": "5.18",
+            "currency": "USD"
+          },
+          "shipping_fee": {
+            "amount": "0.00",
+            "currency": "USD"
+          },
+          "total_amount": {
+            "amount": "98.32",
+            "currency": "USD"
+          },
+          "fulfillment_type": "FULFILLMENT_BY_SELLER",
+          "buyer_user_info": {
+            "country": "US"
+          },
+          "is_sample_order": false,
+          "items": [
+            {
+              "id": "57411000000100100",
+              "sku_id": "99995000001",
+              "product_id": "88885000001",
+              "seller_sku": "NEW-ITEM-NOT-IN-MASTER",
+              "product_name": "平台新建商品（本地未建档）",
+              "sku_name": "SKU-1",
+              "price": {
+                "amount": "51.75",
+                "currency": "USD"
+              },
+              "quantity": 2,
+              "seller_discount": {
+                "amount": "5.18",
+                "currency": "USD"
+              },
+              "currency": "USD"
+            }
+          ]
+        }
+      ],
+      "total_count": 4,
+      "next_page_token": "PAGE-TOKEN-2",
+      "has_more": true
+    }
+  },
+  {
+    "code": 0,
+    "message": "success",
+    "request_id": "recorded-offline-0001",
+    "data": {
+      "orders": [
+        {
+          "order_id": "574110000001002",
+          "status": "TO_BE_SHIPPED",
+          "order_type": "NORMAL",
+          "create_time": 1789018738,
+          "payment_time": 1789018738,
+          "ship_time": 0,
+          "currency": "USD",
+          "products_amount": {
+            "amount": "49.90",
+            "currency": "USD"
+          },
+          "seller_discount": {
+            "amount": "2.50",
+            "currency": "USD"
+          },
+          "platform_discount": {
+            "amount": "0.00",
+            "currency": "USD"
+          },
+          "discount_amount": {
+            "amount": "2.50",
+            "currency": "USD"
+          },
+          "shipping_fee": {
+            "amount": "2.00",
+            "currency": "USD"
+          },
+          "total_amount": {
+            "amount": "49.40",
+            "currency": "USD"
+          },
+          "fulfillment_type": "FULFILLMENT_BY_PLATFORM",
+          "buyer_user_info": {
+            "country": "US"
+          },
+          "is_sample_order": false,
+          "items": [
+            {
+              "id": "57411000000100200",
+              "sku_id": "574110900000",
+              "product_id": "574110900007",
+              "seller_sku": "WRONG_SELLER_SKU_9999",
+              "product_name": "错填卖家 SKU 的平台商品（待人工映射）",
+              "sku_name": "SKU-1",
+              "price": {
+                "amount": "49.90",
+                "currency": "USD"
+              },
+              "quantity": 1,
+              "seller_discount": {
+                "amount": "2.50",
+                "currency": "USD"
+              },
+              "currency": "USD"
+            }
+          ]
+        },
+        {
+          "order_id": "574110000001003",
+          "status": "COMPLETED",
+          "order_type": "SAMPLE_ORDER",
+          "create_time": 1789034985,
+          "payment_time": 1789034985,
+          "ship_time": 1789034985,
+          "currency": "USD",
+          "products_amount": {
+            "amount": "45.90",
+            "currency": "USD"
+          },
+          "seller_discount": {
+            "amount": "2.30",
+            "currency": "USD"
+          },
+          "platform_discount": {
+            "amount": "0.00",
+            "currency": "USD"
+          },
+          "discount_amount": {
+            "amount": "2.30",
+            "currency": "USD"
+          },
+          "shipping_fee": {
+            "amount": "0.00",
+            "currency": "USD"
+          },
+          "total_amount": {
+            "amount": "43.60",
+            "currency": "USD"
+          },
+          "fulfillment_type": "FULFILLMENT_BY_SELLER",
+          "buyer_user_info": {
+            "country": "US"
+          },
+          "is_sample_order": true,
+          "tracking_info": {
+            "tracking_no": "SAMPLE520260910120000",
+            "courier_name": {
+              "name": "J&T Express"
+            }
+          },
+          "items": [
+            {
+              "id": "57411000000100300",
+              "sku_id": "2288710001",
+              "product_id": "2288700001",
+              "seller_sku": "ORICO-66059-01",
+              "product_name": "对拍商品一",
+              "sku_name": "SKU-1",
+              "price": {
+                "amount": "45.90",
+                "currency": "USD"
+              },
+              "quantity": 1,
+              "seller_discount": {
+                "amount": "2.30",
+                "currency": "USD"
+              },
+              "currency": "USD"
+            }
+          ]
+        }
+      ],
+      "total_count": 4,
+      "next_page_token": "",
+      "has_more": false
+    }
+  }
+]

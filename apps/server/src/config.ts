@@ -78,6 +78,13 @@ export const config = {
   /** mock = 不访问外网，用本地样例数据源；real = 走 TikTok Shop 开放平台 */
   tiktokMode: (process.env.TIKTOK_API_MODE ?? 'mock') as 'mock' | 'real',
   tiktokBaseUrl: process.env.TIKTOK_API_BASE ?? 'https://open-api.tiktokglobalshop.com',
+  /* ---- real 模式外呼的三个上限：联调时按平台当期限流文档调，不许散回客户端里写死 ---- */
+  /** 单个同步任务最多翻几页（游标不收敛时的闸门，正常店铺一页就能取完） */
+  tiktokMaxPages: num('TT_MAX_PAGES', 50),
+  /** 可重试错误（429/5xx/平台繁忙）的最多重试次数 */
+  tiktokMaxRetry: num('TT_MAX_RETRY', 2),
+  /** 单次 HTTP 超时 */
+  tiktokTimeoutMs: num('TT_HTTP_TIMEOUT_MS', 15_000),
   adsBaseUrl: process.env.adsApiBase ?? 'https://business-api.tiktok.com',
   alertWebhook: process.env.ALERT_WEBHOOK ?? '',
   sampleContentDueDays: Number(process.env.SAMPLE_DUE_DAYS ?? 7),
@@ -96,6 +103,8 @@ export const config = {
   jobTimezone: process.env.JOB_TZ ?? 'UTC',
   /** 同步导出行数上限（PRD B8：一期只做同步导出，超了明确拒绝让人缩小范围） */
   exportMaxRows: num('EXPORT_MAX_ROWS', 20000),
+  /** 单条记录的变更历史一次最多回几条：既是缺省值也是硬上限（历史是排查用的，不是拿来做全量导出的） */
+  oplogHistoryMaxRows: num('OPLOG_HISTORY_MAX_ROWS', 50),
   enableScheduler: process.env.ENABLE_SCHEDULER !== 'false',
   /**
    * 反向代理层数（nginx 等）。不设时 req.ip 就是代理自己的地址，

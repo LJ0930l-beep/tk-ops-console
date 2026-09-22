@@ -478,11 +478,15 @@ financeRouter.get(
       `SELECT ${SETTLE_SELECT} FROM ${SETTLE_FROM}${q.whereSql} ORDER BY ${SETTLE_ORDER}`,
       ...q.params,
     );
+    // 结算流水按范围过滤了，订单侧原来没过滤：知道平台单号就能读到别人店的金额与状态。
+    // 越权时按「不存在」处理（order: null），不暴露这单是否存在。
+    const orderScope = shopScope(current(req), 'o.shop_id');
     const order = get<Record<string, unknown>>(
       `SELECT o.id, o.tk_order_id, o.order_status, o.total_paid, o.currency, o.order_time, o.is_sample_order, o.shop_id, s.shop_name
          FROM tk_order o LEFT JOIN tk_shop s ON s.id = o.shop_id
-        WHERE o.is_deleted = 0 AND o.tk_order_id = ? ORDER BY o.id ASC LIMIT 1`,
+        WHERE o.is_deleted = 0 AND o.tk_order_id = ? ${orderScope.sql} ORDER BY o.id ASC LIMIT 1`,
       no,
+      ...orderScope.params,
     );
     ok(res, { tk_order_id: no, list, total: list.length, summary: settlementSummary(q), order: order ?? null });
   }),
@@ -676,6 +680,7 @@ financeRouter.post(
       status: input.status ?? 1,
     };
     requirePayeeForPaid(body, '登记为已付款');
+    assertExpenseShop(user, body.shop_id);
     const fx = expenseCny(body);
     const id = insert('expense', { ...body, shop_id: body.shop_id ?? null, amount_cny: fx.amount_cny, created_by: user.id } as never);
     writeOpLog({ user_id: user.id, module: '财务中心', action: 'create', target_table: 'expense', target_id: id, after: { ...body, ...fx }, ip: req.ip });
@@ -691,6 +696,20 @@ function inExpenseScope(user: CurrentUser, shopId: number | null | undefined): b
   return !!get<{ id: number }>(`SELECT id FROM tk_shop WHERE id = ? ${scope.sql}`, shopId, ...scope.params);
 }
 
+/**
+ * 费用「归属」的写入校验（读侧是 inExpenseScope，两条必须同构，否则会出现「看不见但改得动」）。
+ *  - 挂到某店铺：该店铺必须在操作者数据范围内 —— 否则等于把成本塞进别人店的利润；
+ *  - 不挂店铺（公共费用）：会按 GMV 摊到所有店铺，只有全数据范围角色能新建或改成公共费用。
+ */
+function assertExpenseShop(user: CurrentUser, shopId: number | null | undefined): void {
+  const id = Number(shopId ?? 0);
+  if (id > 0) {
+    if (!canAccessShop(user, id)) throw forbidden(`店铺 ${id} 不在你的数据范围内，费用不能挂到这家店`);
+    return;
+  }
+  if (shopScope(user, 'id').sql) throw forbidden('公共费用会摊到所有店铺，只有全数据范围角色能登记或改成公共费用');
+}
+
 financeRouter.put(
   '/expense/:id',
   requireMenu('finance'),
@@ -702,6 +721,8 @@ financeRouter.put(
     const body = parseBody(expenseBody.partial(), req.body);
     const merged = { ...before, ...body } as z.infer<typeof expenseBody>;
     requirePayeeForPaid(merged, '标记为已付款');
+    // 只守原行不够：改归属时目标店铺同样要在范围内（原行已由 inExpenseScope 把关）
+    assertExpenseShop(user, merged.shop_id);
     const fx = expenseCny(merged);
     update('expense', id, { ...(body as Record<string, never>), amount_cny: fx.amount_cny } as never);
     // PRD §3.8：改 amount / amount_cny / shop_id 必须留痕（钱和归属店铺是费用的两条命门）

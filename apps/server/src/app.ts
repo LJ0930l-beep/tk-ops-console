@@ -1,4 +1,6 @@
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import cors from 'cors';
 import { AppError } from './core/http.js';
 import { authenticate } from './core/auth.js';
@@ -66,6 +68,25 @@ export function createApp(opts: AppOptions = {}): Express {
   app.use('/api', api);
 
   app.use('/api', (_req, res) => res.status(404).json({ code: 40400, message: '接口不存在', data: null }));
+
+  /**
+   * 单端口部署：前端产物存在就顺带托管（同源，不必再摆一个 nginx）。
+   * 位置有意在 /api 的 404 之后：接口路径永远优先，不会被 SPA 兜底吞掉。
+   * 开发模式（vite :5173 代理 /api）不需要这里，产物没构建时这段直接不注册。
+   */
+  if (config.serveWeb && existsSync(config.webDist)) {
+    // 产物文件名带 content hash，可以放手长缓存；index.html 不行，否则改版后用户卡在旧入口
+    app.use('/assets', express.static(path.join(config.webDist, 'assets'), { maxAge: '7d', immutable: true }));
+    app.use(express.static(config.webDist, { index: 'index.html' }));
+    app.get(/^(?!\/api\/).*/, (_req, res, next) => {
+      // 带扩展名的路径要老老实实 404：把 index.html 当缺失的图片/脚本发回去，
+      // 前端只会拿到一坨 HTML 并报出看不懂的重载错误
+      if (_req.path.includes('.')) return next();
+      const index = path.join(config.webDist, 'index.html');
+      if (!existsSync(index)) return next();
+      res.sendFile(index);
+    });
+  }
 
   app.use(errorHandler);
 

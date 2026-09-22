@@ -71,6 +71,12 @@ export const config = {
   credKey: isProd ? required('CRED_ENC_KEY', process.env.CRED_ENC_KEY, 32) : process.env.CRED_ENC_KEY || process.env.JWT_SECRET || devSecret,
   jwtTtlSeconds: Number(process.env.JWT_TTL ?? 60 * 60 * 8),
   dbFile: process.env.DB_FILE ?? path.resolve(here, '../../data/tk_ops.db'),
+  /**
+   * 单端口部署：前端产物存在就由后端顺带托管（同源，不需要 nginx）。
+   * 开发模式各自跑各自的（vite 代理 /api），这里默认不影响它。
+   */
+  serveWeb: process.env.SERVE_WEB !== 'false',
+  webDist: process.env.WEB_DIST ?? path.resolve(here, '../../web/dist'),
   /** 空库启动时是否自动灌入演示账号与数据；生产默认关闭 */
   seedDemo: (process.env.SEED_DEMO ?? (isProd ? 'false' : 'true')) !== 'false',
   /** 演示账号统一初始密码，可用环境变量覆盖以避开公开的固定口令 */

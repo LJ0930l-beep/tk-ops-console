@@ -83,6 +83,12 @@ export const config = {
   sampleContentDueDays: Number(process.env.SAMPLE_DUE_DAYS ?? 7),
   protectDefaultDays: Number(process.env.CREATOR_PROTECT_DAYS ?? 30),
   syncOverlapMinutes: Number(process.env.SYNC_OVERLAP_MIN ?? 5),
+  /* ---- 后台任务队列（表即队列，见 services/jobs/queue.ts）---- */
+  jobMaxAttempts: num('JOB_MAX_ATTEMPTS', 3),
+  jobRetryBackoffSeconds: num('JOB_RETRY_BACKOFF_SEC', 120),
+  jobBatchSize: num('JOB_BATCH_SIZE', 5),
+  /** 在跑但超过这个时长没结束的任务，视为进程被 kill，退回队列 */
+  jobStaleMinutes: num('JOB_STALE_MIN', 30),
   /**
    * 定时任务的调度时区（node-cron 不设时区时用服务器本地时区 —— 换台机器同一句表达式就换触发时刻）。
    * 数据统一存 UTC、报表按店铺时区切日，所以默认给 UTC，要改成站点时区用 JOB_TZ。

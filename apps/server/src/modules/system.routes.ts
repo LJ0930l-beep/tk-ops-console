@@ -2,11 +2,13 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { MENU_KEYS, type CurrentUser, type MenuKey } from '@tk/shared';
 import { all, get, insert, run, softDelete, tx, update } from '../core/db.js';
-import { badRequest, forbidden, notFound, ok, parseBody, wrap } from '../core/http.js';
+import { badRequest, forbidden, notFound, ok, parseBody, qv, wrap } from '../core/http.js';
 import { Q, queryList, queryPage } from '../core/query.js';
 import { hashPassword, requireMenu, shopScope, type AuthedRequest } from '../core/auth.js';
 import { maskError } from '../core/redact.js';
 import { writeOpLog } from '../core/oplog.js';
+import { config } from '../config.js';
+import { drainJobs, enqueueJob, getJob, listJobs, requeueStaleJobs } from '../services/jobs/queue.js';
 
 const current = (req: object): CurrentUser => (req as AuthedRequest).user;
 
@@ -365,3 +367,66 @@ systemRouter.get('/menus', wrap((req, res) => {
   const u = current(req);
   ok(res, { menus: MENU_KEYS, perms: u.menu_perms, can_see_cost: u.can_see_cost, can_export: u.can_export, can_see_contact: u.can_see_contact, data_scope: u.data_scope, shop_ids: u.shop_ids });
 }));
+
+/* ==================== 后台任务队列（表即队列，选项 7） ==================== */
+/**
+ * 重活（一键全量补跑、宽表重建、规则评估）以前是「HTTP 请求里同步跑完」：
+ * 请求一直挂着，浏览器超时、代理断连、进程重启就丢一次执行，且没有任何状态可查。
+ * 现在提供入队 / 查状态 / 手动催一轮三个接口，菜单一律 system。
+ */
+export const jobRouter = Router();
+
+const jobBody = z.object({
+  job_type: z.enum(['sync_run', 'analytics_rebuild', 'rules_evaluate']),
+  payload: z.record(z.unknown()).default({}),
+  run_after: z.string().regex(/^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}:\d{2})?$/, 'run_after 需用 YYYY-MM-DD HH:MM:SS').optional(),
+});
+
+const parseJson = (v: unknown): unknown => {
+  if (v === null || v === undefined || v === '') return null;
+  try {
+    return JSON.parse(String(v));
+  } catch {
+    return null;
+  }
+};
+
+const jobView = (row: Record<string, unknown> | null) =>
+  row && {
+    ...row,
+    payload: parseJson(row.payload_json),
+    result: parseJson(row.result_json),
+    // 任务失败原因可能带上游报错，出口前一律脱敏
+    error_msg: row.error_msg ? maskError(String(row.error_msg)) : null,
+  };
+
+jobRouter.get('/', requireMenu('system'), wrap((req, res) => {
+  const status = qv(req, 'status');
+  ok(res, listJobs(status === '' ? null : Number(status)).map((r) => jobView(r as unknown as Record<string, unknown>)));
+}));
+
+jobRouter.get('/:id', requireMenu('system'), wrap((req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) throw badRequest('任务 ID 不合法');
+  const row = getJob(id);
+  if (!row) throw notFound('任务不存在');
+  ok(res, jobView(row as unknown as Record<string, unknown>));
+}));
+
+jobRouter.post('/', requireMenu('system'), wrap((req, res) => {
+  const user = current(req);
+  const body = parseBody(jobBody, req.body ?? {});
+  const payload = { ...(body.payload as Record<string, unknown>), user_id: user.id };
+  const id = enqueueJob(body.job_type, payload, { createdBy: user.id, runAfter: body.run_after });
+  writeOpLog({ user_id: user.id, module: '系统设置', action: 'create', target_table: 'job_queue', target_id: id, after: { job_type: body.job_type, payload }, ip: req.ip });
+  ok(res, { id, status: 0 }, `任务 #${id} 已入队`);
+}));
+
+/** 手动催一轮：把到点的任务跑掉（生产由调度器每分钟一次，这里给运维与测试用） */
+jobRouter.post('/drain', requireMenu('system'), wrap(async (req, res) => {
+  const user = current(req);
+  const stale = requeueStaleJobs();
+  const out = await drainJobs(config.jobBatchSize, `http#${user.id}`);
+  ok(res, { requeued_stale: stale, ...out });
+}));
+systemRouter.use('/jobs', jobRouter);

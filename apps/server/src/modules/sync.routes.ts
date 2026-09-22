@@ -16,6 +16,8 @@ import { badRequest, notFound, ok, parseBody, qv, wrap } from '../core/http.js';
 import { Q, queryPage } from '../core/query.js';
 import { requireMenu, shopScope, type AuthedRequest } from '../core/auth.js';
 import { writeOpLog } from '../core/oplog.js';
+import { enqueueJob } from '../services/jobs/queue.js';
+import '../jobs/jobHandlers.js'; // 副作用：注册 sync_run / analytics_rebuild / rules_evaluate
 import {
   activeShopIds,
   importOrdersForShop,
@@ -73,6 +75,8 @@ const runBody = z
     shop_id: z.number().int().positive().optional(),
     window_start: z.string().regex(/^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}:\d{2})?$/, 'window_start 需用 UTC 格式 YYYY-MM-DD HH:MM:SS').optional(),
     window_end: z.string().regex(/^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}:\d{2})?$/, 'window_end 需用 UTC 格式 YYYY-MM-DD HH:MM:SS').optional(),
+    /** true = 只入队，立刻返回 job_id，由调度器/队列心跳去跑（一键全量补跑以前是把 HTTP 挂到超时） */
+    async: z.boolean().optional(),
   })
   .strict();
 
@@ -148,6 +152,42 @@ syncRouter.post(
     const user = (req as AuthedRequest).user;
     const body = parseBody(runBody, req.body);
     const opts = { windowStart: body.window_start, windowEnd: body.window_end, user_id: user.id };
+    if (body.async) {
+      // 异步入队：先把「哪些店要跑」按同步路径同样的规则算清楚再入队，
+      // 否则队列里跑的就是越权范围（接口层已经算过一次范围，不能交给后台再猜）。
+      let targets: number[];
+      if (body.shop_id) {
+        assertShopVisible(req, body.shop_id);
+        if (body.task_type !== 'aggregate' && !activeShopIds().includes(body.shop_id)) {
+          throw badRequest('该店铺未处于「运营中 + 已授权」状态，请先在店铺管理完成授权');
+        }
+        targets = [body.shop_id];
+      } else if (body.task_type === 'aggregate') {
+        targets = user.data_scope === DATA_SCOPE.ALL ? [] : visibleShopIds(req);
+      } else {
+        targets = scopedShopIds(req).filter((id) => activeShopIds().includes(id));
+      }
+      if (!targets.length && body.task_type !== 'aggregate') throw badRequest('范围内没有可同步的店铺（需运营中且已授权）');
+      const jobId = enqueueJob('sync_run', {
+        task_type: body.task_type,
+        shop_ids: targets,
+        window_start: body.window_start ?? null,
+        window_end: body.window_end ?? null,
+        mode: config.tiktokMode,
+        user_id: user.id, // 后台跑也要知道是谁触发的，sync_log.operator 不能变成 null
+      }, { createdBy: user.id });
+      writeOpLog({
+        user_id: user.id,
+        module: MODULE,
+        action: 'create',
+        target_table: 'job_queue',
+        target_id: jobId,
+        after: { task_type: body.task_type, shop_ids: targets, window_start: body.window_start ?? null, window_end: body.window_end ?? null, mode: config.tiktokMode, async: true },
+        ip: req.ip,
+      });
+      ok(res, { queued: true, job_id: jobId, task_type: body.task_type, shop_ids: targets }, `任务 #${jobId} 已入队，可在系统设置 → 后台任务里看进度`);
+      return;
+    }
     let results: SyncResult[];
     let targets: number[];
     if (body.shop_id) {

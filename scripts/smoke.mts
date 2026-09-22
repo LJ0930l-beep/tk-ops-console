@@ -208,6 +208,17 @@ const syncAll = (await step('同步一键补跑', 'POST', '/api/sync/run', { tas
 chain.push(`  summary ${JSON.stringify(syncAll?.summary ?? {})}`);
 const agg = (await step('宽表重建（派生汇总）', 'POST', '/api/sync/run', { task_type: 'aggregate' })) as { inserted?: number; updated?: number };
 chain.push(`  aggregate ${JSON.stringify(agg ?? {})}`);
+// 异步链路：入队 → 催一轮 → 回查状态。少了这一段，队列只有单测覆盖，真实 HTTP 上没人证明它能跑完。
+const qJob = (await step('异步排队同步（async:true）', 'POST', '/api/sync/run', { task_type: 'aggregate', async: true })) as { job_id?: number; shop_ids?: number[] };
+const jobId = Number(qJob?.job_id ?? 0);
+chain.push(`  入队 job #${jobId}（${qJob?.shop_ids?.length ?? '?'} 家店，接口立刻返回不等执行）`);
+const drained = (await step('队列催一轮', 'POST', '/api/system/jobs/drain', {})) as { claimed?: number; done?: number; failed?: number };
+chain.push(`  drain claimed=${drained?.claimed} done=${drained?.done} failed=${drained?.failed}`);
+if (jobId) {
+  const j = (await step('回查后台任务', 'GET', `/api/system/jobs/${jobId}`)) as { status?: number; job_type?: string; result?: unknown };
+  chain.push(`  job #${jobId} ${j?.job_type} status=${j?.status}（0 待跑 / 1 在跑 / 2 成功 / 3 失败）`);
+  if (Number(j?.status) !== 2) fails.push({ route: `GET /api/system/jobs/${jobId}`, role: 'chain', status: 200, note: `异步同步没跑成功（status=${j?.status}）` });
+}
 const evalOut = (await step('规则评估', 'POST', '/api/actions/evaluate?end=' + day(0))) as Record<string, unknown>;
 chain.push(`  evaluate ${JSON.stringify(evalOut ?? {})}`);
 const today = (await step('今日行动中心', 'GET', '/api/actions/today')) as { p0?: unknown[]; p1?: unknown[]; p2?: unknown[]; mine?: unknown[] };

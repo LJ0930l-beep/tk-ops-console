@@ -66,6 +66,9 @@
           <el-form-item>
             <el-button type="primary" :icon="VideoPlay" @click="openRun()">立即重跑</el-button>
           </el-form-item>
+          <el-form-item>
+            <el-button :icon="Tickets" @click="openJobs">后台任务</el-button>
+          </el-form-item>
         </el-form>
       </template>
 
@@ -95,11 +98,56 @@
         <el-form-item label="窗口结束">
           <el-date-picker v-model="runForm.window_end" type="datetime" value-format="YYYY-MM-DD HH:mm:ss" style="width: 100%" />
         </el-form-item>
+        <el-form-item label="执行方式">
+          <el-switch v-model="runForm.async" active-text="后台排队" inactive-text="等待跑完" />
+          <div class="tip" style="margin-left: 0">
+            后台排队会立刻返回任务号，由调度器执行（一键全量补跑、大批量重跑建议选这个，不会把页面挂在请求上）。
+          </div>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="runVisible = false">取消</el-button>
-        <el-button type="primary" :loading="running" @click="doRun">开始同步</el-button>
+        <el-button type="primary" :loading="running" @click="doRun">{{ runForm.async ? '加入队列' : '开始同步' }}</el-button>
       </template>
+    </el-dialog>
+
+    <el-dialog v-model="jobsVisible" title="后台任务队列" width="900px">
+      <el-alert type="info" :closable="false" show-icon style="margin-bottom: 12px">
+        <template #default>调度器每分钟自动领取一次；失败按 <code>max_attempts</code> 退避重试，重试耗尽才记为失败。进程被 kill 卡在「在跑」的任务会被心跳退回队列。</template>
+      </el-alert>
+      <div class="jobs-head">
+        <el-select v-model="jobStatus" clearable placeholder="全部状态" style="width: 160px" @change="loadJobs">
+          <el-option v-for="o in JOB_STATUS_OPTIONS" :key="String(o.value)" :label="o.label" :value="Number(o.value)" />
+        </el-select>
+        <div>
+          <el-button :icon="Refresh" :loading="jobsLoading" @click="loadJobs">刷新</el-button>
+          <el-button type="primary" :loading="draining" @click="drainNow">立即催一轮</el-button>
+        </div>
+      </div>
+      <el-table v-loading="jobsLoading" :data="jobs" size="small" max-height="420" empty-text="队列是空的：同步/宽表刷新跑过一次就会留在这里">
+        <el-table-column prop="id" label="#" width="60" />
+        <el-table-column prop="job_type" label="任务类型" width="150" />
+        <el-table-column label="状态" width="90">
+          <template #default="{ row }">
+            <el-tag size="small" :type="jobStatusTag(row.status)">{{ jobStatusLabel(row.status) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="重试" width="80">
+          <template #default="{ row }">{{ row.attempts }}/{{ row.max_attempts }}</template>
+        </el-table-column>
+        <el-table-column prop="worker" label="worker" width="110" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.worker || '—' }}</template>
+        </el-table-column>
+        <el-table-column label="开始 / 结束" width="180">
+          <template #default="{ row }">{{ fmtDateTime(row.started_at) }}<br />{{ fmtDateTime(row.finished_at) }}</template>
+        </el-table-column>
+        <el-table-column label="说明" min-width="220">
+          <template #default="{ row }">
+            <span v-if="row.error_msg" class="bad">{{ sanitize(row.error_msg) }}</span>
+            <span v-else class="tip">{{ jobNote(row) }}</span>
+          </template>
+        </el-table-column>
+      </el-table>
     </el-dialog>
   </div>
 </template>
@@ -107,10 +155,11 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue';
 import { ElMessage } from 'element-plus';
-import { Refresh, RefreshLeft, VideoPlay } from '@element-plus/icons-vue';
+import { Refresh, RefreshLeft, Tickets, VideoPlay } from '@element-plus/icons-vue';
 import { apiGet, apiPost, errMsg, type Paged } from '@/api/client';
 import { useDictStore } from '@/stores/dict';
 import ResourcePage, { type ColumnDef, type OptionDef, type SearchDef } from '@/components/ResourcePage.vue';
+import type { RowLike } from '@/types/row';
 
 const dict = useDictStore();
 const rp = ref();
@@ -251,7 +300,10 @@ function rowClass({ row }: { row: Record<string, unknown> }): string {
 /* ---------- 立即重跑 ---------- */
 const runVisible = ref(false);
 const running = ref(false);
-const runForm = reactive<{ task_type: string; shop_id?: number; window_start?: string; window_end?: string }>({ task_type: 'order' });
+const runForm = reactive<{ task_type: string; shop_id?: number; window_start?: string; window_end?: string; async: boolean }>({
+  task_type: 'order',
+  async: false,
+});
 
 function openRun(row?: Record<string, unknown>) {
   runForm.task_type = String(row?.task_type ?? 'order');
@@ -265,15 +317,27 @@ async function doRun() {
   if (!runForm.task_type) return ElMessage.warning('请选择任务类型');
   running.value = true;
   try {
-    const res = await apiPost<{ task_type?: string; shop_ids?: number[]; runs?: { window_start?: string; window_end?: string }[]; summary?: Record<string, number> }>(
-      '/sync/run',
-      {
-        task_type: runForm.task_type,
-        shop_id: runForm.shop_id,
-        window_start: runForm.window_start,
-        window_end: runForm.window_end,
-      },
-    );
+    const res = await apiPost<{
+      queued?: boolean;
+      job_id?: number;
+      task_type?: string;
+      shop_ids?: number[];
+      runs?: { window_start?: string; window_end?: string }[];
+      summary?: Record<string, number>;
+    }>('/sync/run', {
+      task_type: runForm.task_type,
+      shop_id: runForm.shop_id,
+      window_start: runForm.window_start,
+      window_end: runForm.window_end,
+      async: runForm.async || undefined,
+    });
+    runVisible.value = false;
+    if (res?.queued) {
+      // 排队路径没有 summary：这时候「已提交」不等于「已跑完」，文案不能写成已执行
+      ElMessage.success(`任务 #${res.job_id} 已加入队列（${res.shop_ids?.length ?? 0} 家店），点「后台任务」看进度`);
+      if (jobsVisible.value) await loadJobs();
+      return;
+    }
     // 计数在 summary 里，窗口在 runs 里：不填窗口时后端只算增量（接上次窗口，首次＝最近 24 小时），
     // 不把实际窗口回显出来，用户会把「窗口没覆盖到数据」误读成「重算成功但没数据」。
     const s = res?.summary ?? {};
@@ -282,7 +346,6 @@ async function doRun() {
     ElMessage.success(
       `已执行 ${String(res?.task_type ?? runForm.task_type)}（${res?.shop_ids?.length ?? 0} 家店${win}）：拉取 ${num(s.fetched)} 条，新增 ${num(s.inserted)}，更新 ${num(s.updated)}，失败 ${num(s.failed)}`,
     );
-    runVisible.value = false;
     rp.value?.reload(1);
     await loadHealth();
   } catch (e) {
@@ -291,9 +354,89 @@ async function doRun() {
     running.value = false;
   }
 }
+
+/* ---------- 后台任务队列 ---------- */
+interface Job {
+  id: number;
+  job_type: string;
+  status: number;
+  attempts: number;
+  max_attempts: number;
+  run_after?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  worker?: string | null;
+  error_msg?: string | null;
+  payload?: Record<string, unknown> | null;
+}
+const JOB_STATUS_OPTIONS: OptionDef[] = [
+  { value: 0, label: '待跑', type: 'info' },
+  { value: 1, label: '在跑', type: 'primary' },
+  { value: 2, label: '成功', type: 'success' },
+  { value: 3, label: '失败', type: 'danger' },
+];
+const jobStatusLabel = (v: unknown) => String(JOB_STATUS_OPTIONS.find((o) => Number(o.value) === Number(v))?.label ?? v ?? '—');
+const jobStatusTag = (v: unknown) => JOB_STATUS_OPTIONS.find((o) => Number(o.value) === Number(v))?.type ?? 'info';
+const jobNote = (raw: RowLike) => {
+  const row = raw as Job;
+  const p = (row.payload ?? {}) as Record<string, unknown>;
+  const shops = Array.isArray(p.shop_ids) ? `｜${p.shop_ids.length} 家店` : '';
+  if (row.status === 0) return row.run_after ? `退避到 ${String(row.run_after).slice(5, 16)} 后重跑${shops}` : `等待领取${shops}`;
+  if (row.status === 1) return `执行中（${row.worker || '未知 worker'}）${shops}`;
+  return `${String(p.task_type ?? row.job_type)}${shops}`;
+};
+
+const jobsVisible = ref(false);
+const jobsLoading = ref(false);
+const draining = ref(false);
+const jobs = ref<Job[]>([]);
+const jobStatus = ref<number | undefined>(undefined);
+
+async function loadJobs() {
+  jobsLoading.value = true;
+  try {
+    jobs.value = await apiGet<Job[]>('/system/jobs', jobStatus.value === undefined ? {} : { status: jobStatus.value });
+  } catch (e) {
+    jobs.value = [];
+    ElMessage.error(errMsg(e));
+  } finally {
+    jobsLoading.value = false;
+  }
+}
+
+async function openJobs() {
+  jobsVisible.value = true;
+  await loadJobs();
+}
+
+async function drainNow() {
+  draining.value = true;
+  try {
+    const out = await apiPost<{ claimed: number; done: number; failed: number; retried: number; requeued_stale: number }>('/system/jobs/drain', {});
+    ElMessage.success(`本轮领取 ${num(out.claimed)} 个：成功 ${num(out.done)}，重试中 ${num(out.retried)}，失败 ${num(out.failed)}${out.requeued_stale ? `，回收僵尸任务 ${num(out.requeued_stale)} 个` : ''}`);
+    await loadJobs();
+    rp.value?.reload(1);
+    await loadHealth();
+  } catch (e) {
+    ElMessage.error(errMsg(e));
+  } finally {
+    draining.value = false;
+  }
+}
 </script>
 
 <style scoped>
+.jobs-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.tip {
+  color: #909399;
+  font-size: 12px;
+}
 .health-card {
   margin: 16px 16px 0;
 }

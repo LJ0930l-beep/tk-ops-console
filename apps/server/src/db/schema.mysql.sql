@@ -578,6 +578,26 @@ CREATE TABLE IF NOT EXISTS sync_log (
   CONSTRAINT fk_synclog_shop FOREIGN KEY (shop_id) REFERENCES tk_shop(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='表25 同步日志表（失败/0条即告警）';
 
+CREATE TABLE IF NOT EXISTS job_queue (
+  id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  job_type     VARCHAR(64)   NOT NULL COMMENT '必须在队列注册表里注册过',
+  payload_json TEXT          COMMENT '入参 JSON 文本',
+  status       TINYINT       NOT NULL DEFAULT 0 COMMENT '0待跑 1在跑 2成功 3失败',
+  attempts     INT           NOT NULL DEFAULT 0,
+  max_attempts INT           NOT NULL DEFAULT 3,
+  run_after    DATETIME      COMMENT '退避到点才可领取',
+  started_at   DATETIME,
+  finished_at  DATETIME,
+  worker       VARCHAR(64)   COMMENT '谁领走了（排查重复执行）',
+  result_json  TEXT          COMMENT '出参摘要',
+  error_msg    TEXT          COMMENT '已脱敏',
+  created_by   BIGINT UNSIGNED,
+  created_at   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  is_deleted   TINYINT       NOT NULL DEFAULT 0,
+  KEY ix_job_queue_claim (status, run_after, id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='表即队列：重活从请求周期里摘出来';
+
 CREATE TABLE IF NOT EXISTS sys_dict (
   id         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   dict_type  VARCHAR(50)  NOT NULL,                      -- category / creator_tag / return_reason / expense_type ...

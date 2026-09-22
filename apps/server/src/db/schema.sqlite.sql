@@ -94,6 +94,26 @@ CREATE TABLE IF NOT EXISTS sync_log (
 );
 CREATE INDEX IF NOT EXISTS ix_sync_log_shop ON sync_log(shop_id, task_type, started_at);
 
+CREATE TABLE IF NOT EXISTS job_queue (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_type     TEXT    NOT NULL,                     -- 必须在 services/jobs/queue.ts 注册过才能入队
+  payload_json TEXT,                                 -- 入参 JSON 文本
+  status       INTEGER NOT NULL DEFAULT 0,           -- 0待跑 1在跑 2成功 3失败
+  attempts     INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 3,
+  run_after    TEXT,                                 -- 退避到点才可领取
+  started_at   TEXT,
+  finished_at  TEXT,
+  worker       TEXT,                                 -- 谁领走了（进程标识，排查重复执行用）
+  result_json  TEXT,                                 -- 出参摘要，不放原始数据
+  error_msg    TEXT,                                 -- 已脱敏（core/redact.maskError）
+  created_by   INTEGER,
+  created_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+  updated_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+  is_deleted   INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS ix_job_queue_claim ON job_queue(status, run_after, id);
+
 CREATE TABLE IF NOT EXISTS sys_dict (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   dict_type  TEXT NOT NULL,                          -- category / creator_tag / return_reason / expense_type ...

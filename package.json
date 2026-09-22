@@ -14,11 +14,16 @@
     "build": "npm run build -w @tk/shared && npm run build -w @tk/server && npm run build -w @tk/web",
     "test": "npm run test -w @tk/server && npm run test -w @tk/web",
     "smoke": "tsx --disable-warning=ExperimentalWarning scripts/smoke.mts",
+    "openapi": "tsx --disable-warning=ExperimentalWarning scripts/openapi.mts",
+    "e2e": "playwright test",
     "lint": "npm run lint -w @tk/server && npm run lint -w @tk/web",
     "db:init": "node --disable-warning=ExperimentalWarning apps/server/dist/db/cli.js init",
     "db:seed": "node --disable-warning=ExperimentalWarning apps/server/dist/db/cli.js seed"
   },
   "engines": {
     "node": ">=22.5.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0"
   }
 }

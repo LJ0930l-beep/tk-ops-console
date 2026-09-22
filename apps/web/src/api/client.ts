@@ -1,4 +1,5 @@
 import axios from 'axios';
+import type { ApiPath } from './paths';
 
 export interface ApiEnvelope<T> { code: number; message: string; data: T }
 export interface Paged<T> { list: T[]; total: number; page: number; pageSize: number }
@@ -23,13 +24,15 @@ http.interceptors.response.use(
 );
 
 export const payload = <T>(res: { data: ApiEnvelope<T> }): T => res.data.data;
-export const apiGet = async <T>(url: string, params?: unknown) => payload(await http.get<T, { data: ApiEnvelope<T> }>(url, { params }));
-export const apiPost = async <T>(url: string, body?: unknown) => payload(await http.post<T, { data: ApiEnvelope<T> }>(url, body));
-export const apiPut = async <T>(url: string, body?: unknown) => payload(await http.put<T, { data: ApiEnvelope<T> }>(url, body));
-export const apiDelete = async <T>(url: string) => payload(await http.delete<T, { data: ApiEnvelope<T> }>(url));
+export type { ApiPath } from './paths';
+/** url 是生成出来的 ApiPath 字面量联合：endpoint 写错在 vue-tsc 阶段就红，不用等用户点进页面 404 */
+export const apiGet = async <T>(url: ApiPath, params?: unknown) => payload(await http.get<T, { data: ApiEnvelope<T> }>(url, { params }));
+export const apiPost = async <T>(url: ApiPath, body?: unknown) => payload(await http.post<T, { data: ApiEnvelope<T> }>(url, body));
+export const apiPut = async <T>(url: ApiPath, body?: unknown) => payload(await http.put<T, { data: ApiEnvelope<T> }>(url, body));
+export const apiDelete = async <T>(url: ApiPath) => payload(await http.delete<T, { data: ApiEnvelope<T> }>(url));
 
 /** 文件下载（模板 / 导出）：带鉴权头取 blob，文件名优先用服务端 Content-Disposition */
-export async function apiDownload(url: string, params: unknown, fallbackName: string): Promise<void> {
+export async function apiDownload(url: ApiPath, params: unknown, fallbackName: string): Promise<void> {
   const res = await http.get<Blob>(url, { params, responseType: 'blob' });
   const name = /filename="?([^";]+)"?/.exec(String(res.headers['content-disposition'] ?? ''))?.[1] ?? fallbackName;
   const href = URL.createObjectURL(res.data);

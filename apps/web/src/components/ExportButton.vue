@@ -20,10 +20,10 @@
 import { computed, ref } from 'vue';
 import { ElMessage } from 'element-plus';
 import { ArrowDown, Download } from '@element-plus/icons-vue';
-import { apiDownload, errMsg } from '@/api/client';
+import { apiDownload, errMsg, type ApiPath } from '@/api/client';
 import { useAuthStore } from '@/stores/auth';
 
-const props = defineProps<{ url: string; name: string; params?: Record<string, unknown> }>();
+const props = defineProps<{ url: ApiPath; name: string; params?: Record<string, unknown> }>();
 
 const auth = useAuthStore();
 /** 没有导出权限就不显示按钮（后端也会 403，这里只是不给人点了才报错的体验） */

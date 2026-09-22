@@ -134,7 +134,7 @@ async function openShops(row: Record<string, unknown>) {
   shopVisible.value = true;
   shopLoading.value = true;
   try {
-    const rows = await apiGet<{ shop_id: number; shop_name: string }[]>('/system/users/' + String(row.id) + '/shops');
+    const rows = await apiGet<{ shop_id: number; shop_name: string }[]>(`/system/users/${row.id}/shops`);
     shopIds.value = (rows ?? []).map((s) => Number(s.shop_id));
   } catch (e) {
     ElMessage.error(errMsg(e));

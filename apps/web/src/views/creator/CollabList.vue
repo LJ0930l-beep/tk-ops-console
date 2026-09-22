@@ -54,7 +54,7 @@ import { useRoute, useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { ArrowDown, Star } from '@element-plus/icons-vue';
 import { COLLAB_STATUS, MASK } from '@tk/shared';
-import { apiGet, apiPost, errMsg } from '@/api/client';
+import { apiGet, apiPost, errMsg, type ApiPath } from '@/api/client';
 import ResourcePage from '@/components/ResourcePage.vue';
 import ExportButton from '@/components/ExportButton.vue';
 import type { ColumnDef, FormFieldDef, OptionDef, SearchDef } from '@/components/ResourcePage.vue';
@@ -251,7 +251,7 @@ function toOpts(rows: unknown, label: (r: Row) => string) {
     .filter((r) => r.id !== undefined && r.id !== null)
     .map((r) => ({ value: Number(r.id), label: label(r) }));
 }
-async function fetchOpts(path: string, label: (r: Row) => string) {
+async function fetchOpts(path: ApiPath, label: (r: Row) => string) {
   try {
     const data = await apiGet<Row | Row[]>(path, { page: 1, pageSize: 200 });
     const rows = Array.isArray(data) ? data : (data as Row)?.list;

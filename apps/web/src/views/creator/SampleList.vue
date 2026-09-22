@@ -76,7 +76,7 @@ import { useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { Star } from '@element-plus/icons-vue';
 import { SAMPLE_STATUS } from '@tk/shared';
-import { apiGet, apiPost, apiPut, errMsg } from '@/api/client';
+import { apiGet, apiPost, apiPut, errMsg, type ApiPath } from '@/api/client';
 import ResourcePage from '@/components/ResourcePage.vue';
 import ExportButton from '@/components/ExportButton.vue';
 import type { ColumnDef, FormFieldDef, OptionDef, SearchDef } from '@/components/ResourcePage.vue';
@@ -273,7 +273,7 @@ function toOpts(rows: unknown, label: (r: Row) => string) {
     .map((r) => ({ value: Number(r.id), label: label(r) }));
 }
 /** 兼容分页对象 {list} 与纯数组（/products/spu/all 直接返回数组） */
-async function fetchOpts(path: string, label: (r: Row) => string) {
+async function fetchOpts(path: ApiPath, label: (r: Row) => string) {
   try {
     const data = await apiGet<Row | Row[]>(path, { page: 1, pageSize: 200 });
     const rows = Array.isArray(data) ? data : (data as Row)?.list;

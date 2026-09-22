@@ -184,11 +184,18 @@ import { computed, onMounted, reactive, ref } from 'vue';
 import { ElMessage, type FormRules } from 'element-plus';
 import { Plus, RefreshLeft, Search } from '@element-plus/icons-vue';
 import { apiDelete, apiGet, apiPost, apiPut, errMsg, type Paged } from '@/api/client';
+import type { ApiPath } from '@/api/paths';
 import { useDictStore, type DictOption } from '@/stores/dict';
+
+/**
+ * 通用 CRUD 组件按 REST 约定拼 `/资源/:id`。组件本身不知道某家资源有没有 :id 路由，
+ * 这一处拼接不做校验；真正的把关在调用方传进来的 api 字面量（已经是 ApiPath 类型）。
+ */
+const restUrl = (base: ApiPath, seg: unknown): ApiPath => `${base}/${seg as string | number}` as ApiPath;
 
 const props = withDefaults(
   defineProps<{
-    api: string;
+    api: ApiPath;
     title: string;
     columns: ColumnDef[];
     searchFields?: SearchDef[];
@@ -337,7 +344,7 @@ async function doSubmit() {
   const values = props.beforeSubmit ? props.beforeSubmit({ ...form }, editing.value) : { ...form };
   saving.value = true;
   try {
-    if (editing.value) await apiPut(`${props.api}/${editing.value.id}`, values);
+    if (editing.value) await apiPut(restUrl(props.api, editing.value.id), values);
     else await apiPost(props.api, values);
     ElMessage.success('保存成功');
     dialogVisible.value = false;
@@ -351,7 +358,7 @@ async function doSubmit() {
 
 async function doDelete(row: Record<string, unknown>) {
   try {
-    await apiDelete(`${props.api}/${row.id}`);
+    await apiDelete(restUrl(props.api, row.id as string | number));
     ElMessage.success('已删除');
     reload();
   } catch (e) {

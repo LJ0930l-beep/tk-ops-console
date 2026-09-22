@@ -18,7 +18,8 @@
       :can-write="canWrite"
       :row-class-name="rowClass"
       :map-row="mapRow"
-      :action-width="210"
+      :action-width="290"
+      :history-table="canSeeHistory ? 'tk_shop' : ''"
       dialog-width="720px"
     >
       <template #actions="{ row }">
@@ -74,6 +75,8 @@ const auth = useAuthStore();
 const rp = ref();
 
 const canWrite = computed(() => auth.roleKey === 'boss' || auth.menus.includes('shop'));
+/** 变更历史与全量操作日志同级（system 菜单）：没权限就不给入口，免得点了只收到 403 */
+const canSeeHistory = computed(() => auth.roleKey === 'boss' || auth.menus.includes('system'));
 
 const SHOP_TYPE: OptionDef[] = [
   { value: 1, label: '跨境店' },

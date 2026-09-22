@@ -72,13 +72,14 @@
             </template>
           </el-table-column>
         </template>
-        <el-table-column v-if="editable || deletable || $slots.actions" label="操作" :width="actionWidth" fixed="right">
+        <el-table-column v-if="editable || deletable || historyTable || $slots.actions" label="操作" :width="actionWidth" fixed="right">
           <template #default="{ row }">
             <slot name="actions" :row="row as RowLike" :reload="() => reload()" />
             <el-button v-if="editable && canWrite" link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
             <el-popconfirm v-if="deletable && canWrite" title="删除仅打标记可追溯，确认删除？" @confirm="doDelete(row)">
               <template #reference><el-button link type="danger" size="small">删除</el-button></template>
             </el-popconfirm>
+            <el-button v-if="historyTable" link type="info" size="small" @click="openHistory(row)">变更历史</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -120,6 +121,15 @@
         <el-button type="primary" :loading="saving" @click="doSubmit">保存</el-button>
       </template>
     </el-dialog>
+
+    <RecordHistoryDrawer
+      v-if="historyTable"
+      v-model:visible="historyVisible"
+      :table="historyTable"
+      :record-id="historyTarget?.id"
+      :title="title"
+      :record-name="historyRecordName"
+    />
   </div>
 </template>
 
@@ -186,6 +196,7 @@ import { Plus, RefreshLeft, Search } from '@element-plus/icons-vue';
 import { apiDelete, apiGet, apiPost, apiPut, errMsg, type Paged } from '@/api/client';
 import type { ApiPath } from '@/api/paths';
 import { useDictStore, type DictOption } from '@/stores/dict';
+import RecordHistoryDrawer from './RecordHistoryDrawer.vue';
 
 /**
  * 通用 CRUD 组件按 REST 约定拼 `/资源/:id`。组件本身不知道某家资源有没有 :id 路由，
@@ -204,6 +215,8 @@ const props = withDefaults(
     createable?: boolean;
     editable?: boolean;
     deletable?: boolean;
+    /** 传库表名（如 tk_shop）即开启行内「变更历史」；不给就不显示，各页按需要接入 */
+    historyTable?: string;
     canWrite?: boolean;
     rowKey?: string;
     actionWidth?: number;
@@ -364,6 +377,20 @@ async function doDelete(row: Record<string, unknown>) {
   } catch (e) {
     ElMessage.error(errMsg(e));
   }
+}
+
+/* ---------- 变更历史（opt-in：传了 historyTable 才出现） ---------- */
+const historyVisible = ref(false);
+const historyTarget = ref<RowLike | null>(null);
+/** 抽屉里点明是哪条记录：各页都把第一列当识别列（店铺名 / SKU 编码 / 员工姓名） */
+const historyRecordName = computed(() => {
+  const first = props.columns[0];
+  return historyTarget.value && first ? String(historyTarget.value[first.prop] ?? '') : '';
+});
+
+function openHistory(row: Record<string, unknown>) {
+  historyTarget.value = row;
+  historyVisible.value = true;
 }
 
 onMounted(async () => {

@@ -6,7 +6,7 @@ import { badRequest, forbidden, notFound, ok, parseBody, qv, wrap } from '../cor
 import { Q, queryList, queryPage } from '../core/query.js';
 import { hashPassword, requireMenu, shopScope, type AuthedRequest } from '../core/auth.js';
 import { maskError } from '../core/redact.js';
-import { writeOpLog } from '../core/oplog.js';
+import { changesOfLogEntry, writeOpLog } from '../core/oplog.js';
 import { config } from '../config.js';
 import { drainJobs, enqueueJob, getJob, listJobs, requeueStaleJobs } from '../services/jobs/queue.js';
 
@@ -238,6 +238,40 @@ opLogRouter.get('/', wrap((req, res) => {
     q,
     orderBy: 'l.op_time DESC',
   }));
+}));
+
+/**
+ * 单条记录的字段级变更历史（选项 9 的可落地小步）：扁平的 /oplog 列表答不出
+ * 「这条记录为什么变成现在这样」，这里按 target_table + target_id 聚合，并把
+ * before/after 原文 diff 成「哪个字段从什么改成什么」。
+ *
+ * 权限沿用本段开头的整段守卫（与列表同一条）：日志里有别人的操作与改前改后原文，
+ * 只有能读全量审计日志的角色才能按记录查 —— 不能因为「查的是同一条记录」就放宽到该记录的可见范围。
+ * 空变更的条目照样返回（动作本身要留痕）；凭证列只报「改过」，值一律不出接口。
+ */
+opLogRouter.get('/history', wrap((req, res) => {
+  const table = qv(req, 'table');
+  if (!table || !/^[a-z][a-z0-9_]{1,63}$/.test(table)) throw badRequest('table 需为表名（小写字母、数字、下划线）');
+  const id = Number(qv(req, 'id'));
+  if (!Number.isInteger(id) || id <= 0) throw badRequest('记录 ID 不合法');
+  const cap = config.oplogHistoryMaxRows;
+  const limit = Math.min(cap, Math.max(1, Number(qv(req, 'limit')) || cap));
+  const rows = all<Record<string, unknown>>(
+    `SELECT l.id, l.action, l.module, l.ip, l.op_time AS created_at, l.before_after, u.real_name AS user_name
+       FROM sys_op_log l LEFT JOIN sys_user u ON u.id = l.user_id
+      WHERE l.is_deleted = 0 AND l.target_table = ? AND l.target_id = ?
+      ORDER BY l.id DESC LIMIT ?`,
+    table, id, limit,
+  );
+  ok(res, rows.map((r) => ({
+    id: r.id,
+    action: r.action,
+    module: r.module,
+    user_name: r.user_name ?? null,
+    created_at: r.created_at,
+    ip: r.ip ?? null,
+    changes: changesOfLogEntry(r.before_after),
+  })));
 }));
 
 /* ==================== 表 25 同步日志（含失败告警状态） ==================== */

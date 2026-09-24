@@ -17,16 +17,29 @@ export interface Me {
 export async function login(page: Page, username: string): Promise<void> {
   await page.goto('/#/login');
   // CI 冷启动时 vite 要先编译登录页这一块，不等表单真的出来就 fill，
-  // 结果是把 20s 全烧在"登录后没能离开登录页"上（真红过一次，报的还是错的因）
+  // 结果是把超时全烧在"登录后没能离开登录页"上（真红过一次，报的还是错的因）
   await page.getByRole('button', { name: /登\s*录/ }).waitFor({ state: 'visible', timeout: 60_000 });
   await page.getByPlaceholder('登录账号').fill(username);
   await page.getByPlaceholder('密码').fill(PASSWORD);
   await page.getByRole('button', { name: /登\s*录/ }).click();
-  // 以前写成 waitForURL(/#\/(actions|dashboard|login)/) —— 正则把 /login 也算命中，
-  // 等于根本没等，登录响应慢一点就误判成功。这里必须等到真的离开 /login。
-  await expect
-    .poll(() => page.url(), { timeout: 30_000, message: `${username} 登录后没能离开登录页` })
-    .toMatch(/#\/(actions|dashboard)/);
+  if (await leftLoginPage(page)) return;
+  // 第一条用例常红在这里：登录成功后落地页那一块 chunk 还要现场编译，30s 也未必够；
+  // 重试一次走的是热路径。真坏了（凭证/守卫/接口）第二次同样过不去，不会把问题盖掉。
+  await page.goto('/#/login');
+  await page.getByRole('button', { name: /登\s*录/ }).waitFor({ state: 'visible', timeout: 60_000 });
+  await page.getByPlaceholder('登录账号').fill(username);
+  await page.getByPlaceholder('密码').fill(PASSWORD);
+  await page.getByRole('button', { name: /登\s*录/ }).click();
+  expect(await leftLoginPage(page), `${username} 登录后没能离开登录页`).toBe(true);
+}
+
+/** 必须等到真的离开 /login —— 以前写成 waitForURL(/#\/(actions|dashboard|login)/)，把 /login 也算命中 */
+async function leftLoginPage(page: Page): Promise<boolean> {
+  return expect
+    .poll(() => page.url(), { timeout: 30_000, intervals: [300, 700, 1500] })
+    .toMatch(/#\/(actions|dashboard)/)
+    .then(() => true)
+    .catch(() => false);
 }
 
 /** 直接问后端要这个人的权限，用它去校验界面渲染 —— 而不是把角色表抄第二份进测试 */

@@ -134,9 +134,11 @@ interface DueNotification {
   priority: number;
 }
 
-const phaseReady = new Set(['dashboard', 'shop', 'product', 'order', 'creator', 'content', 'ads', 'finance', 'system', 'stock']);
+// 侧边栏只有一个真相：MENUS ∩ 这个人的 menu_perms。
+// 这里以前另有一份手写的 phaseReady 白名单，后果是新菜单在权限里、在路由里、直接敲 URL 也进得去，
+// 唯独侧边栏没有入口 —— 界面上看就是"这功能没做"。要按阶段隐藏请去权限矩阵上配，别在组件里再记一份。
 const visibleMenus = computed(() =>
-  MENUS.filter((m) => phaseReady.has(m.key) && (auth.user?.role_key === 'boss' || auth.user?.menu_perms.includes(m.key))),
+  MENUS.filter((m) => auth.user?.role_key === 'boss' || auth.user?.menu_perms.includes(m.key)),
 );
 const activeMenu = computed(() => route.path);
 const routeTitle = computed(() => String(route.meta.title ?? ''));

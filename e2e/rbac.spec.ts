@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { MENUS } from '@tk/shared';
 import { collectForbidden, gotoRoute, login, me, sidebarTexts } from './fixtures';
 
 /**
@@ -84,6 +85,28 @@ test.describe('按角色登录', () => {
     expect(user.role_key).toBe('boss');
     await page.goto('/#/system/users');
     await expect(page).toHaveURL(/#\/system\/users/);
+  });
+
+  /**
+   * 侧边栏分组必须与这个人的 menu_perms **一一对应**：多一个是越权入口，少一个是"功能没做"的错觉。
+   * 上面那批手选 show/hide 断言挡不住这类坏：boss 的「选品管理」曾被 MainLayout 里一份手写的
+   * phaseReady 白名单过滤掉 —— 权限里有、路由里有、直接敲 URL 进得去，唯独侧边栏没有入口，
+   * 用户看到的就是"你告诉我做了，可我没有标题"。只有拿接口下发的权限反查界面才会红。
+   */
+  test('每个角色的侧边栏分组恰好等于他的 menu_perms（不多不少）', async ({ page }) => {
+    const bad: string[] = [];
+    for (const account of ['boss', 'limy', 'wangqiang', 'chenbd', 'finwu', 'whzhao', 'adskent', 'yinuo']) {
+      await login(page, account);
+      const user = await me(page);
+      const sidebar = (await sidebarTexts(page)).join(' | ');
+      const allowed = MENUS.filter((m) => user.role_key === 'boss' || user.menu_perms.includes(m.key)).map((m) => m.title);
+      const missing = allowed.filter((t) => !sidebar.includes(t));
+      const extra = MENUS.map((m) => m.title).filter((t) => !allowed.includes(t) && sidebar.includes(t));
+      if (missing.length || extra.length) {
+        bad.push(`${account}（perms=${user.menu_perms.join(',')}）少了[${missing.join('/') || '无'}] 多了[${extra.join('/') || '无'}]`);
+      }
+    }
+    expect(bad, `侧边栏与权限不一致：\n${bad.join('\n')}`).toEqual([]);
   });
 
   test('未登录直接敲业务 URL 会被送去登录页，登录后回到原页面', async ({ page }) => {

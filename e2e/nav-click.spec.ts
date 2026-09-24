@@ -51,6 +51,14 @@ test.describe('侧边栏逐项可点', () => {  for (const account of ACCOUNTS) 
       for (const label of labels) {
         const item = page.locator('.el-menu-item').filter({ hasText: label }).first();
         if (!(await item.count())) continue;
+        // 导航会把上一组收起（unique-opened）。收起的子项去点只会白白烧掉两次点击超时
+        // （CI 上 boss 37 项就是这么从 30s 涨到 5 分钟撞测试超时的）—— 先把父组点开，仍看不见就明确跳过。
+        if (!(await item.isVisible().catch(() => false))) {
+          const group = item.locator('xpath=ancestor::li[contains(@class,"el-sub-menu")]');
+          if (await group.count()) await group.locator('.el-sub-menu__title').first().click({ timeout: 3_000 }).catch(() => undefined);
+          await page.waitForTimeout(200);
+        }
+        if (!(await item.isVisible().catch(() => false))) continue;
         if ((await item.getAttribute('class'))?.includes('is-active')) continue; // 就在这一页，hash 本来不该变
         const before = page.url();
         const clicked = async (): Promise<void> => {

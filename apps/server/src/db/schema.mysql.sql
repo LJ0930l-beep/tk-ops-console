@@ -817,3 +817,60 @@ CREATE TABLE IF NOT EXISTS action_result (
   UNIQUE KEY ux_result_action (action_id, is_deleted),
   CONSTRAINT fk_result_action FOREIGN KEY (action_id) REFERENCES operation_action(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='V2 动作效果回看（观察期后对比前后指标）';
+
+-- ============ 选品管理（方案第十一章：候选品从登记到正式销售的五阶段流水线） ============
+-- 与 schema.sqlite.sql 的表/列集合必须逐一对应（tests/schema-drift.spec.ts 会比对）
+
+CREATE TABLE IF NOT EXISTS selection_flow (
+  id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+  code             VARCHAR(32)   NOT NULL,
+  name             VARCHAR(255)  NOT NULL,
+  image_url        VARCHAR(512),
+  category         VARCHAR(64),
+  supplier         VARCHAR(128),
+  purchase_price   DECIMAL(12,4) NOT NULL DEFAULT 0,
+  moq              INT           NOT NULL DEFAULT 0,
+  lead_days        INT           NOT NULL DEFAULT 0,
+  est_margin       DECIMAL(8,4)  NOT NULL DEFAULT 0,
+  breakeven_roas   DECIMAL(8,4)  NOT NULL DEFAULT 0,
+  source           VARCHAR(32),
+  shop_id          BIGINT,
+  spu_id           BIGINT,
+  stage            TINYINT       NOT NULL DEFAULT 1,
+  stage_entered_at DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  owner_id         BIGINT,
+  registered_by    BIGINT,
+  conclusion       TINYINT       NOT NULL DEFAULT 0,
+  conclusion_note  TEXT,
+  reject_reason    TEXT,
+  adjustments      TEXT,
+  test_started_at  DATETIME,
+  test_snapshot    JSON          NOT NULL,
+  checklist        JSON          NOT NULL,
+  selling_at       DATETIME,
+  remark           VARCHAR(512),
+  created_by       BIGINT,
+  created_at       DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at       DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  is_deleted       TINYINT       NOT NULL DEFAULT 0,
+  UNIQUE KEY ux_selection_code (code, is_deleted),
+  KEY ix_selection_stage (stage, stage_entered_at),
+  KEY ix_selection_owner (owner_id, stage),
+  KEY ix_selection_shop (shop_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='V3 选品流水线状态（五阶段）';
+
+CREATE TABLE IF NOT EXISTS selection_log (
+  id             BIGINT AUTO_INCREMENT PRIMARY KEY,
+  selection_id   BIGINT      NOT NULL,
+  from_stage     TINYINT     NOT NULL,
+  to_stage       TINYINT     NOT NULL,
+  action         VARCHAR(32) NOT NULL DEFAULT 'transition',
+  operator_id    BIGINT,
+  note           TEXT,
+  created_by     BIGINT,
+  created_at     DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at     DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  is_deleted     TINYINT     NOT NULL DEFAULT 0,
+  KEY ix_selection_log_flow (selection_id, id),
+  CONSTRAINT fk_selection_log_flow FOREIGN KEY (selection_id) REFERENCES selection_flow(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='V3 选品阶段流转日志';

@@ -43,6 +43,9 @@
       "name": "products"
     },
     {
+      "name": "selection"
+    },
+    {
       "name": "shops"
     },
     {
@@ -8833,6 +8836,629 @@
         ],
         "x-guards": [
           "Export"
+        ]
+      }
+    },
+    "/api/selection": {
+      "get": {
+        "tags": [
+          "selection"
+        ],
+        "operationId": "get_selection",
+        "description": "范围内的候选品；范围外一律 404（不区分「没有」和「不许看」，避免用报错摸 ID） */\nfunction visibleRow(req: Request): Record<string, unknown> {\nconst id = Number(req.params.id);\nif (!Number.isInteger(id) || id <= 0) throw badRequest('候选品 ID 不合法');\n// 数据范围直接进 SQL，不能拿 scope.params 去 includes(shopId) 比对（那是同一类越权读的老毛病）\nconst q = new Q('t.is_deleted = 0');\nq.and('t.id = ?', id);\nconst scope = selectionScope(current(req));\nif (scope.sql) q.and(scope.sql, ...scope.params);\nconst found = get<Record<string, unknown>>(`SELECT ${SELECT} FROM ${FROM}${q.whereSql}`, ...q.params);\nif (!found) throw notFound('候选品不存在或不在你的数据范围内');\nreturn found;\n}\n/* ---------------- 查询 ----------------",
+        "parameters": [],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封，data 为分页体",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Paged"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-router": "selection.routes.ts#selectionRouter",
+        "x-menu": [
+          "selection"
+        ]
+      },
+      "post": {
+        "tags": [
+          "selection"
+        ],
+        "operationId": "post_selection",
+        "description": "登记：自动生成候选品 ID + 预估盈亏平衡 ROAS，进「待上架测试」队列（方案 11.2 阶段一）",
+        "parameters": [],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "x-router": "selection.routes.ts#selectionRouter",
+        "x-menu": [
+          "selection"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              },
+              "x-zod-schema": "registerBody"
+            }
+          }
+        }
+      }
+    },
+    "/api/selection/:id": {
+      "get": {
+        "tags": [
+          "selection"
+        ],
+        "operationId": "get_selection_id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "x-router": "selection.routes.ts#selectionRouter",
+        "x-menu": [
+          "selection"
+        ]
+      },
+      "put": {
+        "tags": [
+          "selection"
+        ],
+        "operationId": "put_selection_id",
+        "description": "编辑基础信息。stage / conclusion 不在这里改 —— 状态只能走流转接口，否则日志会缺",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "x-router": "selection.routes.ts#selectionRouter",
+        "x-menu": [
+          "selection"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              },
+              "x-zod-schema": "editBody"
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "selection"
+        ],
+        "operationId": "delete_selection_id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "x-router": "selection.routes.ts#selectionRouter",
+        "x-menu": [
+          "selection"
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/selection/:id/checklist": {
+      "put": {
+        "tags": [
+          "selection"
+        ],
+        "operationId": "put_selection_id_checklist",
+        "description": "销售前准备清单：每项可指定责任人与时限；全部完成才允许转正常销售（校验在 stage 接口）",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "x-router": "selection.routes.ts#selectionRouter",
+        "x-menu": [
+          "selection"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              },
+              "x-zod-schema": "checklistBody"
+            }
+          }
+        }
+      }
+    },
+    "/api/selection/:id/conclusion": {
+      "post": {
+        "tags": [
+          "selection"
+        ],
+        "operationId": "post_selection_id_conclusion",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "x-router": "selection.routes.ts#selectionRouter",
+        "x-menu": [
+          "selection"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              },
+              "x-zod-schema": "conclusionBody"
+            }
+          }
+        }
+      }
+    },
+    "/api/selection/:id/conclusion/confirm": {
+      "post": {
+        "tags": [
+          "selection"
+        ],
+        "operationId": "post_selection_id_conclusion_confirm",
+        "description": "结论落地：阶段三按结论分流（通过→准备 / 不通过→淘汰 / 复测→回测试）",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "x-router": "selection.routes.ts#selectionRouter",
+        "x-menu": [
+          "selection"
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/selection/:id/logs": {
+      "get": {
+        "tags": [
+          "selection"
+        ],
+        "operationId": "get_selection_id_logs",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "x-router": "selection.routes.ts#selectionRouter",
+        "x-menu": [
+          "selection"
+        ]
+      }
+    },
+    "/api/selection/:id/stage": {
+      "post": {
+        "tags": [
+          "selection"
+        ],
+        "operationId": "post_selection_id_stage",
+        "description": "唯一能改 stage 的入口：校验状态机边、按结论分流、写流转日志",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "x-router": "selection.routes.ts#selectionRouter",
+        "x-menu": [
+          "selection"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              },
+              "x-zod-schema": "stageBody"
+            }
+          }
+        }
+      }
+    },
+    "/api/selection/board": {
+      "get": {
+        "tags": [
+          "selection"
+        ],
+        "operationId": "get_selection_board",
+        "description": "看板：五列 + 每张卡的停留天数与超时档位",
+        "parameters": [],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "x-router": "selection.routes.ts#selectionRouter",
+        "x-menu": [
+          "selection"
+        ]
+      }
+    },
+    "/api/selection/checklist-def": {
+      "get": {
+        "tags": [
+          "selection"
+        ],
+        "operationId": "get_selection_checklist_def",
+        "parameters": [],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "x-router": "selection.routes.ts#selectionRouter",
+        "x-menu": [
+          "selection"
+        ]
+      }
+    },
+    "/api/selection/export": {
+      "get": {
+        "tags": [
+          "selection"
+        ],
+        "operationId": "get_selection_export",
+        "parameters": [
+          {
+            "name": "keyword",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "owner_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "stage",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "文件流：?format=csv 走 text/csv（带 BOM），?format=xlsx 走 ExcelJS 流式工作簿；超过 EXPORT_MAX_ROWS 直接 400，不静默截断",
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          }
+        },
+        "x-router": "selection.routes.ts#selectionRouter",
+        "x-menu": [
+          "selection"
+        ],
+        "x-guards": [
+          "Export"
+        ]
+      }
+    },
+    "/api/selection/funnel": {
+      "get": {
+        "tags": [
+          "selection"
+        ],
+        "operationId": "get_selection_funnel",
+        "description": "顶部漏斗：登记数 → 测试数 → 通过数 → 上架数（方案 11.3 用来判断通过率是否健康）",
+        "parameters": [],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "x-router": "selection.routes.ts#selectionRouter",
+        "x-menu": [
+          "selection"
         ]
       }
     },

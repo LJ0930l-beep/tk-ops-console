@@ -520,7 +520,7 @@ export interface LiveMinute {
   source: string;
 }
 
-export type AlertTargetType = 'product' | 'creator' | 'video' | 'live' | 'sample' | 'shop' | 'ads';
+export type AlertTargetType = 'product' | 'creator' | 'video' | 'live' | 'sample' | 'shop' | 'ads' | 'selection';
 export type AlertOperator = '>' | '>=' | '<' | '<=' | '==';
 
 export interface AlertRule {
@@ -602,7 +602,86 @@ export const DEFAULT_ALERT_RULES: Omit<AlertRule, 'id' | 'created_at' | 'updated
   { rule_code: 'NEW_PRODUCT_END', rule_name: '新品期结束', target_type: 'product', scope_json: '{}', metric: 'days_since_launch', operator: '>=', threshold: 14, window_days: 14, priority: 2, cooldown_hours: 336, version: 1, status: 1, params_json: '{}', remark: '第14天移出新品池，进入常规ABC分层' },
   { rule_code: 'VIDEO_DECAY', rule_name: '视频衰减', target_type: 'video', scope_json: '{}', metric: 'ma3_over_peak7', operator: '<', threshold: 0.5, window_days: 7, priority: 1, cooldown_hours: 72, version: 1, status: 1, params_json: '{"consecutive":2}', remark: '连续2周期3日均值<近7日峰值50%且方向一致' },
   { rule_code: 'ADS_LOSS', rule_name: '广告低于盈亏线', target_type: 'ads', scope_json: '{}', metric: 'roas_vs_breakeven', operator: '<', threshold: 1, window_days: 7, priority: 0, cooldown_hours: 24, version: 1, status: 1, params_json: '{}', remark: 'ROAS<Break-even ROAS（1/广告前贡献毛利率）' },
+  /* 选品流水线（方案第十一章 11.2 超时规则 + 第三节首页动作清单新增条目）
+     天数默认值与 apps/server/src/config.ts 的 SELECTION_* 一致，两处都可调 */
+  { rule_code: 'SELECTION_REGISTER_STALE', rule_name: '候选品登记未进测试', target_type: 'selection', scope_json: '{}', metric: 'days_since_register', operator: '>', threshold: 7, window_days: 7, priority: 1, cooldown_hours: 72, version: 1, status: 1, params_json: '{}', remark: '登记后>7天未进入上架测试，提醒登记人（方案11.2阶段一）' },
+  { rule_code: 'SELECTION_TEST_OVERDUE', rule_name: '测试到期未反馈', target_type: 'selection', scope_json: '{}', metric: 'days_in_test_without_conclusion', operator: '>', threshold: 14, window_days: 14, priority: 0, cooldown_hours: 24, version: 1, status: 1, params_json: '{}', remark: '上架测试满14天仍未提交结论，进P0今日必处理（方案11.2阶段二）' },
+  { rule_code: 'SELECTION_FIRST_CHECK', rule_name: '测试首次检测', target_type: 'selection', scope_json: '{}', metric: 'hours_since_test_start', operator: '>=', threshold: 48, window_days: 3, priority: 2, cooldown_hours: 48, version: 1, status: 1, params_json: '{"until_hours":72}', remark: '上架48-72h做首次检测：CTR/加购率/转化率是否低于基准，不直接判死刑' },
+  { rule_code: 'SELECTION_TEST_STRONG', rule_name: '测试中表现优异', target_type: 'selection', scope_json: '{}', metric: 'test_metric_over_baseline', operator: '>', threshold: 1.2, window_days: 14, priority: 1, cooldown_hours: 168, version: 1, status: 1, params_json: '{"ctr_baseline":0.025,"cvr_baseline":0.012}', remark: '测试期CTR/转化率超基准1.2倍，建议提前进入销售准备（基准值必须配在参数里）' },
+  { rule_code: 'SELECTION_FEEDBACK_STALE', rule_name: '测试反馈积压', target_type: 'selection', scope_json: '{}', metric: 'days_in_feedback', operator: '>', threshold: 3, window_days: 3, priority: 1, cooldown_hours: 72, version: 1, status: 1, params_json: '{}', remark: '结论已提交但>3天未回写分流（方案11.2阶段三）' },
+  { rule_code: 'SELECTION_PREPARE_OVERDUE', rule_name: '销售前准备超时', target_type: 'selection', scope_json: '{}', metric: 'days_in_prepare', operator: '>', threshold: 7, window_days: 7, priority: 1, cooldown_hours: 72, version: 1, status: 1, params_json: '{}', remark: '进入销售前准备>7天清单未清完，提醒负责人（方案11.2阶段四）' },
 ];
+
+/* ---- 选品管理（方案第十一章） ---- */
+
+/** 测试期数据快照：结论必须带着它提交，缺任何一个指标后端都拒绝 */
+export interface SelectionSnapshot {
+  impressions: number;
+  ctr: number;
+  cart_rate: number;
+  cvr: number;
+  refund_rate: number;
+  gmv: number;
+  net_margin: number;
+}
+
+/** 销售前准备清单项 */
+export interface SelectionCheckItem {
+  done: number;
+  owner?: number | null;
+  due?: string | null;
+}
+
+export interface SelectionFlowRow {
+  id: number;
+  code: string;
+  name: string;
+  image_url: string | null;
+  category: string | null;
+  supplier: string | null;
+  purchase_price: number;
+  moq: number;
+  lead_days: number;
+  est_margin: number;
+  breakeven_roas: number;
+  source: string | null;
+  shop_id: number | null;
+  spu_id: number | null;
+  stage: number;
+  stage_entered_at: string;
+  owner_id: number | null;
+  registered_by: number | null;
+  conclusion: number;
+  conclusion_note: string | null;
+  adjustments: string | null;
+  test_started_at: string | null;
+  test_snapshot: string;
+  checklist: string;
+  selling_at: string | null;
+  remark: string | null;
+}
+
+/** 看板卡片：dwell_days / overdue_level 由后端按 config 阈值现算，前端不自己推 */
+export interface SelectionBoardCard extends SelectionFlowRow {
+  dwell_days: number;
+  due_days: number | null;
+  overdue_level: 'ok' | 'warn' | 'over';
+  owner_name?: string | null;
+  shop_name?: string | null;
+  registered_name?: string | null;
+}
+
+export interface SelectionLogRow {
+  id: number;
+  selection_id: number;
+  from_stage: number;
+  to_stage: number;
+  action: string;
+  operator_id: number | null;
+  note: string | null;
+  created_at: string;
+  operator_name?: string | null;
+}
 
 /** ABC 分层默认阈值（§6.1；必须在规则中心可配置） */
 export const ABC_DEFAULTS = { a_cum_share: 0.8, b_cum_share: 0.95 };

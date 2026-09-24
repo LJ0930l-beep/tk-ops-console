@@ -6,6 +6,7 @@ export type Region = (typeof REGIONS)[number];
 /** 一级菜单 key —— 权限 menu_perms 与前端路由使用同一套标识 */
 export const MENU_KEYS = [
   'dashboard',
+  'selection',
   'shop',
   'product',
   'order',
@@ -20,6 +21,11 @@ export type MenuKey = (typeof MENU_KEYS)[number];
 
 export const MENUS: { key: MenuKey; title: string; icon: string; phase: 1 | 2 | 3; children: { key: string; title: string; path: string }[] }[] = [
   { key: 'dashboard', title: '工作台', icon: 'Odometer', phase: 1, children: [{ key: 'action:center', title: '今日行动中心', path: '/actions' }, { key: 'dashboard:view', title: '经营看板', path: '/dashboard' }, { key: 'action:results', title: '效果回看', path: '/actions/results' }] },
+  {
+    // 选品是「商品进入销售体系之前」的前置流水线（方案第十一章），所以排在店铺之前
+    key: 'selection', title: '选品管理', icon: 'Aim', phase: 3,
+    children: [{ key: 'selection:board', title: '选品流水线', path: '/selection' }],
+  },
   {
     key: 'shop', title: '店铺与账号', icon: 'Shop', phase: 1,
     children: [
@@ -101,8 +107,8 @@ export const DATA_SCOPE = { ALL: 1, DEPT: 2, SELF: 3, SHOPS: 4 } as const;
 /** 建议默认权限（方案 8.1） */
 export const DEFAULT_ROLES = [
   { role_key: 'boss', role_name: '老板', data_scope: DATA_SCOPE.ALL, can_see_cost: 1, can_see_contact: 1, can_export: 1, menu_perms: [...MENU_KEYS] },
-  { role_key: 'ops_manager', role_name: '运营主管', data_scope: DATA_SCOPE.DEPT, can_see_cost: 1, can_see_contact: 0, can_export: 1, menu_perms: ['dashboard', 'shop', 'product', 'order', 'content', 'ads', 'finance', 'system'] },
-  { role_key: 'ops', role_name: '运营', data_scope: DATA_SCOPE.SHOPS, can_see_cost: 0, can_see_contact: 0, can_export: 0, menu_perms: ['dashboard', 'shop', 'product', 'order', 'content'] },
+  { role_key: 'ops_manager', role_name: '运营主管', data_scope: DATA_SCOPE.DEPT, can_see_cost: 1, can_see_contact: 0, can_export: 1, menu_perms: ['dashboard', 'selection', 'shop', 'product', 'order', 'content', 'ads', 'finance', 'system'] },
+  { role_key: 'ops', role_name: '运营', data_scope: DATA_SCOPE.SHOPS, can_see_cost: 0, can_see_contact: 0, can_export: 0, menu_perms: ['dashboard', 'selection', 'shop', 'product', 'order', 'content'] },
   { role_key: 'bd_manager', role_name: 'BD 主管', data_scope: DATA_SCOPE.DEPT, can_see_cost: 0, can_see_contact: 1, can_export: 1, menu_perms: ['dashboard', 'creator', 'content'] },
   { role_key: 'bd', role_name: '达人 BD', data_scope: DATA_SCOPE.SELF, can_see_cost: 0, can_see_contact: 1, can_export: 0, menu_perms: ['dashboard', 'creator', 'content'] },
   { role_key: 'content', role_name: '内容(编导/剪辑)', data_scope: DATA_SCOPE.SELF, can_see_cost: 0, can_see_contact: 0, can_export: 0, menu_perms: ['dashboard', 'content'] },
@@ -122,6 +128,56 @@ export const CONTENT_TYPE = { CREATOR_VIDEO: 1, CREATOR_LIVE: 2, OWN_VIDEO: 3, O
 export const MAP_STATUS = { MAPPED: 1, UNMAPPED: 2 } as const;
 export const SETTLE_TXN_TYPE = { ORDER_IN: 1, REFUND: 2, PLATFORM_FEE: 3, CREATOR_FEE: 4, SHIPPING: 5, SUBSIDY: 6, ADJUST: 7, OTHER: 8 } as const;
 export const RESPONSIBILITY = { UNSET: 0, QUALITY: 1, LOGISTICS: 2, DESCRIPTION: 3, BUYER: 4 } as const;
+
+/* ---- 选品管理（方案第十一章：候选品从登记到正式销售的五阶段流水线） ---- */
+
+/** 候选品所处阶段。6=淘汰池是终态，不占看板列 */
+export const SELECTION_STAGE = {
+  REGISTERED: 1,
+  TESTING: 2,
+  FEEDBACK: 3,
+  PREPARING: 4,
+  SELLING: 5,
+  ELIMINATED: 6,
+} as const;
+export type SelectionStage = (typeof SELECTION_STAGE)[keyof typeof SELECTION_STAGE];
+
+export const SELECTION_STAGE_LABELS: Record<number, string> = {
+  1: '商品选品登记',
+  2: '店铺上架测试',
+  3: '测试反馈',
+  4: '销售前准备',
+  5: '正常销售',
+  6: '淘汰池',
+};
+
+/** 看板列顺序（正常销售之后移出选品端口，只在商品端口留一条历史） */
+export const SELECTION_BOARD_STAGES = [1, 2, 3, 4, 5] as const;
+
+/** 测试结论：未提交为 0；提交时必须携带测试期数据快照 */
+export const SELECTION_CONCLUSION = { PENDING: 0, PASS: 1, FAIL: 2, RETEST: 3 } as const;
+export const SELECTION_CONCLUSION_LABELS: Record<number, string> = { 0: '未提交', 1: '通过', 2: '不通过', 3: '需调整后复测' };
+
+/** 选品来源（方案 11.1 阶段一） */
+export const SELECTION_SOURCES = ['市场调研', '竞品对标', '达人推荐', '供应链推荐'] as const;
+
+/**
+ * 阶段四的销售前准备清单。
+ * 缺一项就不允许进入「正常销售」——这是方案里最硬的一条规则，
+ * 所以清单项必须是代码里的枚举而不是自由文本，否则前端多传/漏传都能绕过闸门。
+ */
+export const SELECTION_CHECKLIST = [
+  { key: 'profile', label: '商品资料完善（标题/主图/详情/规格/SKU 编码）' },
+  { key: 'price', label: '价格策略确认（售价/促销价/达人佣金）' },
+  { key: 'stock', label: '库存确认（首批备货量/补货周期）' },
+  { key: 'channel', label: '渠道策略确认（商品卡/直播/短视频/联盟）' },
+  { key: 'finance', label: '财务确认（最终毛利率、盈亏平衡 ROAS）' },
+  { key: 'compliance', label: '合规确认（类目资质、认证文件）' },
+] as const;
+export const SELECTION_CHECKLIST_KEYS = SELECTION_CHECKLIST.map((c) => c.key);
+
+/** 测试期数据快照里必须出现的指标：一个都不许少，否则「没有数据支撑的结论」照样能提交 */
+export const SELECTION_METRICS = ['impressions', 'ctr', 'cart_rate', 'cvr', 'refund_rate', 'gmv', 'net_margin'] as const;
 
 /** 订单状态归一化后的分组 */
 export const ORDER_STATUS_LABEL: Record<string, string> = {

@@ -150,6 +150,17 @@ export const API_PATHS = [
   '/products/spu/export',
   '/products/unmapped',
   '/products/unmapped/export',
+  '/selection',
+  '/selection/:id',
+  '/selection/:id/checklist',
+  '/selection/:id/conclusion',
+  '/selection/:id/conclusion/confirm',
+  '/selection/:id/logs',
+  '/selection/:id/stage',
+  '/selection/board',
+  '/selection/checklist-def',
+  '/selection/export',
+  '/selection/funnel',
   '/shops',
   '/shops/:id',
   '/shops/:id/auth',
@@ -339,6 +350,17 @@ export type ApiPath =
   | '/products/spu/export'
   | '/products/unmapped'
   | '/products/unmapped/export'
+  | '/selection'
+  | `/selection/${string}`
+  | `/selection/${string}/checklist`
+  | `/selection/${string}/conclusion`
+  | `/selection/${string}/conclusion/confirm`
+  | `/selection/${string}/logs`
+  | `/selection/${string}/stage`
+  | '/selection/board'
+  | '/selection/checklist-def'
+  | '/selection/export'
+  | '/selection/funnel'
   | '/shops'
   | `/shops/${string}`
   | `/shops/${string}/auth`

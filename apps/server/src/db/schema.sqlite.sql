@@ -763,3 +763,60 @@ CREATE TABLE IF NOT EXISTS action_result (
   is_deleted       INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_result_action ON action_result(action_id) WHERE is_deleted = 0;
+
+/* ============ 选品管理（方案第十一章：候选品从登记到正式销售的五阶段流水线） ============ */
+
+/* 一条记录 = 一个候选品的当前流程状态；阶段停留天数由 stage_entered_at 现算，不落库（会过期） */
+CREATE TABLE IF NOT EXISTS selection_flow (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  code             TEXT    NOT NULL,                      -- 候选品 ID（选品码），如 SEL-2026-0001
+  name             TEXT    NOT NULL,
+  image_url        TEXT,
+  category         TEXT,
+  supplier         TEXT,                                  -- 货源：供应商
+  purchase_price   REAL    NOT NULL DEFAULT 0,            -- 采购价
+  moq              INTEGER NOT NULL DEFAULT 0,            -- 起订量
+  lead_days        INTEGER NOT NULL DEFAULT 0,            -- 交货周期（天）
+  est_margin       REAL    NOT NULL DEFAULT 0,            -- 预估毛利率 0-1
+  breakeven_roas   REAL    NOT NULL DEFAULT 0,            -- 预估盈亏平衡 ROAS = 1 / 广告前贡献毛利率
+  source           TEXT,                                  -- 市场调研/竞品对标/达人推荐/供应链推荐
+  shop_id          INTEGER,                               -- 上架测试的店铺
+  spu_id           INTEGER,                               -- 正式上架后回填的商品 SPU
+  stage            INTEGER NOT NULL DEFAULT 1,            -- 1登记 2测试 3反馈 4准备 5销售 6淘汰
+  stage_entered_at TEXT    NOT NULL DEFAULT (datetime('now')),
+  owner_id         INTEGER,                               -- 当前阶段负责人
+  registered_by    INTEGER,
+  conclusion       INTEGER NOT NULL DEFAULT 0,            -- 0未提交 1通过 2不通过 3需调整后复测
+  conclusion_note  TEXT,                                  -- 通过/不通过原因
+  reject_reason    TEXT,                                  -- 淘汰原因（方案表里独立一列，供选品复盘）
+  adjustments      TEXT,                                  -- 建议调整项（价格/主图/标题/详情/规格）
+  test_started_at  TEXT,                                  -- 上架测试开始时间（48-72h 首检与 14 天到期都按它算）
+  test_snapshot    TEXT    NOT NULL DEFAULT '{}',         -- 测试期核心指标快照（JSON，结论的强制附件）
+  checklist        TEXT    NOT NULL DEFAULT '{}',         -- 销售前准备清单完成情况（JSON: key -> {done,owner,due}）
+  selling_at       TEXT,                                  -- 转入正常销售的时间
+  remark           TEXT,
+  created_by       INTEGER,
+  created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+  updated_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+  is_deleted       INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_selection_code ON selection_flow(code) WHERE is_deleted = 0;
+CREATE INDEX IF NOT EXISTS ix_selection_stage ON selection_flow(stage, stage_entered_at);
+CREATE INDEX IF NOT EXISTS ix_selection_owner ON selection_flow(owner_id, stage);
+CREATE INDEX IF NOT EXISTS ix_selection_shop ON selection_flow(shop_id);
+
+/* 阶段流转日志：谁在什么时候把它从哪推到哪、为什么 */
+CREATE TABLE IF NOT EXISTS selection_log (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  selection_id   INTEGER NOT NULL,
+  from_stage     INTEGER NOT NULL,
+  to_stage       INTEGER NOT NULL,
+  action         TEXT    NOT NULL DEFAULT 'transition',   -- transition/submit_conclusion/checklist/edit
+  operator_id    INTEGER,
+  note           TEXT,
+  created_by     INTEGER,
+  created_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+  updated_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+  is_deleted     INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS ix_selection_log_flow ON selection_log(selection_id, id);

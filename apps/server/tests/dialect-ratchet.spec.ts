@@ -31,18 +31,20 @@ const PATTERNS: Record<string, { re: RegExp; to: string }> = {
 };
 
 /**
- * 预算 = 2026-09-22 实测值。改小请连带改这里；改大必须在 PR 里说清为什么又欠了一笔。
+ * 预算 = 实测值。改小请连带改这里；改大必须在 PR 里说清为什么又欠了一笔。
+ * 2026-09-23 选品两张表 +5/+5/+2：全部来自 DDL 的 DEFAULT (datetime('now')) 与 AUTOINCREMENT 惯例，
+ * 新增的选品业务代码没有引入任何一处 julianday/datetime() 计算（日期差都在 JS 里算）。
  * 迁移完成的目标是整块删掉这个文件（docs/db-migration.md 第 4 节）。
  */
 const BUDGET: Record<string, number> = {
-  "datetime('now')": 117,
-  'datetime( 函数调用': 125,
+  "datetime('now')": 122,
+  'datetime( 函数调用': 130,
   IFNULL: 59,
   'substr( 取日期': 38,
   julianday: 10,
   'INSERT OR IGNORE': 1,
   PRAGMA: 13,
-  AUTOINCREMENT: 37,
+  AUTOINCREMENT: 39,
   group_concat: 0,
   strftime: 0,
   '自定义 SQL 函数注册': 1,

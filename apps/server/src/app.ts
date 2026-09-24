@@ -10,6 +10,7 @@ import { authRouter } from './modules/auth.routes.js';
 import { systemRouter } from './modules/system.routes.js';
 import { shopRouter, accountRouter } from './modules/shop.routes.js';
 import { productRouter } from './modules/product.routes.js';
+import { selectionRouter } from './modules/selection.routes.js';
 import { orderRouter } from './modules/order.routes.js';
 import { creatorRouter } from './modules/creator.routes.js';
 import { contentRouter } from './modules/content.routes.js';
@@ -56,6 +57,7 @@ export function createApp(opts: AppOptions = {}): Express {
   api.use('/shops', shopRouter);
   api.use('/accounts', accountRouter);
   api.use('/products', productRouter);
+  api.use('/selection', selectionRouter);
   api.use('/orders', orderRouter);
   api.use('/creators', creatorRouter);
   api.use('/content', contentRouter);

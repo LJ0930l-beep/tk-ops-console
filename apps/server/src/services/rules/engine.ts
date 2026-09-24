@@ -11,6 +11,7 @@ import { badRequest, notFound } from '../../core/http.js';
 import { DEFAULT_ALERT_RULES } from '@tk/shared';
 import { rateToCnyExpr, todayUtc } from '../rates.js';
 import { scanCreatorTrends, scanProductChannels, scanVideoDecay } from '../analytics.js';
+import { SELECTION_EVALUATORS } from './selection.js';
 
 type Num = number | string | bigint | null;
 const n = (v: Num | undefined): number => Number(v ?? 0);
@@ -308,6 +309,8 @@ const EVALUATORS: Record<string, (rule: RuleRow, end: string) => Hit[]> = {
   NEW_PRODUCT_END: evalNewProduct,
   VIDEO_DECAY: evalVideoDecay,
   ADS_LOSS: evalAdsLoss,
+  // 选品流水线（方案第十一章）：超时/首检/表现优异，规则实现单独成文件，这张表只负责分发
+  ...SELECTION_EVALUATORS,
 };
 
 /* ==================== 冷却去重 + 事件生成 ==================== */
@@ -342,6 +345,11 @@ function ownerOf(hit: Hit): number | null {
   }
   if (hit.target_type === 'product' && hit.target_id !== null) {
     const row = get<{ owner_id: number | null }>(`SELECT owner_id FROM product_spu WHERE id = ? AND is_deleted = 0`, hit.target_id);
+    return row?.owner_id ?? null;
+  }
+  if (hit.target_type === 'selection' && hit.target_id !== null) {
+    // 选品事件的负责人是「当前阶段负责人」，不是登记人 —— 卡片卡在谁手里就提醒谁
+    const row = get<{ owner_id: number | null }>(`SELECT owner_id FROM selection_flow WHERE id = ? AND is_deleted = 0`, hit.target_id);
     return row?.owner_id ?? null;
   }
   return null;

@@ -195,7 +195,7 @@
 
 ---
 
-## 3. 功能范围（10 个一级菜单 × 页面级）
+## 3. 功能范围（11 个一级菜单 × 页面级）
 
 ### 3.0 全局页面约定
 
@@ -413,10 +413,38 @@
 | 数据字典 | `dict:list` → `/system/dict` | `sys_dict` | `[已实现]` | `EPIC-1-01` |
 
 - **员工管理**：列 `username`、`real_name`、`phone`、`dept`、`role_name`(+`role_key`)、`status`(1 在职/0 停用)、`last_login_at`、授权店铺数。筛选 `keyword`、`role_id`、`dept`、`status`。表单（`userBody`）：`username` 2~64 必填唯一且**编辑时禁止改**（`userBody.partial().omit({username:true})`）；`password` 8~64，新建必填否则 400"新建员工必须提供初始密码（至少 8 位）"；`real_name` 1~50 必填；`phone ≤20`；`dept ≤50`；`role_id` 必填存在；`status ∈{0,1}`；`shop_ids` 数组同事务覆盖写 `sys_user_shop`（`ux_user_shop`）。按钮：新增/编辑/停用（`POST /api/system/users/:id/deactivate`，不真删）。日志：`after.password` 必须为 `'***'`（已实现，规范强制）。
-- **角色权限**：列 `role_name`、`role_key`、`data_scope`、三个开关、`menu_perms`(Tag)、`user_count`。表单：`menu_perms` 多选（仅 10 个一级 key）、`data_scope 1~4`、三开关 `∈{0,1}`；改权限必须写日志并提示"该角色下 N 个账号的可见范围会立即变化"。`role_key` UNIQUE。
+- **角色权限**：列 `role_name`、`role_key`、`data_scope`、三个开关、`menu_perms`(Tag)、`user_count`。表单：`menu_perms` 多选（仅 11 个一级 key）、`data_scope 1~4`、三开关 `∈{0,1}`；改权限必须写日志并提示"该角色下 N 个账号的可见范围会立即变化"。`role_key` UNIQUE。
 - **操作日志**：列 `op_time`、`user_name`、`module`(一级菜单中文名)、`action`(`create/update/delete/export/login`)、`target_table`、`target_id`、`before_after`(JSON diff 展开)、`ip`。筛选 `user_id`、`module`、`action`、`target_table`、`start_date/end_date`。**只读**。
 - **同步监控**：列 `started_at`、`task_type`(`order/product/listing/returns/settlement/affiliate_order/ad/video/live`)、`shop_name`、`window_start~window_end`、`fetched/inserted/updated/failed`、`status`(1 成功/2 部分失败/3 失败)、`error_msg`。`GET /api/system/synclog/health` 提供"每店每任务最近一次"。按钮：立即重跑（`POST /api/sync/run`）。失败行红底；`error_msg` 渲染前脱敏（C5）。
 - **数据字典**：列 `dict_type`、`dict_value`、`dict_label`、`sort`、`status`。唯一 `ux_dict(dict_type,dict_value)`。注意：`GET /api/system/dict/:type` 与同步健康检查对**所有登录用户**开放（工作台需要），管理端增删改才需 `system` 菜单。
+
+### 3.11 `selection` 选品管理 `[已实现]`（方案第十一章：候选品从登记到正式销售的五阶段流水线）
+
+| 子页 | key / path | 表 | 后端 | 前端 |
+| --- | --- | --- | --- | --- |
+| 选品流水线 | `selection:board` → `/selection` | `selection_flow` + `selection_log` | `selection.routes.ts`（15 端点） | `views/selection/SelectionBoard.vue` |
+
+这一章的价值全在**闸门**上：状态机不许绕、结论必须带数据、清单没清完不许上架。三条中任何一条能被绕过，流水线两周内就会退化成一张谁都不维护的选品表，而且退化时界面上看不出来 —— 所以闸门一律做在后端，前端只是把按钮摆出来。
+
+| 端点 | 作用 | 硬规则 |
+| --- | --- | --- |
+| `GET /api/selection` | 分页列表（`stage/owner_id/shop_id/source/conclusion/keyword/overdue`） | `overdue=1` 的边界时间戳在 JS 里算，SQL 只做文本比较，与看板卡片同一口径（不新增方言债） |
+| `GET /api/selection/board` | 五列看板 + 每卡 `dwell_days/due_days/overdue_level` | 档位由后端算，前端只投影颜色，不自己判"该不该红" |
+| `GET /api/selection/funnel` | 登记 → 测试 → 通过 → 上架 四步漏斗 + 通过率 + 各阶段水位 | 与列表共用同一套筛选与数据范围 |
+| `GET /api/selection/export` | CSV/XLSX | `requireExport`；有 `selection` 菜单但没有导出权的角色 403 |
+| `GET /api/selection/:id`、`/:id/logs` | 详情（含解析后的 `snapshot/checklist` 与 `next_stages`）/ 流转日志 | 范围外一律 404，不用报错摸 ID |
+| `POST /api/selection` | 登记 | 自动生成 `SEL-YYYY-NNNN`（撞号顺延重试，不静默失败）+ 预估盈亏平衡 ROAS = `1/毛利率`；同时写第一条流转日志（`from_stage=0`＝登记前） |
+| `PUT /api/selection/:id` | 改基础信息 | **改不动 `stage`/`conclusion`**（状态只能走流转接口，否则日志会缺一条） |
+| `POST /api/selection/:id/stage` | 唯一的改 `stage` 入口 | 边表外 → 400；进测试必须指定店铺；转销售必须清单全勾 + 关联 SPU；淘汰必须写原因 |
+| `POST /api/selection/:id/conclusion` | 提交测试结论（2→3） | 7 个指标（`SELECTION_METRICS`）缺一个就 400 并**点名缺哪几个**；`需调整后复测` 必须写调整项；快照原样入库并进日志 |
+| `POST /api/selection/:id/conclusion/confirm` | 结论落地（3→4/2/6） | 通过→销售前准备、复测→回上架测试、不通过→淘汰池（原因带进 `reject_reason`） |
+| `PUT /api/selection/:id/checklist` | 六项清单（资料/价格/库存/渠道/财务/合规） | 未知清单项 400；只有阶段四能维护；已勾完的项前端要求指定责任人 |
+
+- **数据范围**：已指定测试店铺的按店铺范围收敛；`shop_id IS NULL`（还在登记阶段）的候选品是登记人的草稿，只对 `owner_id`/`registered_by` 本人可见。直接套 `shopScope` 会让 SELF/SHOPS 角色连自己刚登记的品都看不见 —— 流水线在第一步就断。
+- **超时口径**（`config.selection*`，可环境变量覆盖）：登记待测试 7 天 / 测试出结论 14 天 / 结论落地 3 天 / 准备清完 7 天，首次检测 48~72 小时，停留满阈值 70% 转黄、超过红线转红。
+- **规则**（`alert_rule` 表驱动，命中后进「今日行动中心」的 P0/P1/P2 清单，管理入口是系统设置 → 规则中心）：`SELECTION_REGISTER_STALE`(P1)、`SELECTION_TEST_OVERDUE`(**P0**)、`SELECTION_FIRST_CHECK`(P2)、`SELECTION_TEST_STRONG`(P1，CTR/CVR 基准写在 `params_json`，无基准不判定)、`SELECTION_FEEDBACK_STALE`(P1)、`SELECTION_PREPARE_OVERDUE`(P1)。`target_type='selection'`，`ownerOf` 取 `selection_flow.owner_id` → 直接进「我的待办」。规则只检测/建议，**绝不自动改阶段状态**。
+- **与商品/新品端口的关系**（方案 11.4）：选品管"从 0 到 1"，转 `正常销售` 后写 `spu_id` 与 `selling_at`，归商品端口做动态检测；三个端口共用同一个 SPU，数据不重复录入，只做状态流转。
+
 
 ---
 
@@ -500,7 +528,20 @@
 
 演示数据 12 位达人：公海 5（cosy.ph/gadgetgabe/techtales/dealsdrop/dailyfinds.my）、私海 4、合作中 2、黑名单 1（glowwithme）；chenbd 拥有 4 人（ids 1,3,5,7）、lubd 2 人（ids 2,10），`protect_until` 全部 2026-09-12（基准日 2026-09-18 → 已过期，回收作业应命中 6 人）。
 
-**D. 其他状态字段（非状态机，仅同步覆盖）**
+**D. 选品流水线 `selection_flow.stage`（方案 11.2，6 态）**
+
+| 值 | 名称 | 进入条件 | 允许的下一态 | 触发动作 |
+| --- | --- | --- | --- | --- |
+| 1 | 商品选品登记 | `POST /api/selection`（自动生成编号与盈亏平衡 ROAS） | 2 / 6 | 写第一条流转日志；`>7 天`未进测试 → P1 |
+| 2 | 店铺上架测试 | 流转并**必须指定测试店铺**（`shop_id`、`test_started_at`） | 6（结论走接口） | 满 14 天未提交结论 → **P0**；48~72h 首次检测 → P2 |
+| 3 | 测试反馈 | `POST /:id/conclusion`（7 个指标一个不许少） | 4 / 2 / 6（经 `conclusion/confirm`） | 快照入库 + 进日志；`>3 天`未落地 → P1 |
+| 4 | 销售前准备 | 结论为「通过」并确认落地 | 5 / 6 | 六项清单（资料/价格/库存/渠道/财务/合规）；`>7 天`未清完 → P1 |
+| 5 | 正常销售 | 清单全勾完 + 关联 `spu_id` | — | 写 `selling_at`；此后归商品端口动态检测，选品端口只留历史 |
+| 6 | 淘汰池 | 流转或结论为「不通过」，**必须写原因** | 1 | 原因进 `reject_reason`，复盘后可「捞回登记」 |
+
+非法流转（如 `1→4`、`1→3`、`5→2`）→ 400；`2→3` 不在流转接口的出边里（`next_stages` 也不报给前端），因为那一跳必须携带数据快照，只能由结论接口产生。每次流转写 `selection_log(from_stage,to_stage,action,operator_id,note)`，链条从登记那一条开始完整。
+
+**E. 其他状态字段（非状态机，仅同步覆盖）**
 
 | 字段 | 取值 | 来源 |
 | --- | --- | --- |
@@ -515,7 +556,7 @@
 
 ## 5. 数据模型
 
-### 5.1 26 表清单（`schema.sqlite.sql` 已建全部；分期指交付顺序而非建表顺序）
+### 5.1 表清单（一期 26 张；V2.0 分析/预警表与选品表见 §5.5）
 
 | # | 表 | 作用 | 期次 | 关键业务字段 | 唯一约束（`WHERE is_deleted=0`）| 状态 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -576,6 +617,16 @@
 | 汇率 | 一律折 CNY：`金额 × rate_to_cny`；CNY 恒 1；取"业务发生当日"，缺失回退更早最近一条并标注；完全缺失不参与汇总 + 告警（B3） |
 | 切日 | 站点时区（Q8/B7），US/MX 夏令时用 IANA 计算，禁止固定偏移（D4） |
 | 币种 | 订单/广告/费用原始币种 + 统一 CNY 汇总列；界面必须显式标 `CNY` |
+
+### 5.5 选品新增表（方案 11.5，两份方言 DDL 同步维护）
+
+| 表 | 作用 | 关键业务字段 | 唯一约束 |
+| --- | --- | --- | --- |
+| `selection_flow` | 选品流程状态表（一个候选品一行，流水线本体） | `code`(候选品 ID)、`name/image_url/category`、`supplier/purchase_price/moq/lead_days`、`est_margin/breakeven_roas`、`source`、`shop_id/spu_id`、`stage/stage_entered_at`、`owner_id/registered_by`、`conclusion/conclusion_note/reject_reason/adjustments`、`test_started_at/test_snapshot(JSON)`、`checklist(JSON)`、`selling_at` | `ux_selection_code(code)` WHERE `is_deleted=0` |
+| `selection_log` | 阶段流转日志表（回溯谁在什么时候把它从哪推到哪） | `selection_id`、`from_stage`(0＝登记前)、`to_stage`、`action`(register/transition/submit_conclusion/confirm_conclusion)、`operator_id`、`note` | 只追加，不更新 |
+
+- 两张表都守同一份公共字段约定（`id/created_by/created_at/updated_at/is_deleted`），由 `tests/schema-drift.spec.ts` 校验两份 DDL 列集合一致；`tests/dialect-ratchet.spec.ts` 钉住"新增业务代码零方言债"（日期差在 JS 里算，SQL 只做文本比较）。
+- 演示数据 14 个候选品铺满六个阶段，且每阶段的停留天数刻意做出 绿/黄/红 三档（含 2 个带原因的淘汰），首页 P0 至少命中一条 `SELECTION_TEST_OVERDUE`。
 
 ---
 
@@ -758,6 +809,7 @@
 | `warehouse` / `stock_ledger` | stock | 8 `EPIC-2-04` |
 | `sys_user`/`sys_role`/`sys_user_shop`/`sys_op_log`/`sys_dict` | system | 2 `EPIC-1-01`、4 `EPIC-1-03`、5（导出）/ 3 `EPIC-1-02` |
 | `sync_log` | system / dashboard | 15 `EPIC-4-04`、29 `EPIC-8-02` |
+| `selection_flow` / `selection_log` | selection（选品管理） | 35 `EPIC-10-01` |
 | 跨表汇总（工作台/报表） | dashboard / finance | 28、29、30 `EPIC-8-03` |
 | 前端骨架与 33 个页面 | 全部 | 31 + 各模块联调 Issue 7, 11, 20, 23, 27, 30 |
 | 测试 / CI / 部署 / 交付 | — | 32 `EPIC-9-02`、33 `EPIC-9-03`、34 `EPIC-9-04` |

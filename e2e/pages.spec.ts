@@ -14,6 +14,7 @@ const PAGES: { path: string; title: string }[] = [
   { path: '/actions', title: '今日行动中心' },
   { path: '/actions/results', title: '效果回看' },
   { path: '/dashboard', title: '经营看板' },
+  { path: '/selection', title: '选品流水线' },
   { path: '/shops', title: '店铺管理' },
   { path: '/accounts', title: 'TikTok 账号' },
   { path: '/products/spu', title: '商品(SPU)' },

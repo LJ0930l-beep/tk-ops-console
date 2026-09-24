@@ -96,6 +96,19 @@ export const config = {
   sampleContentDueDays: Number(process.env.SAMPLE_DUE_DAYS ?? 7),
   protectDefaultDays: Number(process.env.CREATOR_PROTECT_DAYS ?? 30),
   syncOverlapMinutes: Number(process.env.SYNC_OVERLAP_MIN ?? 5),
+  /* ---- 选品流水线的超时口径（方案 11.2：每个阶段都有明确时限，写死在代码里就调不动了）---- */
+  /** 阶段一：登记后多少天没进上架测试就提醒登记人 */
+  selectionTestDueDays: num('SELECTION_TEST_DUE_DAYS', 7),
+  /** 阶段二：测试期最长天数，满期未提交结论进 P0 */
+  selectionConclusionDueDays: num('SELECTION_CONCLUSION_DUE_DAYS', 14),
+  /** 阶段二：上架后多少小时做首次检测（方案 48-72h，取上限做闸门） */
+  selectionFirstCheckHours: num('SELECTION_FIRST_CHECK_HOURS', 72),
+  /** 阶段三：结论提交后多少天内要完成回写分流（反馈积压） */
+  selectionFeedbackDueDays: num('SELECTION_FEEDBACK_DUE_DAYS', 3),
+  /** 阶段四：进入销售前准备后多少天没清完清单就提醒负责人 */
+  selectionPrepareDueDays: num('SELECTION_PREPARE_DUE_DAYS', 7),
+  /** 看板卡片边框：停留天数达到超时阈值的这个比例即转黄（红色=已超时） */
+  selectionWarnRatio: Number(process.env.SELECTION_WARN_RATIO ?? 0.7),
   /* ---- 后台任务队列（表即队列，见 services/jobs/queue.ts）---- */
   jobMaxAttempts: num('JOB_MAX_ATTEMPTS', 3),
   jobRetryBackoffSeconds: num('JOB_RETRY_BACKOFF_SEC', 120),

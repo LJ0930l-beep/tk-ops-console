@@ -1,6 +1,10 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { all, get, run } from '../src/core/db.js';
+import { DEFAULT_ALERT_RULES } from '@tk/shared';
 import { ACCOUNTS, auth, boot, dataOf, login } from './helper.js';
+
+// 规则条数从 @tk/shared 的默认规则表推导，不再写死 —— 加规则的人不该顺手来改这个数
+const RULES = DEFAULT_ALERT_RULES.length;
 
 /**
  * V2.0 行动中心 + 规则引擎（§4/§14/§15.3/附录B）
@@ -24,8 +28,8 @@ beforeAll(async () => {
 });
 
 describe('规则引擎：默认规则与冷却去重', () => {
-  it('附录 B 的 10 条默认规则全部落库且启用', () => {
-    expect(ruleCount()).toBe(10);
+  it('附录 B 的默认规则全部落库且启用', () => {
+    expect(ruleCount()).toBe(RULES);
     const disabled = get<{ c: number }>(`SELECT COUNT(*) AS c FROM alert_rule WHERE status <> 1`)?.c ?? 0;
     expect(Number(disabled)).toBe(0);
     // 阈值不得写死：每条规则都有可配置的 metric/operator/threshold
@@ -42,14 +46,14 @@ describe('规则引擎：默认规则与冷却去重', () => {
     const res = await http.post('/api/actions/evaluate').set(auth(token.boss)).send({});
     expect(res.status).toBe(200);
     const d = dataOf<{ created_events: number; skipped_cooldown: number; evaluated_rules: number }>(res.body);
-    expect(d.evaluated_rules).toBe(10);
+    expect(d.evaluated_rules).toBe(RULES);
     expect(d.created_events).toBe(0);
     expect(eventCount()).toBe(before);
   });
 
   it('ensureDefaultRules 幂等：再评估不会新增/覆盖规则', async () => {
     await http.post('/api/actions/evaluate').set(auth(token.boss)).send({});
-    expect(ruleCount()).toBe(10);
+    expect(ruleCount()).toBe(RULES);
   });
 });
 
@@ -146,7 +150,7 @@ describe('权限边界', () => {
   it('普通运营可查看规则命中，但不可修改阈值 / 触发评估', async () => {
     const view = await http.get('/api/actions/rules').set(auth(token.ops));
     expect(view.status).toBe(200);
-    expect(dataOf<{ list: unknown[] }>(view.body).list.length).toBe(10);
+    expect(dataOf<{ list: unknown[] }>(view.body).list.length).toBe(RULES);
 
     const rule = get<{ id: number }>(`SELECT id FROM alert_rule LIMIT 1`);
     const put = await http.put(`/api/actions/rules/${rule!.id}`).set(auth(token.ops)).send({ threshold: 0.1 });

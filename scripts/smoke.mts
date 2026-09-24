@@ -53,6 +53,8 @@ const SAMPLE_SQL: Record<string, string> = {
   '/api/finance/profit/order/:id': 'SELECT id FROM tk_order WHERE is_deleted = 0 ORDER BY id LIMIT 1',
   '/api/actions/events/:id': 'SELECT id FROM alert_event WHERE is_deleted = 0 ORDER BY id DESC LIMIT 1',
   '/api/actions/analytics/live/:id/minutes': 'SELECT id FROM live_session WHERE is_deleted = 0 ORDER BY id LIMIT 1',
+  '/api/selection/:id': 'SELECT id FROM selection_flow WHERE is_deleted = 0 ORDER BY id LIMIT 1',
+  '/api/selection/:id/logs': 'SELECT id FROM selection_flow WHERE is_deleted = 0 ORDER BY id LIMIT 1',
 };
 
 const day = (offset: number): string => {

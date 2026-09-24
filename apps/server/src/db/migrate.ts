@@ -33,6 +33,29 @@ export function migrate(db: DatabaseSync): void {
   migrateLegacyRateSources(db);
   migrateNotificationDedupeIncludesSoftDelete(db);
   migrateLiveSessionIdempotency(db);
+  migrateSelectionMenu(db);
+}
+
+/**
+ * 「选品管理」是后加的一级菜单，而已存在的 `sys_role.menu_perms` 不会自己长出新菜单 ——
+ * 不补这一步，老库里连运营主管都看不到这个菜单，功能上线了界面上却像"没做"。
+ * 口径：只给本来就能看到商品中心的角色补，其余权限一律不动（管理员手工改过的一律保留）。
+ */
+function migrateSelectionMenu(db: DatabaseSync): void {
+  const rows = db.prepare(`SELECT id, menu_perms FROM sys_role WHERE is_deleted = 0`).all() as { id: number; menu_perms: string }[];
+  let hit = 0;
+  for (const r of rows) {
+    let perms: unknown;
+    try {
+      perms = JSON.parse(r.menu_perms);
+    } catch {
+      continue; // 权限列被改坏过，不该由这次迁移猜测
+    }
+    if (!Array.isArray(perms) || !perms.includes('product') || perms.includes('selection')) continue;
+    db.prepare(`UPDATE sys_role SET menu_perms = ? WHERE id = ?`).run(JSON.stringify([...perms, 'selection']), r.id);
+    hit++;
+  }
+  if (hit) console.log(`[db] 迁移：${hit} 个角色的菜单已补上「选品管理」`);
 }
 
 /**

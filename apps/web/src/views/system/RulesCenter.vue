@@ -113,7 +113,7 @@ import { apiGet, apiPost, apiPut, errMsg } from '@/api/client';
 import { useAuthStore } from '@/stores/auth';
 import type { RowLike } from '@/types/row';
 
-const TARGET_LABELS: Record<string, string> = { product: '商品', creator: '达人', video: '视频', live: '直播', sample: '寄样', shop: '店铺', ads: '广告' };
+const TARGET_LABELS: Record<string, string> = { product: '商品', creator: '达人', video: '视频', live: '直播', sample: '寄样', shop: '店铺', ads: '广告', selection: '选品' };
 
 const auth = useAuthStore();
 const canEdit = computed(() => auth.user?.role_key === 'boss' || !!auth.user?.menu_perms.includes('system' as never));

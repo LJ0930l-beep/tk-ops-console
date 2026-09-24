@@ -14,6 +14,8 @@ const routes: RouteRecordRaw[] = [
       { path: 'actions/results', name: 'action-results', component: () => import('@/views/ActionResults.vue'), meta: { title: '效果回看', menu: 'dashboard' } },
       { path: 'dashboard', name: 'dashboard', component: () => import('@/views/DashboardView.vue'), meta: { title: '经营看板', menu: 'dashboard' } },
 
+      { path: 'selection', name: 'selection', component: () => import('@/views/selection/SelectionBoard.vue'), meta: { title: '选品流水线', menu: 'selection' } },
+
       { path: 'shops', name: 'shops', component: () => import('@/views/shop/ShopList.vue'), meta: { title: '店铺管理', menu: 'shop' } },
       { path: 'accounts', name: 'accounts', component: () => import('@/views/shop/AccountList.vue'), meta: { title: 'TikTok 账号', menu: 'shop' } },
 

@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { DEFAULT_ROLES, REGION_TZ_OFFSET, buildCollabNo, round2, statDateInZone } from '@tk/shared';
+import { DEFAULT_ROLES, REGION_TZ_OFFSET, SELECTION_CHECKLIST_KEYS, SELECTION_STAGE_LABELS, buildCollabNo, round2, statDateInZone } from '@tk/shared';
 import { seedV2DemoData } from './seedV2.js';
 import { config } from '../config.js';
 import { hashPassword } from '../core/auth.js';
@@ -691,6 +691,95 @@ export function seedDemoData(opts: { reset?: boolean } = {}): void {
     fetched: 0, inserted: 0, updated: 0, failed: 1, status: 3,
     error_msg: 'auth expired: shop token invalid (sub_code=105001)',
     started_at: iso(daysAgo(1, 2)), finished_at: iso(daysAgo(1, 2, 1)),
+  });
+
+  /* ---------- 选品流水线（方案第十一章：五阶段 + 超时预警 + 淘汰池） ---------- */
+  // 故意把每个阶段都摆出「绿 / 黄 / 红」三种停留时长，看板与规则才有东西可看；
+  // 天数对齐 config 的 SELECTION_* 默认口径（7 / 14 / 3 / 7）。
+  const selSpu = all<{ id: number; name: string }>(`SELECT id, name_cn AS name FROM product_spu WHERE is_deleted = 0 ORDER BY id LIMIT 4`);
+  const selOwner = [Number(uid.limy ?? 0), Number(uid.wangqiang ?? 0), Number(uid.boss ?? 0)].filter((n) => n > 0);
+  const selChecklist = (doneKeys: string[]): string =>
+    JSON.stringify(Object.fromEntries(SELECTION_CHECKLIST_KEYS.map((k) => [k, { done: doneKeys.includes(k) ? 1 : 0 }])));
+  const selSnap = (impressions: number, ctr: number, cart: number, cvr: number, refund: number, gmv: number, margin: number): string =>
+    JSON.stringify({ impressions, ctr, cart_rate: cart, cvr, refund_rate: refund, gmv, net_margin: margin });
+  /**
+   * 选品的时间戳锚在「跑种子的那一刻」，不用上面那个 2026-09-18 的历史基准日：
+   * 停留天数是流水线的"当前状态"，锚在历史日上会让演示数据每天自己变红一点，
+   * 一周后满屏全是超时 —— 那正是这一章要解决的问题，不该由演示数据自己制造。
+   */
+  const selDaysAgo = (n: number, hour = 9, minute = 0) => {
+    const d = new Date();
+    d.setUTCDate(d.getUTCDate() - n);
+    d.setUTCHours(hour, minute, 0, 0);
+    return d;
+  };
+  const selections: {
+    name: string; category: string; supplier: string; price: number; moq: number; lead: number; margin: number;
+    source: string; stage: number; dwell: number; testDwell?: number; hours?: number; owner: number; shop: number;
+    conclusion?: number; note?: string; adjust?: string; snap?: string; done?: string[]; spu?: number; reject?: string;
+  }[] = [
+    { name: '折叠硅胶洗碗刷', category: '家居', supplier: '义乌百洁', price: 3.2, moq: 500, lead: 7, margin: 0.62, source: '市场调研', stage: 1, dwell: 2, owner: selOwner[0] ?? 1, shop: 0 },
+    { name: '磁吸手机支架车载款', category: '3C数码', supplier: '深圳锐目', price: 11.5, moq: 300, lead: 10, margin: 0.48, source: '竞品对标', stage: 1, dwell: 5, owner: selOwner[0] ?? 1, shop: Number(shopId[1]) },
+    { name: '宠物自动喂食器', category: '家居', supplier: '宁波宠趣', price: 46, moq: 100, lead: 15, margin: 0.41, source: '达人推荐', stage: 1, dwell: 9, owner: selOwner[1] ?? 2, shop: Number(shopId[0]) },
+    { name: '便携榨汁杯 Type-C', category: '3C数码', supplier: '中山小电', price: 18.8, moq: 200, lead: 12, margin: 0.55, source: '市场调研', stage: 2, dwell: 4, testDwell: 3, owner: selOwner[0] ?? 1, shop: Number(shopId[0]), snap: selSnap(8200, 0.031, 0.062, 0.014, 0.021, 1240, 0.31) },
+    { name: '可降解垃圾袋加厚', category: '家居', supplier: '潍坊绿源', price: 5.6, moq: 1000, lead: 6, margin: 0.66, source: '供应链推荐', stage: 2, dwell: 11, testDwell: 10, owner: selOwner[1] ?? 2, shop: Number(shopId[1]), snap: selSnap(15600, 0.019, 0.038, 0.007, 0.034, 980, 0.18) },
+    { name: '硅胶保鲜盖十二件套', category: '家居', supplier: '东莞硅胶厂', price: 9.4, moq: 400, lead: 9, margin: 0.58, source: '竞品对标', stage: 2, dwell: 17, testDwell: 16, owner: selOwner[0] ?? 1, shop: Number(shopId[2] ?? shopId[0]), snap: selSnap(9100, 0.022, 0.041, 0.008, 0.052, 610, 0.09) },
+    { name: '高颜值收纳箱透明', category: '家居', supplier: '台州塑业', price: 13.2, moq: 300, lead: 8, margin: 0.6, source: '市场调研', stage: 2, dwell: 3, hours: 52, owner: selOwner[1] ?? 2, shop: Number(shopId[0]), snap: selSnap(4300, 0.052, 0.094, 0.026, 0.012, 2180, 0.42) },
+    { name: '无线蓝牙麦克风', category: '3C数码', supplier: '深圳声谷', price: 27.5, moq: 150, lead: 14, margin: 0.44, source: '达人推荐', stage: 3, dwell: 4, testDwell: 13, owner: selOwner[0] ?? 1, shop: Number(shopId[1]), conclusion: 1, note: '测试期 CTR 与转化率均达基准 1.6 倍，退货率低于类目均值，建议进入销售准备', snap: selSnap(12800, 0.041, 0.083, 0.021, 0.018, 3420, 0.38) },
+    { name: '儿童防夹手门挡', category: '家居', supplier: '义乌童安', price: 4.1, moq: 800, lead: 7, margin: 0.52, source: '供应链推荐', stage: 3, dwell: 1, testDwell: 12, owner: selOwner[1] ?? 2, shop: Number(shopId[0]), conclusion: 3, note: '主图点击尚可但转化明显低于基准', adjust: '换主图（场景图）+ 标题加「防夹手」关键词 + 详情页补尺寸图', snap: selSnap(6700, 0.034, 0.021, 0.004, 0.028, 260, 0.11) },
+    { name: '厨房计时器磁吸款', category: '家居', supplier: '温州计时', price: 7.8, moq: 500, lead: 8, margin: 0.57, source: '竞品对标', stage: 4, dwell: 8, owner: selOwner[0] ?? 1, shop: Number(shopId[1]), conclusion: 1, note: '测试通过', done: ['profile', 'price', 'channel'], snap: selSnap(11200, 0.038, 0.071, 0.019, 0.016, 2760, 0.36), spu: selSpu[0]?.id },
+    { name: '可折叠沥水篮', category: '家居', supplier: '揭阳塑品', price: 10.6, moq: 350, lead: 10, margin: 0.54, source: '市场调研', stage: 4, dwell: 3, owner: selOwner[1] ?? 2, shop: Number(shopId[2] ?? shopId[0]), conclusion: 1, note: '测试通过', done: ['profile', 'price', 'stock', 'channel', 'compliance'], snap: selSnap(9800, 0.036, 0.068, 0.017, 0.02, 2210, 0.34), spu: selSpu[1]?.id },
+    { name: '桌面理线器套装', category: '3C数码', supplier: '东莞硅胶', price: 6.3, moq: 600, lead: 6, margin: 0.61, source: '供应链推荐', stage: 5, dwell: 6, owner: selOwner[0] ?? 1, shop: Number(shopId[0]), conclusion: 1, note: '测试通过，已正式上架', done: ['profile', 'price', 'stock', 'channel', 'finance', 'compliance'], snap: selSnap(13400, 0.044, 0.079, 0.023, 0.014, 4180, 0.44), spu: selSpu[2]?.id ?? selSpu[0]?.id },
+    { name: '低价塑料水杯', category: '家居', supplier: '台州杯业', price: 2.4, moq: 2000, lead: 5, margin: 0.22, source: '竞品对标', stage: 6, dwell: 20, owner: selOwner[1] ?? 2, shop: Number(shopId[1]), conclusion: 2, reject: '毛利率仅 22%，扣物流后为负；同类目已有三家低价内卷，不具备投放空间', snap: selSnap(5200, 0.012, 0.018, 0.002, 0.071, 90, -0.08) },
+    { name: '网红迷你加湿器', category: '3C数码', supplier: '深圳小电', price: 15.9, moq: 200, lead: 12, margin: 0.47, source: '达人推荐', stage: 6, dwell: 31, owner: selOwner[0] ?? 1, shop: Number(shopId[0]), conclusion: 2, reject: '退货率 11.4%（雾化量与描述不符），复测仍高，判定不通过', snap: selSnap(7600, 0.029, 0.052, 0.011, 0.114, 540, 0.06) },
+  ];
+  selections.forEach((s, i) => {
+    const entered = iso(selDaysAgo(s.dwell, 9, i % 60));
+    const id = insert('selection_flow', {
+      code: `SEL-${new Date().getUTCFullYear()}-${String(i + 1).padStart(4, '0')}`,
+      name: s.name,
+      image_url: null,
+      category: s.category,
+      supplier: s.supplier,
+      purchase_price: s.price,
+      moq: s.moq,
+      lead_days: s.lead,
+      est_margin: s.margin,
+      breakeven_roas: s.margin > 0 ? Math.round((1 / s.margin) * 100) / 100 : 0,
+      source: s.source,
+      // shop=0 表示「还没分到测试店铺」——登记阶段的候选品本来就该是这样，
+      // 顺带把「无店铺候选品只对登记人可见」这条范围口径放进演示数据里
+      shop_id: s.shop || null,
+      spu_id: s.spu ?? null,
+      stage: s.stage,
+      stage_entered_at: entered,
+      owner_id: s.owner,
+      registered_by: s.owner,
+      conclusion: s.conclusion ?? 0,
+      conclusion_note: s.note ?? null,
+      adjustments: s.adjust ?? null,
+      test_started_at: s.stage >= 2 && s.stage < 5 ? iso(selDaysAgo(s.testDwell ?? s.dwell, 10, (i * 7) % 60)) : null,
+      test_snapshot: s.snap ?? '{}',
+      checklist: selChecklist(s.done ?? []),
+      selling_at: s.stage === 5 ? entered : null,
+      reject_reason: s.reject ?? null,
+      remark: null,
+      created_by: s.owner,
+      created_at: iso(selDaysAgo(s.dwell + 9, 8)),
+    });
+    // 上架后 48-72 小时的首检窗口：用 hours 字段精确造一条「正在窗口内」的数据
+    if (s.hours) run(`UPDATE selection_flow SET test_started_at = ? WHERE id = ?`, iso(new Date(Date.now() - s.hours * 3_600_000)), id);
+    const from = s.stage === 1 ? 0 : s.stage - 1;
+    if (from > 0) {
+      insert('selection_log', {
+        selection_id: Number(id), from_stage: from, to_stage: s.stage, action: 'transition', operator_id: s.owner,
+        note: `演示数据：进入${SELECTION_STAGE_LABELS[s.stage] ?? ''}`, created_at: entered,
+      });
+    }
+    insert('selection_log', {
+      selection_id: Number(id), from_stage: 0, to_stage: 1, action: 'register', operator_id: s.owner,
+      note: '候选品登记', created_at: iso(selDaysAgo(s.dwell + 9, 8)),
+    });
   });
 
   // V2.0：分析宽表重建 + 演示流量回填 + 默认规则 + 首轮预警事件

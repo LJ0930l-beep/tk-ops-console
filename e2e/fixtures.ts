@@ -19,8 +19,11 @@ export async function login(page: Page, username: string): Promise<void> {
   await page.getByPlaceholder('登录账号').fill(username);
   await page.getByPlaceholder('密码').fill(PASSWORD);
   await page.getByRole('button', { name: /登\s*录/ }).click();
-  await page.waitForURL(/#\/(actions|dashboard|login)/, { timeout: 20_000 });
-  await expect(page).not.toHaveURL(/#\/login/);
+  // 以前写成 waitForURL(/#\/(actions|dashboard|login)/) —— 正则把 /login 也算命中，
+  // 等于根本没等，登录响应慢一点就误判成功。这里必须等到真的离开 /login。
+  await expect
+    .poll(() => page.url(), { timeout: 20_000, message: `${username} 登录后没能离开登录页` })
+    .toMatch(/#\/(actions|dashboard)/);
 }
 
 /** 直接问后端要这个人的权限，用它去校验界面渲染 —— 而不是把角色表抄第二份进测试 */

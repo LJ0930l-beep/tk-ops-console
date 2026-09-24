@@ -46,13 +46,31 @@ test.describe('侧边栏逐项可点', () => {  for (const account of ACCOUNTS) 
         const before = page.url();
         await item.scrollIntoViewIfNeeded();
         await item.click({ timeout: 5_000 }).catch(() => undefined);
-        await page.waitForTimeout(450);
+        // 耐心等 URL 真的变化：CI 上 vite 会现场编译懒加载 chunk，固定 sleep 会误判成「点了没反应」
+        let moved = true;
+        await expect
+          .poll(() => page.url(), { timeout: 12_000, intervals: [250, 500, 1000] })
+          .not.toBe(before)
+          .catch(() => {
+            moved = false;
+          });
         checked.push(label);
-        if (page.url() === before && i > 0) {
+        if (!moved) {
           // 第一项就是当前页时 hash 不变是正常的，用 is-active 再确认一次
           const active = await item.getAttribute('class');
           if (!active?.includes('is-active')) broken.push(`${label}：点了 URL 没变（${before}）`);
         }
+        // 等这一页真的渲染出东西再点下一项：不然下一次点击会撞在一次还没结束的导航上
+        await page
+          .waitForFunction(
+            () => {
+              const main = document.querySelector('main');
+              return !!main && main.querySelector('.el-table, .el-card, .el-form, .el-descriptions, canvas, .el-empty') !== null;
+            },
+            undefined,
+            { timeout: 15_000 },
+          )
+          .catch(() => undefined);
       }
       expect(broken, `${account} 有 ${broken.length} 项点了没反应：\n${broken.join('\n')}`).toEqual([]);
       expect(checked.length, `${account} 实际点到的菜单项太少（${checked.join('/')}）`).toBeGreaterThanOrEqual(3);

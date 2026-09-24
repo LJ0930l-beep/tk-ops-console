@@ -118,7 +118,21 @@ async function start() {
   const child = spawn(entry.cmd, entry.args, {
     cwd: ROOT,
     stdio: 'inherit',
-    env: { ...process.env, DB_FILE: RUNTIME_DB, PORT, HOST: process.env.HOST ?? '127.0.0.1', SERVE_WEB: 'true', SEED_DEMO: 'true' },
+    env: {
+      ...process.env,
+      DB_FILE: RUNTIME_DB,
+      PORT,
+      HOST: process.env.HOST ?? '127.0.0.1',
+      SERVE_WEB: 'true',
+      SEED_DEMO: 'true',
+      // 本机演示放宽限流：默认档是 600 次/15 分钟 + 登录失败 10 次/15 分钟，
+      // 而这是个单人、mock 数据的本地演示 —— 正常点十几个页面就会撞上 429，
+      // 表现是「按钮点了没反应」，排查起来还像是前端坏了。
+      // 限流本身没有被关掉（rate-limit.spec.ts 与 smoke 仍在 HTTP 层证明它有效），只是把桶放大。
+      // 真要按公网部署，就别用这个按钮，自己起服务并保留默认阈值。
+      RATE_LIMIT_MAX: process.env.RATE_LIMIT_MAX ?? '100000',
+      RATE_LIMIT_LOGIN_MAX: process.env.RATE_LIMIT_LOGIN_MAX ?? '500',
+    },
   });
   const kill = () => !child.killed && child.kill('SIGINT');
   process.on('SIGINT', kill);

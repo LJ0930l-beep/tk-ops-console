@@ -1,5 +1,5 @@
 import { expect, type Page, test } from '@playwright/test';
-import { lastMessage, login } from './fixtures';
+import { clearMessages, lastMessage, login } from './fixtures';
 
 /**
  * 选品流水线（方案第十一章）的界面主路径：登记 → 上架测试 → 提交结论 → 结论落地 → 清单闸门 → 正常销售。
@@ -72,6 +72,7 @@ async function register(page: Page, name: string): Promise<string> {
   await putNumber(page, '起订量', '100');
   await putNumber(page, '交货周期(天)', '5');
   await pick(page, '选品来源', '市场调研');
+  await clearMessages(page);
   await dialog(page).getByRole('button', { name: /登记/ }).click();
   const msg = await lastMessage(page);
   expect(msg, `登记回执异常：${msg}`).toMatch(/已登记/);
@@ -102,6 +103,7 @@ test.describe('选品流水线', () => {
     await pick(page, '目标阶段', '店铺上架测试');
     await pick(page, '测试店铺', /.+/);
     await field(page, '流转说明').locator('textarea').fill('e2e 小流量测试');
+    await clearMessages(page);
     await dialog(page).getByRole('button', { name: /确认流转/ }).click();
     let msg = await lastMessage(page);
     expect(msg, `流转回执异常：${msg}`).toMatch(/已流转到「店铺上架测试」/);
@@ -114,6 +116,7 @@ test.describe('选品流水线', () => {
     await pick(page, '测试结论', '通过');
     await field(page, '结论说明').locator('textarea').fill('CTR 与转化均达基准');
     await putNumber(page, '曝光量', '9000');
+    await clearMessages(page);
     await concl.getByRole('button', { name: /提交结论/ }).click();
     await expect(concl.locator('.el-form-item__error').first()).toContainText(/必填/);
     for (const [label, value] of [
@@ -126,6 +129,7 @@ test.describe('选品流水线', () => {
     ] as const) {
       await putNumber(page, label, value);
     }
+    await clearMessages(page);
     await concl.getByRole('button', { name: /提交结论/ }).click();
     msg = await lastMessage(page);
     expect(msg, `结论提交回执异常：${msg}`).toMatch(/测试结论已记录/);
@@ -133,6 +137,7 @@ test.describe('选品流水线', () => {
     /* ④ 结论落地：通过 ⇒ 销售前准备 */
     await expect(card(page, code)).toBeVisible({ timeout: 20_000 });
     await act(page, code, '按结论落地').click();
+    await clearMessages(page);
     await page.locator('.el-message-box:visible').getByRole('button', { name: /确认落地/ }).click();
     msg = await lastMessage(page);
     expect(msg, `结论落地回执异常：${msg}`).toMatch(/已按结论流转到「销售前准备」/);
@@ -142,6 +147,7 @@ test.describe('选品流水线', () => {
     await expect(dialog(page)).toBeVisible();
     await pick(page, '目标阶段', '正常销售');
     await pick(page, '关联 SPU', /.+/);
+    await clearMessages(page);
     await dialog(page).getByRole('button', { name: /确认流转/ }).click();
     msg = await lastMessage(page);
     expect(msg, `清单没勾完竟然放行了：${msg}`).toMatch(/销售前准备清单未完成/);
@@ -157,6 +163,7 @@ test.describe('选品流水线', () => {
     const n = await rows.count();
     for (let i = 0; i < n; i++) await rows.nth(i).locator('.el-checkbox').first().click();
     for (let i = 0; i < n; i++) await pickFirstOption(page, rows.nth(i).locator('.el-select').first());
+    await clearMessages(page);
     await ck.getByRole('button', { name: /保存清单/ }).click();
     msg = await lastMessage(page);
     expect(msg, `清单保存回执异常：${msg}`).toMatch(/清单进度 6\/6/);
@@ -165,6 +172,7 @@ test.describe('选品流水线', () => {
     await expect(dialog(page)).toBeVisible();
     await pick(page, '目标阶段', '正常销售');
     await pick(page, '关联 SPU', /.+/);
+    await clearMessages(page);
     await dialog(page).getByRole('button', { name: /确认流转/ }).click();
     msg = await lastMessage(page);
     expect(msg, `转正常销售回执异常：${msg}`).toMatch(/已流转到「正常销售」/);
@@ -187,10 +195,12 @@ test.describe('选品流水线', () => {
 
     await act(page, code, '流转').click();
     await pick(page, '目标阶段', '淘汰池');
+    await clearMessages(page);
     await dialog(page).getByRole('button', { name: /确认流转/ }).click();
     // 没写原因连请求都发不出去：表单这一层挡在前面，后端那条 400 只是兜底
     await expect(field(page, '淘汰原因').locator('.el-form-item__error')).toContainText(/淘汰必须写明原因/);
     await field(page, '淘汰原因').locator('textarea').fill('同类目三家低价内卷，无投放空间');
+    await clearMessages(page);
     await dialog(page).getByRole('button', { name: /确认流转/ }).click();
     let msg = await lastMessage(page);
     expect(msg, `淘汰回执异常：${msg}`).toMatch(/已流转到「淘汰池」/);
@@ -205,6 +215,7 @@ test.describe('选品流水线', () => {
     // 捞回登记：淘汰池不是垃圾桶，复盘后可以重跑流水线
     await row.getByRole('button', { name: /流转/ }).click();
     await pick(page, '目标阶段', '商品选品登记');
+    await clearMessages(page);
     await dialog(page).getByRole('button', { name: /确认流转/ }).click();
     msg = await lastMessage(page);
     expect(msg, `捞回登记回执异常：${msg}`).toMatch(/已流转到「商品选品登记」/);

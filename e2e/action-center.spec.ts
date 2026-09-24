@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { lastMessage, login } from './fixtures';
+import { clearMessages, lastMessage, login } from './fixtures';
 
 /**
  * 行动中心闭环（选项 5 的第 ③ 条路径）：跑规则 → 出现待办 → 处置 → 效果回看能看到这条处置。
@@ -39,6 +39,7 @@ test.describe('行动中心闭环', () => {
     const panel = page.locator('.el-dialog:visible, .el-drawer:visible').last();
     await expect(panel).toBeVisible();
     await panel.getByPlaceholder(/你做了什么|为什么忽略/).fill(NOTE);
+    await clearMessages(page);
     await panel.getByRole('button', { name: /提交/ }).click();
     const msg = await lastMessage(page);
     expect(msg, `处置回执异常：${msg}`).toMatch(/已记录|已处理|已提交|成功|忽略|闭环/);

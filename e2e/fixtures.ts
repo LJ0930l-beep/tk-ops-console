@@ -16,13 +16,16 @@ export interface Me {
 /** 走界面登录（不是塞 localStorage）：登录链路本身就是被测对象 */
 export async function login(page: Page, username: string): Promise<void> {
   await page.goto('/#/login');
+  // CI 冷启动时 vite 要先编译登录页这一块，不等表单真的出来就 fill，
+  // 结果是把 20s 全烧在"登录后没能离开登录页"上（真红过一次，报的还是错的因）
+  await page.getByRole('button', { name: /登\s*录/ }).waitFor({ state: 'visible', timeout: 60_000 });
   await page.getByPlaceholder('登录账号').fill(username);
   await page.getByPlaceholder('密码').fill(PASSWORD);
   await page.getByRole('button', { name: /登\s*录/ }).click();
   // 以前写成 waitForURL(/#\/(actions|dashboard|login)/) —— 正则把 /login 也算命中，
   // 等于根本没等，登录响应慢一点就误判成功。这里必须等到真的离开 /login。
   await expect
-    .poll(() => page.url(), { timeout: 20_000, message: `${username} 登录后没能离开登录页` })
+    .poll(() => page.url(), { timeout: 30_000, message: `${username} 登录后没能离开登录页` })
     .toMatch(/#\/(actions|dashboard)/);
 }
 
@@ -82,6 +85,16 @@ export async function lastMessage(page: Page): Promise<string> {
   const el = page.locator('.el-message').last();
   await el.waitFor({ state: 'visible', timeout: 20_000 });
   return (await el.innerText()).trim();
+}
+
+/**
+ * 触发本次动作之前先把屏幕上的旧提示清掉。
+ * 不清会怎样：上一条 toast 还在 3s 展示期内、本次回执晚一步到，`lastMessage` 就把旧的那条当回执读走 ——
+ * 于是断言报出"处置回执异常：评估 16 条规则…"这种驴唇不对马嘴的红（CI 上真红过一次）。
+ * 只删 DOM 节点，不碰应用状态。
+ */
+export async function clearMessages(page: Page): Promise<void> {
+  await page.evaluate(() => document.querySelectorAll('.el-message').forEach((n) => n.remove()));
 }
 
 export async function hasToken(page: Page): Promise<boolean> {

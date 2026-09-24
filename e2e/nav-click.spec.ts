@@ -26,6 +26,9 @@ async function expandGroups(page: import('@playwright/test').Page): Promise<void
 
 test.describe('侧边栏逐项可点', () => {  for (const account of ACCOUNTS) {
     test(`${account} 的每个菜单项点了都要真的换页面`, async ({ page }) => {
+      // boss 有 37 个菜单项，CI 上每一次导航都可能触发 vite 现场编译懒加载 chunk；
+      // 这条要的是"每个项都真的点一次"，预算只能按项数给，不能拿默认 90s 卡自己
+      test.setTimeout(300_000);
       const consoleErrors: string[] = [];
       page.on('pageerror', (e) => consoleErrors.push(`pageerror: ${e.message}`));
       await login(page, account);
@@ -55,18 +58,18 @@ test.describe('侧边栏逐项可点', () => {  for (const account of ACCOUNTS) 
           await item.click({ timeout: 5_000 }).catch(() => undefined);
         };
         // 耐心等 URL 真的变化：CI 上 vite 会现场编译懒加载 chunk，固定 sleep 会误判成「点了没反应」
-        const waitMoved = async (): Promise<boolean> =>
+        const waitMoved = async (ms: number): Promise<boolean> =>
           expect
-            .poll(() => page.url(), { timeout: 10_000, intervals: [250, 500, 1000] })
+            .poll(() => page.url(), { timeout: ms, intervals: [250, 500, 1000] })
             .not.toBe(before)
             .then(() => true)
             .catch(() => false);
         await clicked();
-        let moved = await waitMoved();
+        let moved = await waitMoved(10_000);
         if (!moved) {
           // 第一次可能撞在一次还没结束的导航/重排上；真坏了的项点两次也不会动
           await clicked();
-          moved = await waitMoved();
+          moved = await waitMoved(6_000);
         }
         checked.push(label);
         if (!moved) broken.push(`${label}：点了两次 URL 都没变（${before}）`);

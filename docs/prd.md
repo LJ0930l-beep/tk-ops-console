@@ -476,6 +476,10 @@
 - **为什么非流式**：内部系统一问一答够用，而 `EventSource` 带不上 `Authorization` 头 —— 要上流式得先改鉴权方式（cookie 或短期票据），那是另一整件事。
 - **前端超时必须单独放宽**：服务端出网给模型最多 `AI_HTTP_TIMEOUT_MS`（默认 45s），跟着 axios 默认的 30s 会先把请求掐掉，表现是"AI 明明在算，界面报了个网络错误"。
 - **审计三张表各司其职**：`ai_call_log` 记每次出网（token/耗时/估算花费/失败原因），`ai_message` 记对话原文（含 `tool_calls`），`ai_action_log` 只记写工具，字段是"哪条消息、哪个工具、改了哪张表哪一行、被拒还是失败"。
+  `target_table` 与 `target_id` **必须指同一个对象**：处置预警记 `alert_event` + 那条预警的 ID，不是新写出来的处置流水 ID —— 审计表指错行比不记更糟。
+- **时间区间只有一个口径**：读工具（看板 / 利润报表）收 `days`（滚动 N 天）或 `month`（自然月 `YYYY-MM`，两端都含，没过完的月截到今天）。
+  系统提示里写死了"今天是哪天"、"本月/上月必须换成 `month` 参数"、"引用数字要复述工具返回的区间" ——
+  近 30 天冒充本月就是本项目反复在防的"同名不同分母"，第一次真实模型联调就是这么暴露出来的。
 - **配置项**（全部 env 可覆盖，见 `config.ts`）：`AI_ENABLED`、`AI_HTTP_TIMEOUT_MS`、`AI_MAX_RETRY`、`AI_MAX_TOOL_ROUNDS`、`AI_HISTORY_LIMIT`、`AI_ALLOWED_HOSTS`、`AI_MAX_PROMPT_CHARS`。
 
 ---

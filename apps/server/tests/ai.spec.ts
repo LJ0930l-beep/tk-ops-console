@@ -164,6 +164,21 @@ describe('对话与工具循环（OpenAI 兼容协议）', () => {
     expect(conv.title).toBe('最近赚钱吗');
   });
 
+  it('问"本月"传 month 时按自然月取数，不退化成近 30 天', async () => {
+    const id = addProvider('自然月区间');
+    const { transport } = stubTransport([
+      () => oaReply(null, [{ id: 'm1', name: 'get_profit_report', arguments: '{"dim":"shop","month":"2026-08"}' }]),
+      () => oaReply('8 月贡献毛利为负。'),
+    ]);
+    const out = await runChat({ user: loadUser(1)!, content: '8 月哪个店在亏钱', providerId: id, transport });
+    const payload = String(out.messages.find((m) => m.role === 'tool')?.content ?? '');
+    expect(payload).toContain('2026-08-01');
+    expect(payload).toContain('2026-08-31');
+    expect(payload).toContain('2026-08-31');
+    // 近 30 天的起点会落在 8 月下旬，用它做反证
+    expect(payload).not.toMatch(/"start":"2026-0[78]-2\d"/);
+  });
+
   it('白名单之外的工具名不执行，只回一句"不存在"', async () => {
     const id = addProvider('幻觉工具');
     const { transport } = stubTransport([
@@ -204,6 +219,28 @@ describe('对话与工具循环（OpenAI 兼容协议）', () => {
     expect(Number(action.target_id)).toBe(Number(row.id));
     // 公海达人被跟进后应转入本人私海（与界面快捷录入同一效果）
     expect(Number(get<{ pool_status: number }>(`SELECT pool_status FROM creator WHERE id = ?`, creator.id)?.pool_status)).toBe(2);
+  });
+
+  it('处置预警的审计行指向"被改的那条预警"，不是新写的处置流水 ID', async () => {
+    const id = addProvider('处置留痕');
+    // 挑 ID 最大的那条：新写的处置流水从 1 开始，只有两个 ID 可分辨时这条断言才有意义
+    const ev = get<{ id: number }>(`SELECT ae.id FROM alert_event ae WHERE ae.is_deleted = 0 AND ae.status IN (0, 1) ORDER BY ae.id DESC LIMIT 1`)!;
+    expect(ev).toBeTruthy();
+    const { transport } = stubTransport([
+      () => oaReply(null, [{ id: 'a1', name: 'record_alert_action', arguments: JSON.stringify({ event_id: ev.id, action_type: 'handle', note: '已联系投放把出价降下来' }) }]),
+      () => oaReply('已按你说的把这条预警置为处理中。'),
+    ]);
+    const out = await runChat({ user: loadUser(1)!, content: '把那条预警标成处理中', providerId: id, transport });
+    const action = get<{ target_table: string; target_id: number; status: number; result: string }>(
+      `SELECT target_table, target_id, status, result FROM ai_action_log WHERE conversation_id = ?`, out.conversation_id,
+    )!;
+    expect(Number(action.status)).toBe(1);
+    expect(action.target_table).toBe('alert_event');
+    // 前提：新流水 ID 与被处置的预警 ID 确实不同，否则下面的断言分辨不出取错了哪个
+    expect(Number((JSON.parse(action.result) as { action_id: number }).action_id)).not.toBe(Number(ev.id));
+    expect(Number(action.target_id)).toBe(Number(ev.id));
+    // 业务表确实动了（与行动中心点按钮同一效果）
+    expect(Number(get<{ status: number }>(`SELECT status FROM alert_event WHERE id = ?`, ev.id)?.status)).not.toBe(0);
   });
 
   it('没有达人菜单的人，AI 也替他写不了建联跟进（并留一条"被拒"）', async () => {

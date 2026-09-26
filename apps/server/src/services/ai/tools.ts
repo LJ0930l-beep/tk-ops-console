@@ -47,7 +47,12 @@ const obj = (props: Record<string, unknown>, required: string[] = []): Record<st
   required,
 });
 
-const DAYS = { type: 'integer', minimum: 1, maximum: 365, description: '统计天数，从昨天往前推；不传按 30 天' } as const;
+const DAYS = { type: 'integer', minimum: 1, maximum: 365, description: '统计天数，区间为「今天-(days-1) ~ 今天」；不传按 30 天' } as const;
+const MONTH = {
+  type: 'string',
+  pattern: '^\\d{4}-\\d{2}$',
+  description: '自然月 YYYY-MM（问"本月/上月/某个月"必须用这个，别拿近 30 天当本月）；传了就忽略 days',
+} as const;
 
 /** 把 YYYY-MM-DD 往前推 n 天（UTC 算法，和利润引擎的区间口径一致） */
 function rangeOfDays(days: number): { start: string; end: string } {
@@ -56,16 +61,32 @@ function rangeOfDays(days: number): { start: string; end: string } {
   return { start, end };
 }
 
+/**
+ * 读工具统一取区间：两端都含（与 computeProfitReport / dashboardMetrics 的 `day > range.end` 判定一致）。
+ * 自然月截到今天 —— 没过完的月不把未来日子算进去，但也不退化成"近 30 天"。
+ */
+function periodRange(args: Record<string, unknown>): { start: string; end: string } {
+  const month = String(args.month ?? '').trim();
+  if (/^\d{4}-\d{2}$/.test(month)) {
+    const start = `${month}-01`;
+    const next = new Date(`${start}T00:00:00Z`);
+    next.setUTCMonth(next.getUTCMonth() + 1);
+    const last = new Date(next.getTime() - 86_400_000).toISOString().slice(0, 10);
+    const today = new Date().toISOString().slice(0, 10);
+    return { start, end: last > today ? today : last };
+  }
+  return rangeOfDays(Number(args.days ?? 30) || 30);
+}
+
 export const AI_TOOLS: Record<AiToolName, ToolDef> = {
   [AI_TOOL.GET_DASHBOARD]: {
     name: AI_TOOL.GET_DASHBOARD,
     write: false,
     menu: 'dashboard',
     description: '读经营看板：净带货 GMV、订单数、应收返点（我们唯一的收入）、贡献毛利、广告 ROAS、待办计数、逐日趋势与店铺/达人榜。回答经营性问题先调它。',
-    parameters: obj({ days: DAYS }),
+    parameters: obj({ days: DAYS, month: MONTH }),
     async run(ctx, args) {
-      const days = Number(args.days ?? 30) || 30;
-      const { start, end } = rangeOfDays(days);
+      const { start, end } = periodRange(args);
       const m = dashboardMetrics(ctx.user, { start, end }) as unknown as Record<string, unknown>;
       const trim = (rows: unknown, keys: readonly string[], n = 6) =>
         Array.isArray(rows) ? rows.slice(0, n).map((r) => pick(r as Record<string, unknown>, keys)) : [];
@@ -92,11 +113,11 @@ export const AI_TOOLS: Record<AiToolName, ToolDef> = {
     parameters: obj({
       dim: { type: 'string', enum: ['shop', 'sku', 'creator', 'month'], description: '统计维度，默认 shop' },
       days: DAYS,
+      month: MONTH,
       only_settled: { type: 'boolean', description: '只看已结算订单，默认 false' },
     }),
     async run(ctx, args) {
-      const days = Number(args.days ?? 30) || 30;
-      const { start, end } = rangeOfDays(days);
+      const { start, end } = periodRange(args);
       const dim = (['shop', 'sku', 'creator', 'month'].includes(String(args.dim)) ? String(args.dim) : 'shop') as 'shop' | 'sku' | 'creator' | 'month';
       const report = computeProfitReport({ user: ctx.user, dim, start, end, onlySettled: args.only_settled === true });
       const rows = (report.list ?? []).map((r) =>
@@ -282,6 +303,9 @@ export function systemPrompt(user: CurrentUser, extra: string[]): string {
     '你是 TikTok 代运营后台里的经营助手。这个系统的收入口径是「品牌服务方」：货是品牌的，' +
       '我们只按实收 GMV 拿品牌返点，系统里没有采购价；贡献毛利 = 应收返点 −（物流 + 达人佣金 + 分摊广告 + 公共费用）。',
     '回答经营数字时不要凭记忆，必须调用工具取当前数据；调不到就直说取不到，不要编。',
+    `今天是 ${new Date().toISOString().slice(0, 10)}。"本月/上月/9 月"这类说法先换成这个日期再算，` +
+      '并把算出来的自然月用工具的 month 参数（YYYY-MM）传进去 —— 近 30 天不等于本月，' +
+      '引用数字时必须复述工具返回的「区间」两端。',
     '你能写入的业务动作仅限这些白名单工具：' +
       `${tools.filter((t) => t.write).map((t) => t.name).join(' / ') || '（当前角色没有可写工具）'}。` +
       '删除、改价、上架、对外给达人发消息一律不允许，用户提这种要求要直接说明系统不开放给 AI 执行。',

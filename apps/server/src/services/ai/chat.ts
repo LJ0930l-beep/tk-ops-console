@@ -206,6 +206,10 @@ export async function runChat(input: {
       })();
       const result = await runTool({ user: input.user, ip: input.ip, callId: lastCallId, conversationId: conv.id }, call.name, args);
       if (isWriteTool(call.name)) {
+        // target_table 与 target_id 必须指同一个对象：处置预警时改的是 alert_event，
+        // 返回体里的 action_id 是新写的流水行，拿它当 target_id 会让审计表指向一条不存在的预警。
+        const outreach = call.name === 'create_outreach';
+        const targetId = outreach ? Number(result.payload.outreach_id ?? 0) : Number(args.event_id ?? 0);
         insert('ai_action_log', {
           call_id: lastCallId,
           conversation_id: conv.id,
@@ -214,8 +218,8 @@ export async function runChat(input: {
           status: result.ok ? AI_ACTION_STATUS.EXECUTED : AI_ACTION_STATUS.REJECTED,
           arguments: call.arguments,
           result: JSON.stringify(result.payload).slice(0, 4000),
-          target_table: call.name === 'create_outreach' ? 'creator_outreach' : 'alert_event',
-          target_id: Number(result.payload.outreach_id ?? result.payload.action_id ?? args.event_id ?? 0) || null,
+          target_table: outreach ? 'creator_outreach' : 'alert_event',
+          target_id: targetId || null,
           error_msg: result.ok ? null : maskError(String(result.payload.error ?? '')).slice(0, 300),
           created_by: input.user.id,
         });

@@ -403,6 +403,13 @@ sendAlert({ title: '订单同步失败', detail: `shop=1 ${msg}`, level: 'error'
 **没有 mock**：产品代码里不存在假数据分支，没配服务商就是 409 一句可读提示。要测真实链路就在测试里注入桩 `transport`
 （`runChat({ transport })`，与 `services/tiktok/realClient.ts` 的注入点同一套路），桩只替掉 `fetch` 这一层，
 其余（报文、工具循环、落库、脱敏）走的都是生产代码。**不要**为了"e2e 能跑通"往产品里加假回复。
+本机另有可用的离线口子：`llama.cpp`/Ollama 之类 OpenAI 兼容服务可以填 `http://127.0.0.1:<port>/v1`（回环例外允许 http），
+所以"能不能真的对话"这件事不需要公网 key 也能验证。
+
+**时间区间只有一个口径**：读工具的区间参数只认 `days`（滚动 N 天）与 `month`（自然月 `YYYY-MM`，两端都含、
+没过完的月截到今天），二者都由 `periodRange()` 一处算。系统提示必须写清"今天是哪天"并要求
+"本月/上月用 `month`、引用数字复述区间" —— 拿近 30 天当本月就是本项目反复在防的"同名不同分母"。
+新增读工具**不要**自己再拼一遍日期。
 
 **AI 写数据的边界**：
 
@@ -412,6 +419,8 @@ sendAlert({ title: '订单同步失败', detail: `shop=1 ${msg}`, level: 'error'
 - 执行时传的是**发起对话那个人的 `CurrentUser`**：菜单不够、数据范围外的对象，AI 一律做不到；
   `op_log.created_by` 记这个人，不是"AI"。
 - 每次写工具调用（成功或被拒）都要落 `ai_action_log`，字段含 `tool_name / status / target_table / target_id / 会话与调用 ID`。
+  `target_table` 与 `target_id` 必须指同一个对象（处置预警 = `alert_event` + 预警 ID，不是新写的处置流水 ID）；
+  写工具返回体里的新行 ID 放在 `result` 里，不要拿来当 target。
 - 删除、改价/上架、对外给达人发消息这三类**永远不进名单**，用户提这种要求要模型直接拒绝（系统提示词里写死了这条）。
 
 **观测**：每次出网一条 `ai_call_log`（token、耗时、估算花费、工具数、失败原因）；对话轮数受

@@ -43,8 +43,9 @@ status: 已交付（2026-09-26）
 5. 后端 `modules/ai.routes.ts` 15 个端点，整段 `requireMenu('ai')`；`npm run openapi` 重生成契约与 `ApiPath`。
 6. 前端三页：`views/ai/ChatView.vue`（会话列表 + 消息流 + 工具卡片 + 用量；未配置时把入口指到配置页并禁用输入）、
    `ProviderList.vue`（ResourcePage CRUD + 厂商预设联动 + 测活）、`AiAudit.vue`（用量卡 + 出网调用/AI 写入两页签）。
-7. 测试：`tests/ai.spec.ts` 12 例（注入桩 transport 离线对拍两家协议报文、工具循环与写库留痕、
-   白名单外工具不执行、越权写入被拒且留痕、密钥不出接口也不出错误文案、连不上服务商时文案要指向 base_url、轮数上限）；
+7. 测试：`tests/ai.spec.ts` 14 例（注入桩 transport 离线对拍两家协议报文、工具循环与写库留痕、
+   白名单外工具不执行、越权写入被拒且留痕、密钥不出接口也不出错误文案、连不上服务商时文案要指向 base_url、
+   问"本月"要按自然月取数而不是近 30 天、处置预警的审计行指向被改的那条预警、轮数上限）；
    `e2e/ai.spec.ts` 3 例（未配置报错面、新建服务商后密钥读不回来、测活失败要回原因）；
    `e2e/pages.spec.ts` 纳入 3 个新页面。
 

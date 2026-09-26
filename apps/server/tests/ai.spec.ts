@@ -118,6 +118,17 @@ describe('服务商配置与密钥边界', () => {
     expect(err).not.toContain(KEY);
     expect(err).toMatch(/API Key 无效|401/);
   });
+
+  it('连不上服务商时（DNS/拒绝连接），文案要指到 base_url 而不是"fetch failed"', async () => {
+    const id = addProvider('地址不通');
+    const transport: Transport = async () => {
+      throw new TypeError('fetch failed', { cause: new Error('getaddrinfo ENOTFOUND api.unit-test.invalid') });
+    };
+    await expect(runChat({ user: loadUser(1)!, content: 'hi', providerId: id, transport })).rejects.toThrow(/base_url/);
+    const err = String(all<Record<string, unknown>>(`SELECT error_msg FROM ai_call_log WHERE provider_id = ? ORDER BY id DESC`, id)[0]?.error_msg ?? '');
+    expect(err).toMatch(/ENOTFOUND/);
+    expect(err).not.toContain(KEY);
+  });
 });
 
 describe('对话与工具循环（OpenAI 兼容协议）', () => {

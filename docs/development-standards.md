@@ -416,3 +416,8 @@ sendAlert({ title: '订单同步失败', detail: `shop=1 ${msg}`, level: 'error'
 
 **观测**：每次出网一条 `ai_call_log`（token、耗时、估算花费、工具数、失败原因）；对话轮数受
 `AI_MAX_TOOL_ROUNDS` 限制，用完必须留一条"为什么收口"的说明，不许静默空回复。
+
+**失败文案两类都要翻译**：HTTP 状态走 `describeFailure()`（401/403 → 核对密钥、404 → 核对 base_url 是否含 `/v1`、
+429 → 限流）；传输层失败没有状态码，undici 只抛一句 `fetch failed`，真正的原因（ENOTFOUND / ECONNREFUSED / 证书）
+在 `error.cause` 里，必须带出来并指向"核对 base_url 能否从本机访问"，否则用户拿到的是一句无法照做的英文。
+两类文案都同样过 `safe()`。

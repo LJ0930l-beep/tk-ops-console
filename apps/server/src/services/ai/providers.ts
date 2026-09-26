@@ -76,9 +76,15 @@ async function postJson(
       return { status: res.status, json };
     } catch (e) {
       if (e instanceof AiApiError) throw e;
-      const name = e instanceof Error ? e.name : '';
-      const msg = e instanceof Error ? e.message : String(e);
-      lastError = name === 'TimeoutError' ? `请求超时（>${Math.round(config.aiTimeoutMs / 1000)}s）` : safe(msg, secrets).slice(0, 200);
+      const err = e instanceof Error ? e : new Error(String(e));
+      if (err.name === 'TimeoutError') {
+        lastError = `请求超时（>${Math.round(config.aiTimeoutMs / 1000)}s）`;
+      } else {
+        // undici 只抛 "fetch failed"，真正的原因（ENOTFOUND / ECONNREFUSED / 证书）在 cause 里；
+        // 不给这一层，用户看到的就是一句无法照做的"调用失败：fetch failed"。
+        const cause = err.cause instanceof Error ? err.cause.message : '';
+        lastError = safe(`${err.message}${cause ? `（${cause}）` : ''}：请核对 base_url 能否从本机访问`, secrets).slice(0, 200);
+      }
       if (i === attempts - 1) break;
     }
   }

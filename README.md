@@ -21,7 +21,7 @@ AI 助手接的是**品牌服务方口径的经营问答**：模型只能按白�
 | --- | --- |
 | `npm run dev` | 同时起后端（:8787）与前端（:5173，代理 `/api`） |
 | `npm run lint` | 后端 `tsc --noEmit` + 前端 `vue-tsc --noEmit` |
-| `npm run test` | 后端 vitest（411 例，2 例外呼用例默认跳过）+ 前端单测（10 例） |
+| `npm run test` | 后端 vitest（412 例，2 例外呼用例默认跳过）+ 前端单测（10 例） |
 | `npm run smoke` | 全链路冒烟：内存库起真 HTTP 服务，8 角色 × 全部 GET + 写链路 + 导出 + 限流，退出码非 0 即有 FAIL |
 | `npm run e2e` | Playwright 端到端 69 例：RBAC 可见性（含"侧边栏分组 == menu_perms"）/ 导入中心 / 行动中心闭环 / 选品流水线全程 / AI 配置与密钥不外泄 / 40 个页面逐个打开。自己起临时库与服务端，不碰 `apps/data/tk_ops.db` |
 | `npm run openapi` | 重新生成 `docs/openapi.json` 与前端 `ApiPath` 路径类型；改了路由就得跑，CI 会检查生成物是否落后 |

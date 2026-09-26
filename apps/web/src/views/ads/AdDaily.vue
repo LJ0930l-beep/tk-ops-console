@@ -42,7 +42,8 @@
         type="info"
         :closable="false"
         show-icon
-        title="stat_date 为店铺站点时区的自然日（PRD §5.5）；ROI = GMV ÷ 消耗，消耗为 0 时显示「—」；CTR = 点击 ÷ 曝光，CPC = 消耗 ÷ 点击，CPM = 消耗 ÷ 曝光 × 1000。"
+        title="stat_date 为店铺站点时区的自然日（PRD §5.5）；这里的 ROI 是带货口径 = GMV ÷ 消耗，GMV 是品牌的生意、不是我们的收入，所以 ROAS≥1 并不等于赚钱。"
+        description="消耗是我们掏的钱、GMV 是品牌的生意。我们能不能靠投流回本，看的是贡献毛利率（品牌返点率 − 物流 − 达人佣金）：盈亏平衡 ROAS = 1 ÷ 贡献毛利率，返点 20% 毛利就要 ROAS 5 才打平。本页只对「ROAS<1 必亏」标红，其余不判好坏，逐日结论交给规则中心的「广告低于盈亏线」（ADS_LOSS）；消耗为 0 时 ROAS 显示「—」。CTR = 点击 ÷ 曝光，CPC = 消耗 ÷ 点击，CPM = 消耗 ÷ 曝光 × 1000。"
       />
     </el-card>
 
@@ -78,7 +79,7 @@
         <el-table-column prop="campaign_id" label="计划 ID" width="130" show-overflow-tooltip />
         <el-table-column prop="campaign_name" label="计划名称" min-width="170" show-overflow-tooltip />
         <el-table-column prop="advertiser_id" label="广告账户" width="130" show-overflow-tooltip />
-        <el-table-column prop="spend" label="消耗" width="110" align="right" sortable="custom">
+        <el-table-column prop="spend" label="消耗(我们掏)" width="120" align="right" sortable="custom">
           <template #default="{ row }">{{ money(row.spend) }} <span class="cur">{{ row.currency }}</span></template>
         </el-table-column>
         <el-table-column prop="impressions" label="曝光" width="100" align="right" sortable="custom">
@@ -99,10 +100,10 @@
         <el-table-column prop="conversions" label="转化" width="90" align="right">
           <template #default="{ row }">{{ int(row.conversions) }}</template>
         </el-table-column>
-        <el-table-column prop="gmv" label="广告 GMV" width="120" align="right" sortable="custom">
+        <el-table-column prop="gmv" label="广告带货 GMV" width="135" align="right" sortable="custom">
           <template #default="{ row }">{{ money(row.gmv) }}</template>
         </el-table-column>
-        <el-table-column prop="roi" label="ROI" width="90" align="right" sortable="custom">
+        <el-table-column prop="roi" label="ROAS(GMV÷消耗)" width="140" align="right" sortable="custom">
           <template #default="{ row }">
             <span :class="roiClass(row)">{{ roiText(row) }}</span>
           </template>
@@ -192,7 +193,9 @@ const cpm = (r: RowLike) => (num(r.impressions) > 0 ? round2((num(r.spend) / num
 function roiClass(r: RowLike): string {
   const v = roiOf(r);
   if (v === null) return 'mask';
-  return v >= 1 ? 'roi-good' : 'roi-bad';
+  // 只标「一定亏」的那一侧：贡献毛利率 ≤ 100% ⇒ 盈亏平衡 ROAS ≥ 1，所以 ROAS<1 必亏。
+  // ROAS≥1 不代表盈利（要看返点率），本页不下这个结论，交给「广告低于盈亏线」预警规则按 1/毛利率判。
+  return v < 1 ? 'roi-bad' : '';
 }
 
 const kpiCards = computed(() => {
@@ -203,9 +206,9 @@ const kpiCards = computed(() => {
   const clk = rows.value.reduce((a, r) => a + num(r.clicks), 0);
   const roi = adRoi(spend, gmv);
   return [
-    { label: '消耗（本页）', value: money(spend), sub: `${rows.value.length} 行明细` },
-    { label: '广告 GMV', value: money(gmv), sub: `转化 ${int(conv)} 单` },
-    { label: '整体 ROI', value: roi === null ? '—' : roi.toFixed(2), sub: roi === null ? '无消耗' : 'GMV ÷ 消耗' },
+    { label: '消耗（本页·我们掏）', value: money(spend), sub: `${rows.value.length} 行明细` },
+    { label: '广告带货 GMV', value: money(gmv), sub: `转化 ${int(conv)} 单（品牌的生意规模）` },
+    { label: '整体 ROAS', value: roi === null ? '—' : roi.toFixed(2), sub: roi === null ? '无消耗' : 'GMV ÷ 消耗：不是我们的收益率，打平线 = 1 ÷ 贡献毛利率' },
     { label: '点击率 CTR', value: imp > 0 ? `${((clk / imp) * 100).toFixed(2)}%` : '—', sub: `点击 ${int(clk)} / 曝光 ${int(imp)}` },
   ];
 });
@@ -334,10 +337,6 @@ onMounted(() => {
 .cur {
   color: #909399;
   font-size: 11px;
-}
-.roi-good {
-  color: #67c23a;
-  font-weight: 600;
 }
 .roi-bad {
   color: #f56c6c;

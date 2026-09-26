@@ -184,8 +184,8 @@ const router = useRouter();
 
 /** stock_ledger.change_type：入库类型为正、出库类型为负（约定见 PRD §3.9） */
 const CHANGE_TYPE = [
-  { value: 1, label: '采购入库', type: 'success' as const },
-  { value: 2, label: '头程发货', type: 'warning' as const },
+  { value: 1, label: '品牌入仓', type: 'success' as const },
+  { value: 2, label: '头程调拨', type: 'warning' as const },
   { value: 3, label: '调拨', type: 'primary' as const },
   { value: 4, label: '销售出库', type: 'danger' as const },
   { value: 5, label: '样品出库', type: 'danger' as const },

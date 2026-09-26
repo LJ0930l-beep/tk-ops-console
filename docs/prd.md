@@ -48,7 +48,7 @@
 > 结论：**基座 + 商品/达人/内容/订单/财务/同步六域后端主体 + 前端骨架已完成约 74%**（按 34 张工单口径折算，剩余 27.5 人日）。
 > 剩余关键路径只有 5 条：**① 调度器挂载（D10，一期阻断）② 利润引擎与死副本收口（D11）③ 45 个类型错误清零（阻断 `npm run build`）④ ads/dashboard/stock 三个后端模块 ⑤ 测试基线（除达人域外 0 覆盖）**。
 
-阅读约定：表名、字段名、枚举值、路由一律用代码原文（如 `tk_order_item.cost_snapshot`、`COLLAB_STATUS.SIGNED`、`POST /api/creators/:id/claim`）。中文展示名放在括号里。
+阅读约定：表名、字段名、枚举值、路由一律用代码原文（如 `tk_order_item.rebate_cny`、`COLLAB_STATUS.SIGNED`、`POST /api/creators/:id/claim`）。中文展示名放在括号里。
 
 ---
 
@@ -59,7 +59,7 @@
 | 维度 | 判断 | 依据（可核对） |
 | --- | --- | --- |
 | 数据模型 | **合理，全盘采纳 26 表** | 业务 20 + 支撑 6，覆盖"店铺—商品—订单—达人—内容—钱"闭环；`tk_order_item` 同时挂 `sku_id/creator_id/content_type/content_id` 是归因关键，方案表 7 已到位 |
-| 三条设计要点 | **合理，且必须写成硬约束 + 测试** | ① 成本快照冻结 ② 待映射不按 0 成本 ③ 样品单不计 GMV；已落为 `cost_snapshot/cost_matched/is_sample_order` 三个字段（`schema.sqlite.sql` 已建列） |
+| 三条设计要点 | **合理，但必须按品牌服务方口径重述后再写成硬约束 + 测试** | ① 返点/物流快照冻结 ② 未配返点率的行不按 0 收入进利润 ③ 样品单不计 GMV；已落为 `rebate_cny`+`logistics_cny` / `rebate_matched` / `is_sample_order`（`schema.sqlite.sql` 已建列）。原方案的"成本快照"预设了我们付货款，见 §5.4「生意模式」 |
 | 菜单与权限 | **合理，但粒度需降级后再实现** | 方案 8.1 只给"菜单级 + 三个开关"，未定义按钮级；`sys_role.menu_perms` 用 `z.enum(MENU_KEYS)` 只能存 10 个一级 key（`shop.routes.ts`/`system.routes.ts`），按钮级权限属超范围 → §1.2-Q8 定稿为"页面级显隐 + 服务端一级菜单校验" |
 | 分期 | **偏乐观 15~25%** | 方案 4~5 周 + 3 周 + 1.5~2 周按"1 人全栈"隐含口径；实测一期 27 人日、二期 7、三期 4 = 38 人日，2 人并行 ≈ 4.5 周（含缓冲 6 周），见 §9 |
 | 技术架构 | **已偏离且必须偏离** | 方案第九章写 Java/Python + MySQL 8；仓库实际是 TypeScript（Express 5 + `node:sqlite`）。方案自己承认"Java 或 Python"，属可选型；MySQL → SQLite 的差异已全部记入 `docs/changes-vs-plan.md` |
@@ -82,7 +82,7 @@
 | Q8 | 报表按北京时间还是站点当地时间切日？ | **按站点时区切日**（`statDate(t, REGION_TZ_OFFSET[region])`），`ad_daily.stat_date` 落库即站点自然日；前端展示按浏览器时区 | 方案表 17 `stat_date` 语义即"当地自然日"；卖家中心也是当地日 | 改北京时间 → 历史 `stat_date` 全量重刷、趋势同比重算，"昨天的数字会变"（1~2 人日 + 沟通成本）；**夏令时已知限制**：`REGION_TZ_OFFSET` 是固定分钟偏移，而 `tk_shop.timezone` 是 IANA 名（演示数据 `America/Los_Angeles` 等），两者不等价，US/MX 夏令时窗口内有 1 小时错位 → 见 §1.5 D4 与 `EPIC-8-01` |
 | Q9 | 能否提供店铺主账号授权与开发者资质？ | **一期以 `TIKTOK_API_MODE=mock` + 表格导入交付**，`real` provider 同期就位但不作为验收前置；假设客户二期前完成 Partner Center 应用创建 + 主账号授权 + 联盟权限申请 | 方案第七章"权限审批时间不计入开发周期"，且本机与 CI 环境均无平台凭证 | 长期拿不到授权 → 结算缺失 = **没有真实利润口径**，利润报表长期 `is_estimated=1`，需事前书面对齐；只拿到部分（常见：订单可以、联盟不行）→ 归因需人工回填，验收项 A3 降级为"人工归因可用"；审批延迟不影响代码交付，影响联调窗口 |
 | Q10 | 服务器用谁的云账号？已有阿里云吗？ | **客户自有阿里云（香港优先，新加坡备选），2 核 4G 起步**；Node 24 + 构建产物 `dist/`；起步单文件 SQLite，正式切 RDS MySQL 8；备份落 OSS | 方案第九章原文即建议阿里云香港、免 ICP 备案；数据与源码归客户 | 用我方云托管 → 需另签数据归属与运维条款；只有内地机房 → 访问接口不稳定且需备案，与方案原文冲突需客户确认；无 RDS 预算 → 接受 SQLite 单写者限制；OSS AccessKey 与接口凭证同级敏感，只走环境变量、不入仓（`EPIC-9-03`） |
-| Q11 | 历史数据要不要导？导多久？ | **只导近 90 天订单/售后 + 全部商品/SKU/成本 + 全部达人与合作单 + 全部历史汇率；历史结算流水不导，真实利润自上线日起算** | 90 天足够覆盖趋势与同期对比；历史 `cost_snapshot` 无法还原（成本已改过），导了也是错数字 | 要导 1 年（≈36 万单）→ 导入时长 + `shop_listing` 映射快照失效导致"历史利润不可信"，必须书面声明；要导历史结算 → 平台导出行数约为订单 4 倍，需分批 + 断点续传（2~3 人日）；要求历史成本精确 → 必须"先上线 SKU 成本再导订单"，导入顺序敏感（`EPIC-1-02` 的导入工具需支持顺序编排） |
+| Q11 | 历史数据要不要导？导多久？ | **只导近 90 天订单/售后 + 全部商品/SKU/返点协议 + 全部达人与合作单 + 全部历史汇率；历史结算流水不导，真实利润自上线日起算** | 90 天足够覆盖趋势与同期对比；历史 `rebate_cny` 无法还原（返点协议改过），导了也是错数字 | 要导 1 年（≈36 万单）→ 导入时长 + `shop_listing` 映射快照失效导致"历史利润不可信"，必须书面声明；要导历史结算 → 平台导出行数约为订单 4 倍，需分批 + 断点续传（2~3 人日）；要求历史利润精确 → 必须"先配好 SKU 返点率再导订单"，导入顺序敏感（`EPIC-1-02` 的导入工具需支持顺序编排） |
 | Q12 | 哪些角色要用手机？ | **只适配 4 个高频动作页**：`/creators/outreach`（记跟进）、`/creators/sample`（寄样发货）、`/lives`（复盘）、`/dashboard`（看板），其余 PC 优先，最小适配宽度 1280 | 方案 9.1 原文即"BD 记跟进、主播填复盘等高频小操作做手机适配" | BD 要求达人库/合作单手机全功能 → 表单重排 + 小屏下拉设计（≈5 人日）；主播要看直播中实时数据 → 与 Q4 的 15~30 分钟粒度冲突，**不承诺分钟级**；手机访问扩大凭证暴露面 → 必须 HTTPS + 收紧 `JWT_TTL`（现 8h）+ 登录失败锁定（`EPIC-1-03`） |
 
 ### 1.3 决策表 B：方案没写、开工前必须定的 9 项
@@ -97,7 +97,7 @@
 | B6 | 软删可恢复性 | 所有业务表 `is_deleted=1` 可恢复；新增 `POST /api/system/restore {table, id}`（需 `system` 菜单 + 写日志）；**唯一例外**：`tk_order/tk_order_item` 不提供恢复（状态由同步覆盖）；列表页默认过滤 `is_deleted=0`，回收站 Tab 才可见 | 恢复会撞唯一索引（如 `product_sku.sku_code`），实现必须先查同键活跃行并 409 提示（`EPIC-1-03`） |
 | B7 | 多站点切日 | 站点时区切日为唯一对外口径（见 Q8）；**实现要求**：从 `tk_shop.timezone`(IANA) 用 `Intl.DateTimeFormat` 计算当日真实偏移，不再用 `REGION_TZ_OFFSET` 常量表（当前缺陷 D4） | 若沿用固定偏移，美国店每年约 3 个月切日错位 1 小时，月末最后一天的单会掉错日 |
 | B8 | 导出格式与行数上限 | 格式 `CSV(UTF-8 BOM)` 与 `XLSX` 两种；同步导出上限 **2 万行**，超出走异步任务 + 站内提示（一期只做到 2 万行同步 + 明确拒绝文案）；导出必过 `requireExport` + 掩码 + `sys_op_log(action='export')` | 无上限会让 523 行订单明细变 50 万行字符拼接，Node 单进程内存与浏览器都会卡；`requireExport` 已存在但无导出路由（`EPIC-1-02`） |
-| B9 | 大列表性能与索引 | 每页强制 ≤200；列表接口禁止 `SELECT *`（订单列表除外，见 D2）；新增组合索引 `tk_order(shop_id,is_sample_order,order_status)`、`tk_order_item(order_id)`、`tk_return(shop_id,status)`、`sync_log(shop_id,task_type,started_at)`；`sys_op_log`/`sync_log` 按月归档保留 12 个月在线 | 现在 `tk_order_item` 只有 `ix_item_order`/`ix_item_sku`，逐单详情 OK，但"待映射清单"全表扫 `sku_id IS NULL OR cost_matched=0` 在 72 万行/年下不可用 |
+| B9 | 大列表性能与索引 | 每页强制 ≤200；列表接口禁止 `SELECT *`（订单列表除外，见 D2）；新增组合索引 `tk_order(shop_id,is_sample_order,order_status)`、`tk_order_item(order_id)`、`tk_return(shop_id,status)`、`sync_log(shop_id,task_type,started_at)`；`sys_op_log`/`sync_log` 按月归档保留 12 个月在线 | 现在 `tk_order_item` 只有 `ix_item_order`/`ix_item_sku`，逐单详情 OK，但"待映射清单"全表扫 `sku_id IS NULL OR rebate_matched=0` 在 72 万行/年下不可用 |
 
 ### 1.4 决策表 C：方案写得模糊处的定稿
 
@@ -105,13 +105,13 @@
 | --- | --- | --- | --- |
 | C1 | "推送到企业微信 / 飞书群"（6.4、9.1） | 统一走 `config.alertWebhook`（`core/oplog.ts:sendAlert` 已实现）：报文按企业微信 `{msgtype:'text',text:{content}}` 与飞书 `{msg_type:'text',content:{text}}` 双格式由 URL 前缀自动判别；**未配置时降级 `console.warn`，但工作台红点与 `sync_log` 计数仍必须正确** | `EPIC-4-04` |
 | C2 | 告警去重与频率 | 同一 `(task_type, shop_id, 错误类别)` 30 分钟内只推 1 次；连续失败每 30 分钟重推；恢复时推 1 条"已恢复" | `EPIC-4-04` |
-| C3 | "待映射清单，并在工作台提醒"（6.2）—— 提醒之后谁处理、怎么算闭环 | 待映射有明确处置闭环：工作台卡片 → `/products/unmapped` → 绑定 SKU → **自动回算受影响订单行的 `cost_matched/sku_id/cost_snapshot`（仅未参与结算的行）**，并在页面显示"本清单累计 N 行未计成本，折合 GMV ¥X 无成本" | `EPIC-2-02` |
+| C3 | "待映射清单，并在工作台提醒"（6.2）—— 提醒之后谁处理、怎么算闭环 | 待映射有明确处置闭环：工作台卡片 → `/products/unmapped` → 绑定 SKU → **自动回算受影响订单行的 `rebate_matched/sku_id/rebate_cny`（仅未参与结算的行）**，并在页面显示"本清单累计 N 行未配返点率，折合 GMV ¥X 未计利润" | `EPIC-2-02` |
 | C4 | "宁可多拉，不能漏单" | 落成 B1 的重叠窗口 + 唯一索引去重；同时**禁止**任何"先删后插"式同步 | `EPIC-4-02` |
 | C5 | "接口凭证加密保存，只在服务器端使用，不出现在页面和日志里" | 服务端 `encryptSecret/decryptSecret`（AES-256-GCM）；**响应体列白名单**（禁止 `SELECT s.*`，见 D2）；`error_msg` 入 `sync_log` 前正则脱敏 `app_secret|access_token|shop_cipher` | `EPIC-1-03` / `EPIC-4-01` |
 | C6 | "删除只打标记不真删" | 见 B6（可恢复 + 例外表 + 唯一索引冲突处理） | `EPIC-1-03` |
 | C7 | "坑位费一键生成待付款费用" | 幂等：同 `expense(ref_type='collaboration', ref_id)` 已存在则不新建，返回已有行；币种取 `collaboration.fee_currency`，`amount_cny` 按当日汇率算并冻结 | `EPIC-5-03` |
 | C8 | "超过约定天数没出内容，自动提醒 BD 催" | 约定天数 = 全局配置 `sampleContentDueDays` 默认 7 天，从 `sign_time` 起算；置 `SAMPLE_STATUS.OVERDUE(5)` 并按日提醒（去重同 C2）；不做逐合作单自定义（避免一期复杂度） | `EPIC-5-03` |
-| C9 | "系统自动算合作投产比" 的分母口径 | 分母严格 = `样品成本 + 寄样运费 + 坑位费 + 达人佣金`（四项，人民币）；**不含广告费、不含公共费用分摊**（那是利润口径不是达人 ROI 口径）；分母为 0 → `roi = null` 显示"—"，不参与 Top | `EPIC-5-04` |
+| C9 | "系统自动算合作投产比" 的分母口径 | **分子 = 应收返点，不是带货 GMV**；分母严格 = `物流 + 寄样运费 + 坑位费 + 达人佣金`（四项，人民币）；**不含广告费、不含公共费用分摊**（那是利润口径不是达人 ROI 口径）；分母为 0 → `roi = null` 显示"—"，不参与 Top | `EPIC-5-04` |
 
 ### 1.5 本迭代已核实代码缺陷（写文档时读出来的，全部已挂 Issue）
 
@@ -125,7 +125,7 @@
 | D6 | 利润报表的维度联合类型缺 `'content'`：`REPORT_DIMS`/`ProfitDim` 只有 `shop|creator|month|sku`，而 `finance.routes.ts:846` 会把 `content` 维度传进去 → 编译期即报错；死副本 `services/finance/profit.ts:loadDayRows()` 同样向 `newRow()` 传 `content` | `npx tsc` 报 `Type '"content"' is not assignable to type '"shop" \| "creator" \| "month" \| "sku"'`；`grep -n "content" apps/server/src/services/profit.ts` | 「按内容维度看利润」这一档报表要么编译不过要么静默丢列，而方案 4.4 明确要求视频/直播维度投产比 | 活引擎补 `content` 维度并出对照用例；`EPIC-8-01` |
 | D7 | ~~`MainLayout.vue` 从数组读 `.status`，`alertCount` 恒 0~~ **已修复**（现用 `Array.isArray(rows) && filter(r => Number(r.status)>=2)`） | `apps/web/src/layouts/MainLayout.vue:128-129` | 无 | 保留回归用例（`EPIC-9-02`） |
 | D8 | `app.ts` 未挂载 `/api/stock`（`MENU_KEYS` 已含 `stock`），且**无 `stock.routes.ts` 文件**，但前端已有 3 个库存页面 | `apps/server/src/app.ts:28-38`；`views/stock/` | 库存三页 404 | `EPIC-2-04` |
-| D9 | 测试覆盖只有达人域：`tests/creator.spec.ts` 863 行 / 44 用例 / 8 个 `describe`；`order/product/content/finance/sync/system/shop/stock/dashboard` **0 用例**，§8.3 的 TC-01~TC-10 全部没有自动化 | `ls apps/server/tests/` | 三条硬口径（成本快照/待映射排除/样品排除）与状态机改一行代码就可能悄悄回归 | `EPIC-9-02`（口径与权限基线）、`EPIC-9-03`（TC 自动化） |
+| D9 | 测试覆盖只有达人域：`tests/creator.spec.ts` 863 行 / 44 用例 / 8 个 `describe`；`order/product/content/finance/sync/system/shop/stock/dashboard` **0 用例**，§8.3 的 TC-01~TC-10 全部没有自动化 | `ls apps/server/tests/` | 三条硬口径（返点快照冻结/未配返点排除/样品排除）与状态机改一行代码就可能悄悄回归 | `EPIC-9-02`（口径与权限基线）、`EPIC-9-03`（TC 自动化） |
 | D10 | **调度器未挂载**：`jobs/scheduler.ts` 是 8 行桩（`startScheduler()` 只 `console.log('[jobs] scheduler 待接入')`），`syncJobs.ts`(824 行) 与 `creatorJobs.ts`(172 行) 的 `registerSyncJobs(cron)/registerCreatorJobs(cron)` **无人调用**（`node-cron@^4.2.1` 在 `apps/server/package.json:19` 但全仓无 `import 'cron'`） | `grep -rn "node-cron" apps/server/src` 无结果 | 订单不会自动同步、保护期不回收、寄样不超期提醒、授权到期不告警 —— **方案 6.4"数据不悄悄断"整条落空**，前端工作台数字长期静止（当前只能靠 `POST /api/sync/run` 手动补跑） | `EPIC-4-04`（一期阻断项） |
 | D11 | **同一套利润口径存在三处实现**：① 活引擎 `services/profit.ts`(1743 行) + `services/rates.ts`(254 行)，被 `finance.routes.ts:29-30` import；② **死副本** `services/finance/profit.ts`(804 行) + `services/finance/rates.ts`(116 行)，全仓无人 import 且带 6 个类型错误；③ 订单模块自建的第三份口径 `order.routes.ts` 内联 `AGGREGATE_SELECT` + `rateExprOf()` + `tzExprFromRegion()`（源码注释原文："此处独立实现，避免耦合他人正在改的 profit.ts"） | `grep -rn "finance/profit" apps/server/src` 无结果；`order.routes.ts` 顶部注释 | 同一期间「订单列表汇总条」「利润报表」「工作台卡片」可能出三个 GMV/毛利数字，老板第一个问的就是这个；`tzExprFromRegion` 用固定偏移，切日与 IANA 也不一致（叠加 D4） | **保留活引擎（`services/profit.ts` + `services/rates.ts`）→ 删 `services/finance/*` 死副本 → 把 `order.routes.ts` 的聚合改为调引擎**；`EPIC-8-01` |
 | D12 | `config.adsBaseUrl` 读的是 `process.env.adsApiBase`（小写驼峰，非法环境变量名），永远不会被命中 | `apps/server/src/config.ts:17` | 广告 real 模式基址无法配置 | 改 `ADS_API_BASE` 并补 `.env.example`；`EPIC-0-01` |
@@ -227,7 +227,9 @@
 | GMV | `gmv` | `tk_order_item.item_amount` 折 CNY；**排除 `is_sample_order=1`**；扣已完成退款 | 公开 |
 | 订单数 | `orders` | 非 CANCELLED、非样品单，按站点时区切日 | 公开 |
 | 退款 | `refund_amount`/`refund_rate` | `tk_return(status='COMPLETED').refund_amount` 之和；率 = 退款额 ÷ GMV | 公开 |
-| 预估成本 | `est_cost` | `SUM(cost_snapshot) WHERE cost_matched=1` | `can_see_cost` |
+| 应收返点 | `est_rebate` | `SUM(rebate_cny) WHERE rebate_matched=1`（成交时冻结） | `can_see_cost` |
+| 物流支出 | `est_logistics` | `SUM(logistics_cny) WHERE rebate_matched=1` | `can_see_cost` |
+| 预估贡献毛利 | `est_gross_profit`/`est_profit_rate` | 返点 − 物流 − 达人佣金；**率的分母是返点（我们自己的收入），不是 GMV** | `can_see_cost` |
 | 预估毛利 | `est_gross_profit`/`est_profit_rate` | `estItemProfitCny()` 逐行和；率分母 = GMV | `can_see_cost` |
 | 实际到账 | `settled_amount` | `settlement_txn.payment_status=1` 的 `amount` 折 CNY | `can_see_cost` |
 | 广告 | `ad_spend`/`ad_gmv`/`ad_roi` | `ad_daily` 汇总；`adRoi(spend,gmv)` | 公开 |
@@ -238,7 +240,7 @@
 
 | 卡 | 字段 | 触发条件 | 跳转 | 演示数据现值 |
 | --- | --- | --- | --- | --- |
-| 待映射 SKU | `unmapped_listings` | `shop_listing.map_status=2` 或 `tk_order_item.sku_id IS NULL OR cost_matched=0` | `/products/unmapped` | 2 条 listing + 6 条订单行 |
+| 待映射 SKU | `unmapped_listings` | `shop_listing.map_status=2` 或 `tk_order_item.sku_id IS NULL OR rebate_matched=0` | `/products/unmapped` | 2 条 listing + 6 条订单行 |
 | 待跟进达人 | `creators_to_follow` | `creator_outreach.next_follow_at<=today` 或保护期 ≤7 天 | `/creators/outreach` | 保护期 2026-09-12 到期（基准日 09-18，已过期 4 人） |
 | 寄样超期 | `samples_overdue` | `sample_shipment.status=3` 且 `sign_time < today-7` | `/creators/sample` | 0（4 条寄样均未签收） |
 | 授权即将过期 | `auth_expiring` | `tk_shop.auth_status IN (2,3)` 或 `token_expire_at` <7 天 | `/shops` | 1（店 4 Conqland SG `auth_status=2`） |
@@ -277,21 +279,21 @@
 | 子页 | key / path | 表 | Issue |
 | --- | --- | --- | --- |
 | 商品 SPU | `product:spu` → `/products/spu` | `product_spu` | `EPIC-2-01` |
-| SKU 与成本 | `product:sku` → `/products/sku` | `product_sku` | `EPIC-2-01` |
+| SKU 与返点 | `product:sku` → `/products/sku` | `product_sku` | `EPIC-2-01` |
 | 店铺商品映射 | `product:listing` → `/products/listing` | `shop_listing` | `EPIC-2-02` |
 | 待映射清单 | `product:unmapped` → `/products/unmapped` | `shop_listing` + `tk_order_item` | `EPIC-2-02` |
 
 **SPU**：列 `spu_code`、`main_image`、`name_cn`、`name_en`、`category`(字典)、`owner_id→real_name`、`status`(1 开发中/2 在售/3 停售)、`sku_count`（`ProductSpu.sku_count`）。筛选 `keyword`(spu_code/name_cn/name_en)、`category`、`status`、`owner_id`。表单：`spu_code` 必填 ≤64 唯一、`name_cn` 必填 ≤200、`name_en ≤300`、`main_image ≤500` URL 格式。按钮：新增/编辑 `requireMenu('product')`；删除前存在 SKU → 400。
 
-**SKU 与成本**：列 `sku_code`、`spu_code`、`name_cn`、`spec`、`purchase_cost`(CNY/件)、`first_leg_cost`(CNY/件)、`unit_cost`（`unitCostCny(sku)` = 采购+头程）、`weight_g`、`package_size`、`status`(1 在售/0 停售)、最近改价人与时间。筛选 `keyword`、`spu_id`、`category`、`status`、`成本未维护`(两项和为 0)。表单：`spu_id` 必填且存在；`sku_code` 必填 ≤64 唯一；`purchase_cost ≥0`、`first_leg_cost ≥0`；`weight_g ≥0` 整数；`package_size ≤50`（格式提示 `长x宽x高`）。
-**核心规则**：改成本**只影响后续订单**；保存必须 `logIfChanged(['purchase_cost','first_leg_cost'])`；接口返回该 SKU 近 90 天订单行数与被映射店铺数供前端确认框展示；无 `can_see_cost` → 三列 `***` 且 PUT 403。
+**SKU 与返点**：列 `sku_code`、`spu_code`、`name_cn`、`spec`、`rebate_rate`(品牌给的返点率，0-1 小数)、`logistics_cost`(CNY/件，头程+海外仓；品牌承担填 0)、`weight_g`、`package_size`、`status`(1 在售/0 停售)、最近改协议人与时间。筛选 `keyword`、`spu_id`、`category`、`status`、`返点率未配`(`rebate_rate = 0`)。表单：`spu_id` 必填且存在；`sku_code` 必填 ≤64 唯一；`rebate_rate` ∈ [0,1]（填 18 这类百分数直接 400，报错要写"0.18 = 18%"）；`logistics_cost ≥ 0`；`weight_g ≥ 0` 整数；`package_size ≤ 50`。**没有采购价/头程成本这两列了** —— 我们不背货款。
+**核心规则**：改返点率**只影响后续订单**（历史行的 `rebate_cny` 是冻结值）；保存必须 `logIfChanged(['rebate_rate','logistics_cost'])`；接口返回该 SKU 近 90 天订单行数与被映射店铺数供前端确认框展示；无 `can_see_cost` → 返点率与金额列一律 `***` 且 PUT 403。
 
 **店铺商品映射**：列 `shop_name`、`product_name`（方案表 8 无此列，代码有 → `changes-vs-plan` #5）、`tk_product_id`、`tk_sku_id`、`seller_sku`、内部 `sku_code`、`sale_price`+`currency`、`listing_status`(1 草稿/2 审核中/3 在售/4 下架/5 违规)、`map_status`(1 已映射/2 待映射)、`last_sync_at`。筛选 `shop_id`、`map_status`、`listing_status`、`keyword`。表单：`shop_id` 必填；(`shop_id`,`tk_sku_id`) 联合唯一 `ux_listing_shop_sku`；`sku_id` 可空（= 待映射）；`sale_price ≥0`。
 按钮：**按 `seller_sku` 自动匹配**（`POST /api/products/listings/auto-match`：`seller_sku = sku_code` 精确命中或前缀唯一命中才写，多命中不写并进人工清单）、**手工绑定**。
-闭环（C3）：绑定成功后回算受影响订单行的 `sku_id/cost_matched/cost_snapshot`（仅未参与结算的行），并写日志。
+闭环（C3）：绑定成功后回算受影响订单行的 `sku_id/rebate_matched/rebate_cny`（仅未参与结算的行），并写日志。
 空态/告警：`map_status=2` 整行 warning + 列头计数；`listing_status=5` 红角标。
 
-**待映射清单**：Tab A 未映射 `shop_listing`；Tab B 已产生订单但取不到成本的 `tk_order_item`（演示 6 行，`sku_id NULL` 且 `cost_matched=0`），列 `tk_order_id`、`shop_name`、`tk_sku_id`、`quantity`、`item_amount`、`order_time`、缺失原因；每行"去绑定"直开映射编辑框。页顶固定说明："这些行不计入成本与利润，且持续告警"。
+**待映射清单**：Tab A 未映射 `shop_listing`；Tab B 已产生订单但取不到品牌返点率的 `tk_order_item`（演示 6 行，`sku_id NULL` 且 `rebate_matched=0`），列 `tk_order_id`、`shop_name`、`tk_sku_id`、`quantity`、`item_amount`、`order_time`、缺失原因；每行"去绑定"直开映射编辑框。页顶固定说明："这些行不计入返点与利润（不是 0 利润），且持续告警"。
 
 ### 3.4 `order` 订单中心 `[本迭代]`（后端 `order.routes.ts` 975 行 / 12 端点已实现，含 `/summary`、`/unmatched`、`/export`、`/returns*`、`/:id`、`/:id/profit`；2 个类型错误待清，**0 测试覆盖**；前端三页已建）
 
@@ -304,9 +306,9 @@
 **列表列**：`tk_order_id`、`shop_name`、`order_status`（中文用 `ORDER_STATUS_LABEL`：`TO_BE_SHIPPED/INVOICE_CREATED→待发货`、`ON_HOLD_SUBSTATUS_ESCALATION→暂停`）、`order_time`、`paid_time`、`currency`、`subtotal`、`seller_discount`、`platform_discount`、`shipping_fee`、`total_paid`、`item_count`、`fulfillment_type`(1 平台仓/2 自发货/3 海外仓)、`carrier`、`tracking_no`、`is_sample_order`、`est_profit`（受 `can_see_cost`）、`synced_at`。
 **筛选项**：`shop_id`、`order_status`(多选)、`keyword`(`tk_order_id`/`tracking_no`)、`order_time_from/to`、`paid_time_from/to`、`is_sample_order`、`fulfillment_type`、`region`、仅含待映射行。
 **按钮与权限**：详情（`order` 菜单）、导出（`requireExport`）。**金额与状态人工不可改**（方案表 6）；唯一允许人工写的是 `is_sample_order`（历史样品单纠正），必须写日志。
-**空态**："最近 N 天没有订单" + "检查同步"。**告警态**：样品单灰底"样品单·不计 GMV"；含 `cost_matched=0` 行 warning。
+**空态**："最近 N 天没有订单" + "检查同步"。**告警态**：样品单灰底"样品单·不计 GMV"；含 `rebate_matched=0` 行 warning。
 
-**详情**：金额区（含 `item_amount × rate_to_cny` 折算）；明细表逐行 `sku_code`/`unit_cost`/`cost_snapshot`/`cost_matched`/`creator_handle`/`content_type`/`content_id`/`commission_rate`/`est_commission`；成本区整体 `maskFields`；下方 Tab 结算流水（`settlement_txn.tk_order_id`）/ 售后 / 操作日志。`cost_matched=0` 行必须红字"成本未匹配，未参与利润计算"。
+**详情**：金额区（含 `item_amount × rate_to_cny` 折算）；明细表逐行 `sku_code`/`rebate_rate`/`rebate_cny`/`logistics_cny`/`rebate_matched`/`creator_handle`/`content_type`/`content_id`/`commission_rate`/`est_commission`；返点与利润字段整体 `maskFields`；下方 Tab 结算流水（`settlement_txn.tk_order_id`）/ 售后 / 操作日志。`rebate_matched=0` 行必须红字"未配返点率，未参与利润计算（不是 0 利润）"。
 
 **售后退款**：列 `tk_return_id`、`tk_order_id`、`shop_name`、`return_type`(1 仅退款/2 退货退款)、`reason`、`refund_amount`+`currency`、`status`（平台原文；演示分布 COMPLETED 20 / PROCESSING 9 / SELLER_REJECTED 11）、`apply_time`、`finish_time`、`responsibility`(0 未归类/1 质量/2 物流/3 描述不符/4 买家原因)、`is_restocked`。
 筛选 `shop_id`、`responsibility`（默认筛 0 引导补填）、`status`、`return_type`、`apply_time_from/to`、`keyword`。
@@ -338,12 +340,12 @@
 表单：`creator_id`、`shop_id` 必填；`spu_id` 可空但提示；`commission_rate` 0~100；`fixed_fee ≥0`；`fee_currency` 3 位；`deadline` 日期；`coop_type≠1 且 fixed_fee=0` → 400。
 按钮：新建、编辑、**生成待付款费用**（幂等 C7）、变更状态、导出。
 
-**寄样管理**：列 `collab_no`、`creator_handle`、`sku_code`、`quantity`、`sample_cost`(CNY)、`shipping_cost`(CNY)、`ship_method`(1 平台免费样品/2 线下自寄/3 海外仓代发)、`tk_order_id`、`tracking_no`、`ship_time`、`sign_time`、`status`(6 态见 §4)。
+**寄样管理**：列 `collab_no`、`creator_handle`、`sku_code`、`quantity`、`shipping_cost`(CNY，我们掏的寄样运费)、`ship_method`(1 平台免费样品/2 线下自寄/3 海外仓代发)、`tk_order_id`、`tracking_no`、`ship_time`、`sign_time`、`status`(6 态见 §4)。
 筛选 `status`、`creator_id`、`ship_method`、`ship_time_from/to`、超期未出内容。
-表单：`creator_id` 必填；`sku_id` 空则 `sample_cost` 手工必填；`sample_cost` 默认 `unitCostCny(sku) × quantity` 快照，保存后不随改价变动；`ship_method=1` → `tk_order_id` 必填；`status=2` 需 `tracking_no`；`status=3` 需 `sign_time`。
+表单：`creator_id` 必填；**只登记 `shipping_cost`** —— 样品货值是品牌出的，我们不为它垫钱，所以没有"样品成本"这一列；`ship_method=1` → `tk_order_id` 必填；`status=2` 需 `tracking_no`；`status=3` 需 `sign_time`。
 按钮：新增、发货（填单号→2）、登记签收（→3）、标记丢件（→6）、关联平台样品单（回填 `tk_order_id` 并置 `is_sample_order=1`）。
 
-**达人 ROI 排行**：列 `handle`、`region`、`owner_name`、合作单数、样品成本、寄样运费、坑位费(CNY)、达人佣金(CNY)、带货净 GMV(CNY)、ROI、订单数。口径 = `collabRoi({net_gmv_cny, sample_cost, sample_shipping, fixed_fee_cny, commission_cny})`（C9：分母不含广告与公共费用）；`roi=null` 显示"—"不参与 Top。维度切换：按达人/按 BD/按合作单。整页含成本列，无 `can_see_cost` 时数值全 `***`（页面可打开，便于 BD 看名次）。
+**达人 ROI 排行**：列 `handle`、`region`、`owner_name`、合作单数、寄样运费、坑位费(CNY)、达人佣金(CNY)、**应收返点(CNY)**、带货净 GMV(CNY，参考列)、ROI、订单数。口径 = `collabRoi({rebate_cny, sample_shipping, fixed_fee_cny, commission_cny, logistics_cny})`（C9：分子是我们的返点，分母不含广告与公共费用）；`roi=null` 显示"—"不参与 Top。维度切换：按达人/按 BD/按合作单。整页含成本列，无 `can_see_cost` 时数值全 `***`（页面可打开，便于 BD 看名次）。
 
 ### 3.6 `content` 内容中心 `[本迭代]`（后端 `content.routes.ts` 1010 行 / 19 端点主体已实现，类型错误已清零；前端 3 页已建）
 
@@ -433,8 +435,8 @@
 | `GET /api/selection/funnel` | 登记 → 测试 → 通过 → 上架 四步漏斗 + 通过率 + 各阶段水位 | 与列表共用同一套筛选与数据范围 |
 | `GET /api/selection/export` | CSV/XLSX | `requireExport`；有 `selection` 菜单但没有导出权的角色 403 |
 | `GET /api/selection/:id`、`/:id/logs` | 详情（含解析后的 `snapshot/checklist` 与 `next_stages`）/ 流转日志 | 范围外一律 404，不用报错摸 ID |
-| `POST /api/selection` | 登记 | 自动生成 `SEL-YYYY-NNNN`（撞号顺延重试，不静默失败）+ 预估盈亏平衡 ROAS = `1/毛利率`；同时写第一条流转日志（`from_stage=0`＝登记前） |
-| `PUT /api/selection/:id` | 改基础信息 | **改不动 `stage`/`conclusion`**（状态只能走流转接口，否则日志会缺一条） |
+| `POST /api/selection` | 登记（品牌方 / 建议售价 / 计划折扣 / 返点率 / 佣金率 / 物流费率） | 自动生成 `SEL-YYYY-NNNN`（撞号顺延重试，不静默失败）；`est_margin = 返点率 − 佣金率 − 物流费率`、`breakeven_roas = 1/est_margin` **由后端推，手填一律不认**；同时写第一条流转日志（`from_stage=0`＝登记前） |
+| `PUT /api/selection/:id` | 改基础信息 | **改不动 `stage`/`conclusion`**（状态只能走流转接口，否则日志会缺一条）；改任一费率会带着重算毛利率与平衡线 |
 | `POST /api/selection/:id/stage` | 唯一的改 `stage` 入口 | 边表外 → 400；进测试必须指定店铺；转销售必须清单全勾 + 关联 SPU；淘汰必须写原因 |
 | `POST /api/selection/:id/conclusion` | 提交测试结论（2→3） | 7 个指标（`SELECTION_METRICS`）缺一个就 400 并**点名缺哪几个**；`需调整后复测` 必须写调整项；快照原样入库并进日志 |
 | `POST /api/selection/:id/conclusion/confirm` | 结论落地（3→4/2/6） | 通过→销售前准备、复测→回上架测试、不通过→淘汰池（原因带进 `reject_reason`） |
@@ -460,22 +462,22 @@
 | 2 | 每次联系记一条跟进，约下次时间 | `creator_outreach` | 到点进工作台 `creators_to_follow`；有效跟进续期 7 天 |
 | 3 | 谈妥建合作单（方式/佣金率/坑位费/条数/截止日） | `collaboration` | 生成 `collab_no`、`status=1` |
 | 4 | 坑位费一键生成待付款费用 | `expense` | `expense_type=1`、`ref_type='collaboration'`、幂等（C7） |
-| 5 | 仓库寄样、填物流单号；签收计时 | `sample_shipment` | `sample_cost` 冻结快照；超 `sampleContentDueDays`(7) 无内容自动提醒 |
+| 5 | 仓库寄样、填物流单号；签收计时 | `sample_shipment` | `shipping_cost` 记我们掏的寄样运费；超 `sampleContentDueDays`(7) 无内容自动提醒 |
 | 6 | 达人发布后 BD 贴视频链接 | `video` | `parseVideoId()` 解析并挂到合作单 |
 | 7 | 联盟订单同步按视频/达人归因 | `tk_order_item` | 写 `creator_id/content_type/content_id/commission_rate/est_commission` |
 | 8 | 自动算合作投产比并按达人/BD 出排行 | 汇总 | `collabRoi()`，口径 C9 |
 
 ### 4.2 流程二：订单到利润（方案 6.2）
 
-`同步(15~30 分钟增量，按更新时间，窗口重叠 5 分钟) → 明细经映射冻结成本快照 → 售后冲减 → 每日结算替换预估 → 逐单利润折 CNY → 报表(店/SKU/达人/月)`
+`同步(15~30 分钟增量，按更新时间，窗口重叠 5 分钟) → 明细经映射冻结返点与物流 → 售后冲减 → 每日结算替换预估 → 逐单利润折 CNY → 报表(店/SKU/达人/月)`
 
 | 步 | 关键约束 |
 | --- | --- |
 | 同步 | 幂等 B1；每批 1 行 `sync_log`；`fetched=0` 且历史有单 → 告警 |
-| 成本 | 映射命中 → `sku_id`+`cost_snapshot`+`cost_matched=1`；未命中 → `cost_matched=0`，**绝不按 0 成本进利润** |
+| 成本 | 映射命中 → `sku_id`+`rebate_cny`+`rebate_matched=1`；未命中 → `rebate_matched=0`，**绝不按 0 收入进利润** |
 | 售后 | 仅 `COMPLETED` 冲减，归属原下单日（B5） |
 | 结算 | `settlement_txn` 按 `ux_settle_txn` 去重；`payment_status=1` 才计 `settled_amount` |
-| 利润 | `profit = 结算实收 − 成本快照 − 佣金 − 广告(直接归属) − 费用(含分摊)`，全折 CNY |
+| 利润 | `profit = 应收返点 − 物流 − 达人佣金 − 广告(直接归属) − 费用(含分摊)`，全折 CNY；平台结算实收只作对账列，不计入我们的收入 |
 | 报表 | 未结算行用预估并标 `is_estimated=1` |
 
 ### 4.3 流程三：直播（方案 6.3）
@@ -563,15 +565,15 @@
 | 1 | `tk_shop` | 店铺 | 1 | `shop_name, tk_shop_id, shop_cipher, region, shop_type, currency, timezone, auth_status, token_expire_at, owner_id, status` | `tk_shop_id` UNIQUE；另含 `app_key_enc/app_secret_enc`（+ 需补 `access_token_enc`，D3） | `[已实现]` 接口 |
 | 2 | `tk_account` | 自营 TikTok 账号 | 1 | `handle, nickname, account_type, shop_id, followers, owner_id, account_status, remark` | `handle` UNIQUE | `[已实现]` |
 | 3 | `product_spu` | 商品 SPU | 1 | `spu_code, name_cn, name_en, main_image, category, owner_id, status` | `spu_code` UNIQUE | `[待开发]` |
-| 4 | `product_sku` | SKU 与成本 | 1 | `spu_id, sku_code, name_cn, spec, purchase_cost, first_leg_cost, weight_g, package_size, status` | `sku_code` UNIQUE | `[待开发]` |
+| 4 | `product_sku` | SKU 与返点 | 1 | `spu_id, sku_code, name_cn, spec, rebate_rate, logistics_cost, weight_g, package_size, status` | `sku_code` UNIQUE | `[待开发]` |
 | 5 | `shop_listing` | 平台商品↔内部 SKU 映射 | 1 | `shop_id, tk_product_id, tk_sku_id, seller_sku, product_name, sale_price, currency, listing_status, sku_id, map_status, last_sync_at` | `ux_listing_shop_sku(shop_id,tk_sku_id)` | `[待开发]` |
 | 6 | `tk_order` | 订单主表 | 1 | `tk_order_id, shop_id, order_status, order_time, paid_time, subtotal, seller_discount, platform_discount, shipping_fee, total_paid, currency, fulfillment_type, carrier, tracking_no, is_sample_order, item_count, est_profit, synced_at` | `tk_order_id` UNIQUE | `[待开发]`（同步 mock `[本迭代]`） |
-| 7 | `tk_order_item` | 订单明细（归因载体）| 1 | `order_id, listing_id, tk_sku_id, sku_id, quantity, item_amount, currency, cost_snapshot, cost_matched, creator_id, content_type, content_id, commission_rate, est_commission` | `ix_item_order` + 去重键 `order_id+listing_id+tk_sku_id` | `[待开发]` |
+| 7 | `tk_order_item` | 订单明细（归因载体）| 1 | `order_id, listing_id, tk_sku_id, sku_id, quantity, item_amount, currency, rebate_cny, rebate_matched, creator_id, content_type, content_id, commission_rate, est_commission` | `ix_item_order` + 去重键 `order_id+listing_id+tk_sku_id` | `[待开发]` |
 | 8 | `tk_return` | 售后退款 | 1 | `tk_return_id, shop_id, tk_order_id, return_type, reason, refund_amount, currency, status, apply_time, finish_time, responsibility, is_restocked, remark` | `tk_return_id` UNIQUE | `[待开发]` |
 | 9 | `creator` | 达人档案 | 1 | `handle, nickname, region, followers, category_tags, avg_views, gmv_level, email, whatsapp, owner_id, protect_until, pool_status, source` | `handle` UNIQUE | `[待开发]`（服务 `creator/protect.ts` `[本迭代]`） |
 | 10 | `creator_outreach` | 建联跟进 | 1 | `creator_id, user_id, channel, contact_time, summary, result, next_follow_at` | — | `[待开发]` |
 | 11 | `collaboration` | 合作单 | 1 | `collab_no, creator_id, shop_id, spu_id, owner_id, coop_type, commission_rate, fixed_fee, fee_currency, promised_videos, promised_lives, deadline, tk_plan_id, status` | `collab_no` UNIQUE | `[待开发]` |
-| 12 | `sample_shipment` | 寄样 | 1 | `collab_id, creator_id, sku_id, quantity, sample_cost, shipping_cost, ship_method, tk_order_id, tracking_no, ship_time, sign_time, status` | — | `[待开发]` |
+| 12 | `sample_shipment` | 寄样 | 1 | `collab_id, creator_id, sku_id, quantity, shipping_cost, ship_method, tk_order_id, tracking_no, ship_time, sign_time, status` | — | `[待开发]` |
 | 13 | `video` | 视频与带货汇总 | 1 | `tk_video_id, video_url, publisher_type, account_id, creator_id, collab_id, spu_id, shop_id, editor_id, publish_time, views, likes, comments, shares, orders, gmv, status` | `tk_video_id` UNIQUE | `[待开发]` |
 | 14 | `live_session` | 直播场次 | **1（Q6 提前）** | `shop_id, account_id, host_id, assistant_id, creator_id, plan_start, plan_end, actual_start, actual_end, status, viewers, peak_online, orders, gmv, ad_spend, review_note` | — | `[待开发]` |
 | 15 | `ad_daily` | 广告日报 | 2 | `shop_id, advertiser_id, campaign_id, campaign_name, ad_type, spu_id, video_id, stat_date, spend, currency, impressions, clicks, conversions, gmv` | `ux_ad_daily(shop_id,campaign_id,stat_date,ad_type)` | `[待开发]` |
@@ -594,7 +596,7 @@
 | 表 | 现有索引 | 需新增（B9） |
 | --- | --- | --- |
 | `tk_order` | `tk_order_id` UNIQUE、`ix_order_shop_time(shop_id,order_time)`、`ix_order_status` | `ix_order_sample(shop_id,is_sample_order,order_status)` |
-| `tk_order_item` | `ix_item_order(order_id)`、`ix_item_sku(sku_id)` | `ix_item_unmapped(cost_matched,sku_id)`、`ix_item_creator(creator_id)` |
+| `tk_order_item` | `ix_item_order(order_id)`、`ix_item_sku(sku_id)` | `ix_item_unmapped(rebate_matched,sku_id)`、`ix_item_creator(creator_id)` |
 | `tk_return` | `tk_return_id` UNIQUE | `ix_return_shop_status(shop_id,status)` |
 | `sync_log` | `ix_sync_shop_task(shop_id,task_type)` | `ix_sync_started(started_at)` |
 | `sys_op_log` | `ix_oplog_user_time(user_id,op_time)` | — |
@@ -604,8 +606,8 @@
 
 | 方案要点 | 字段落点 | 硬约束 | 回归测试（`EPIC-9-02`） |
 | --- | --- | --- | --- |
-| 成本快照冻结，改价不回溯 | `tk_order_item.cost_snapshot`、`sample_shipment.sample_cost` | 订单写入时按当时 `unitCostCny(sku)×quantity` 冻结；改 `product_sku` **禁止** UPDATE 任何历史明细 | 老订单行 `cost_snapshot` 在改价前后逐字节不变 |
-| 待映射不能按 0 成本 | `cost_matched=0` | 所有成本/毛利/利润 SQL 必须带 `cost_matched=1`；GMV 仍计入并显性提示"N 行未计成本" | 把待映射行 `cost_snapshot` 人为改大 → 毛利/利润数字不变 |
+| 返点与物流快照冻结，改协议不回溯 | `tk_order_item.rebate_cny` / `logistics_cny` | 订单写入时按当时 `rebate_rate` 与 `unitLogisticsCny(sku)×quantity` 冻结；改 `product_sku.rebate_rate` **禁止** UPDATE 任何历史明细 | 老订单行 `rebate_cny` 在改返点率前后逐字节不变 |
+| 未配返点率不能按 0 收入 | `rebate_matched=0` | 所有返点/毛利/利润 SQL 必须带 `rebate_matched=1`；GMV 仍计入并显性提示"N 行未配返点率，不计利润" | 把未配返点行的 `rebate_cny` 人为改大 → 毛利/利润数字不变 |
 | 样品单不计 GMV | `tk_order.is_sample_order` | 所有 GMV/订单数/退款率/达人业绩口径 `AND is_sample_order=0`；寄样成本走 ROI 分母 | `/api/dashboard/summary.gmv` 与手算（排除 8 条样品单）一致 |
 
 ### 5.4 金额与时间口径
@@ -613,6 +615,9 @@
 | 项 | 规则 |
 | --- | --- |
 | 金额类型 | 方案 `DECIMAL(18,2)`；SQLite 侧实为 `REAL`。**对策**：写库前 `round2()`，聚合用"整数分"或 `ROUND(...,2)` 收敛，跨表对账允许 ≤0.5% 容差；对外报表禁止展示超过 2 位小数；`rate_to_cny` 按 `DECIMAL(18,6)` 语义处理（REAL + 展示 4 位）。MySQL DDL 保留 `DECIMAL`（`EPIC-0-01`） |
+| **生意模式（先读这条）** | 我们是**品牌服务方（代运营/服务商）**：货和货款都是品牌的，系统里**不存在采购价**。唯一收入 = 品牌按实收 GMV 给的**返点**（`product_sku.rebate_rate`，成交时冻结进 `tk_order_item.rebate_cny`）。我们的支出 = 达人佣金 + 坑位费 + 寄样运费 + 我们承担的物流 + 投流 + 工具费。GMV / 结算实收是**品牌侧的现金**，只作规模参考与对账，一律不算进我们的收入 |
+| 毛利率的分母 | 报表与看板的 `est_profit_rate` 分母是**应收返点**（我们自己的收入），不是 GMV —— 用 GMV 当分母会得到一个看着像 3% 的"毛利率"，而真实留存是 20% 上下，两者不可混用。广告侧的 `盈亏平衡 ROAS = 1 / 贡献毛利率`，其中贡献毛利率 =（应收返点 − 物流 − 达人佣金）÷ GMV（保持"每 1 元广告要带回多少元 GMV"这个可操作语义） |
+| 物流双记 | SKU 的 `logistics_cost`（逐行冻结）与费用表的「头程物流 / 海外仓费」常是同一笔钱。引擎不猜哪边对：两边同时有数时输出 `warn.logistics_overlap_cny`，由界面说清、运营选边（要么 SKU 记成本、费用不重复记；要么 SKU 填 0、物流走期间费用） |
 | 时间 | 一律 UTC 文本 `YYYY-MM-DD HH:MM:SS`（字符串序 == 时间序，便于索引比较）；`stat_date` 存站点自然日 |
 | 汇率 | 一律折 CNY：`金额 × rate_to_cny`；CNY 恒 1；取"业务发生当日"，缺失回退更早最近一条并标注；完全缺失不参与汇总 + 告警（B3） |
 | 切日 | 站点时区（Q8/B7），US/MX 夏令时用 IANA 计算，禁止固定偏移（D4） |
@@ -622,7 +627,7 @@
 
 | 表 | 作用 | 关键业务字段 | 唯一约束 |
 | --- | --- | --- | --- |
-| `selection_flow` | 选品流程状态表（一个候选品一行，流水线本体） | `code`(候选品 ID)、`name/image_url/category`、`supplier/purchase_price/moq/lead_days`、`est_margin/breakeven_roas`、`source`、`shop_id/spu_id`、`stage/stage_entered_at`、`owner_id/registered_by`、`conclusion/conclusion_note/reject_reason/adjustments`、`test_started_at/test_snapshot(JSON)`、`checklist(JSON)`、`selling_at` | `ux_selection_code(code)` WHERE `is_deleted=0` |
+| `selection_flow` | 选品流程状态表（一个候选品一行，流水线本体） | `code`(候选品 ID)、`name/image_url/category`、`brand_name`(品牌方)、`list_price`(建议售价)、`planned_discount`(计划折扣率)、`rebate_rate`/`commission_rate`/`logistics_rate`、`est_margin`(= 返点−佣金−物流，服务端推)、`breakeven_roas`(= 1/est_margin)、`source`、`shop_id/spu_id`、`stage/stage_entered_at`、`owner_id/registered_by`、`conclusion/conclusion_note/reject_reason/adjustments`、`test_started_at/test_snapshot(JSON)`、`checklist(JSON)`、`selling_at` | `ux_selection_code(code)` WHERE `is_deleted=0` |
 | `selection_log` | 阶段流转日志表（回溯谁在什么时候把它从哪推到哪） | `selection_id`、`from_stage`(0＝登记前)、`to_stage`、`action`(register/transition/submit_conclusion/confirm_conclusion)、`operator_id`、`note` | 只追加，不更新 |
 
 - 两张表都守同一份公共字段约定（`id/created_by/created_at/updated_at/is_deleted`），由 `tests/schema-drift.spec.ts` 校验两份 DDL 列集合一致；`tests/dialect-ratchet.spec.ts` 钉住"新增业务代码零方言债"（日期差在 JS 里算，SQL 只做文本比较）。
@@ -640,7 +645,7 @@
 | 同步频率 | 订单 15~30 分钟增量（按更新时间，窗口重叠 5 分钟）；结算/广告每日；联盟每小时~每日；`sync_log` 每批一行 | `EPIC-4-04` |
 | 告警 | 同步失败、失败条数>0、"平时有单今天 0 条"、授权即将过期、汇率缺失、备份失败 → `sendAlert` 推企业微信/飞书 webhook；未配置降级 `console.warn`；去重 30 分钟（C1/C2） | 单元测试 + 手动注入 |
 | 备份 | 每日全量备份，**保留 30 天**（方案 9.1）；SQLite：`.db` 快照 + 清 WAL；MySQL：`mysqldump`/RDS 快照；落 OSS 并加密；失败必告警 | `EPIC-9-03` 脚本 + 演练记录 |
-| 恢复演练 | 上线前 1 次"备份→隔离环境恢复→抽查订单数/成本快照/日志条数一致"，留存 `docs/ops/restore-runbook.md`；RPO ≤24h、RTO ≤2h | `EPIC-9-03` |
+| 恢复演练 | 上线前 1 次"备份→隔离环境恢复→抽查订单数/返点快照/日志条数一致"，留存 `docs/ops/restore-runbook.md`；RPO ≤24h、RTO ≤2h | `EPIC-9-03` |
 | 安全 | 生产强制 HTTPS；接口凭证 AES-256-GCM 入库（`encryptSecret`），永不回显、永不入日志（C5）；密码 scrypt 摘要（`hashPassword`，`scrypt$<salt>$<hash>`），最小 8 位；口令/凭证不出现在前端；不存 TikTok 账号密码 | 代码评审 + 日志 grep |
 | 越权 | 未认证 401 `code:40100`；无菜单/越权 403 `code:40300`；`data_scope` 过滤后不可见他店数据（不是隐藏按钮，是 SQL 条件） | `EPIC-9-02` 权限矩阵用例 |
 | 导出留痕 | 未开通 `can_export` → 403 且不写日志；开通后每次导出写 `sys_op_log(action='export')`，`before_after` 记筛选条件与行数 | `EPIC-1-02` |
@@ -692,7 +697,7 @@
 | mock | 不访问外网；provider 从本地 fixtures（与 `db/seed.ts` 确定性 RNG 同构）返回分页数据，走**完全相同**的 upsert/快照/日志代码路径 |
 | real | 走 `config.tiktokBaseUrl`（默认 `https://open-api.tiktokglobalshop.com`）与 `config.adsBaseUrl`（`https://business-api.tiktok.com`）；凭证从 `tk_shop.app_key_enc/app_secret_enc(+access_token_enc)` 经 `decryptSecret()` 取，仅内存使用 |
 | 端口 | `TiktokProvider`：`searchOrders/searchProducts/searchReturns/listSettlements/listAffiliateOrders/listAdDaily/getVideoStats/getLiveStats`；`ExchangeRateProvider.daily()`；`getProvider()` 按 mode 注入 |
-| 分层约束 | provider 只做"拉取 + 归一化到本系统字段"；**写库、成本快照、同步日志一律在 service 层**，保证 mock 与 real 结果一致可测 |
+| 分层约束 | provider 只做"拉取 + 归一化到本系统字段"；**写库、返点与物流冻结、同步日志一律在 service 层**，保证 mock 与 real 结果一致可测 |
 | 签名 | real 模式按官方 `X-Tt-Signature`（HMAC-SHA256，参数排序 + body hash）实现，统一封装在 `services/tiktok/client.ts`，禁止在业务层拼签名 |
 | 测试 | vitest 固定 `mock`；real 无凭证时 `skipIf` |
 
@@ -721,7 +726,7 @@
 - [ ] **调度器挂载完成（D10）**：`startScheduler()` 注册 `registerSyncJobs` + `registerCreatorJobs`，`ENABLE_SCHEDULER=false` 时可全关；`sync_log` 出现自动写入的行。
 - [ ] **利润口径收口为一处（D11）**：删除死副本 `services/finance/{profit,rates}.ts`，`order.routes.ts` 内联聚合与 `dashboard` 均改为 import `services/profit.ts`；同一期间三处（订单汇总条 / 利润报表 / 工作台卡片）`gmv_cny`、`est_profit_cny` 完全相等。
 - [ ] 订单同步（mock）跑通：演示 260 单 / 523 明细重复执行不产生重复行；2 条待映射 listing 与 6 条待映射明细进入工作台与 `/products/unmapped`。
-- [ ] §5.3 三条口径（成本快照 / 待映射不计成本 / 样品单不计 GMV）各有 ≥1 个专项测试。
+- [ ] §5.3 三条口径（返点快照冻结 / 未配返点率不计利润 / 样品单不计 GMV）各有 ≥1 个专项测试。
 - [ ] BD 数据隔离回归通过：`chenbd` 可见自己 4 位私海达人（D1 已修，转为回归用例）；同时断言 `content` 角色访问 `/api/orders` 被 `requireMenu` 403 拦住（防 D1 复现）。
 - [ ] 四条流程（§4.1~4.4）在真实浏览器按 §8.3 用例验收通过，留存步骤与截图。
 - [ ] 10 角色 × 敏感字段权限矩阵自动化用例通过。
@@ -741,8 +746,8 @@
 | --- | --- | --- | --- | --- |
 | TC-01 | 越权与掩码 | 以 `limy`（运营，`data_scope=4`，仅授权店 1）登录 | `GET /api/dashboard/summary` 返回 `est_profit === "***"`；`GET /api/system/oplog` → **403 `code:40300`**；`GET /api/shops` → `total === 1` 且响应体**不含** `app_key_enc`/`app_secret_enc` 键；`GET /api/shops/3` → 403 | §2.3、D2 |
 | TC-02 | BD 达人隔离 | 以 `chenbd`（`data_scope=3`）登录 | `GET /api/creators/mine` → `total === 4`（ids 1,3,5,7）；`GET /api/creators/collab` → `total === 6`（全部 owner=chenbd）；以 `lubd` 登录 → `mine.total === 2`（ids 2,10）；`GET /api/creators/pool` → `total === 5` 且不含他人私海达人的 `email/whatsapp` | D1 |
-| TC-03 | 成本快照不回溯 | 演示 SKU（`purchase_cost=96`、`first_leg_cost=22`）→ 其历史订单行 `cost_snapshot` 记为 X | 改 `purchase_cost` 96→120（PUT /api/products/skus/:id）后：X 不变；新订单行 `cost_snapshot = (120+22)×qty`；`sys_op_log` 新增 1 行 `action='update'` 且 `before_after` 含 `96→120` | §5.3 要点 1 |
-| TC-04 | 待映射不按 0 成本 | `GET /api/dashboard/summary` | `unmapped_listings === 6`（演示 `tk_order_item` `sku_id IS NULL AND cost_matched=0` 共 6 行）；把其中若干行 `cost_snapshot` 人为改成 99999 → `est_cost`/`est_gross_profit` 数字**不变**；`/api/products/unmapped?tab=B` 可列出这些行 | §5.3 要点 2 |
+| TC-03 | 返点与物流快照不回溯 | 演示 SKU（`rebate_rate=0.22`、`logistics_cost=14`）→ 其历史订单行 `rebate_cny` 记为 X、`logistics_cny = 14 × qty` | 改 `rebate_rate` 0.22→0.30（`PUT /api/products/skus/:id`）后：X 与 `logistics_cny` 逐字节不变；只有之后同步进来的行才按 0.30 冻结；`sys_op_log` 新增 1 行 `action='update'` 且 `before_after` 含 `0.22→0.3` | §5.3 要点 1 |
+| TC-04 | 未配返点率不按 0 收入进利润 | `GET /api/dashboard/summary` | `unmapped_listings === 6`（演示 `tk_order_item` `sku_id IS NULL AND rebate_matched=0` 共 6 行）；把其中若干行 `rebate_cny` 人为改成 99999 → `est_rebate`/`est_gross_profit` 数字**不变**（同时 `warn.unmapped_items` 仍报这 6 行，界面写"不计利润"而不是"利润为 0"）；`/api/products/unmapped?tab=B` 可列出这些行 | §5.3 要点 2 |
 | TC-05 | GMV 口径 | `GET /api/dashboard/summary?days=30`（店全选，boss） | `orders` 与手算"近 30 天、非 CANCELLED（37 条）、非样品单（8 条）"一致 = **111 单**；`total_paid` 合计 **130595.11** 量级一致（差异仅由币种折算解释）；`gmv` 与"排除 `is_sample_order=1`"手算一致 | §5.3 要点 3 |
 | TC-06 | 同步幂等 | 连续执行 `POST /api/sync/run {task_type:'order', shop_id:1}` **3 次**（mock，重叠窗口） | `tk_order`/`tk_order_item` 行数 3 次后完全不变；第 2、3 次 `sync_log.inserted === 0` 且 `updated ≥ 0`；旧报文（`updated_at` 更早）不得覆盖已有 `order_status` | B1 |
 | TC-07 | 认领并发 | `chenbd` 与 `lubd` 同时 `POST /api/creators/5/claim` | 恰好 1 个 200，另 1 个 **409 `code:40900`**；成功后 `pool_status=2`、`owner_id` 唯一、`protect_until = today+30`；`sys_op_log` 只 1 条认领记录 | B2、§4.5C |

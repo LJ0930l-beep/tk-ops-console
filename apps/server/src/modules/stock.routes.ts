@@ -28,8 +28,8 @@ export const stockRouter = Router();
 export const WH_TYPE_LABEL: Record<number, string> = { 1: '国内仓', 2: '海外仓', 3: '平台仓' };
 /** stock_ledger.change_type：入库为正、出库为负（3 调拨 / 7 盘点双向） */
 export const CHANGE_TYPE_LABEL: Record<number, string> = {
-  1: '采购入库',
-  2: '头程发货',
+  1: '品牌入仓',
+  2: '头程调拨',
   3: '调拨',
   4: '销售出库',
   5: '样品出库',

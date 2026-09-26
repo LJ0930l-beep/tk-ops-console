@@ -1,7 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { ORDER_STATUS_LABEL } from '@tk/shared';
-import { activeShopIds, normalizeFulfillment, normalizeOrderStatus, refreshDerivedAggregates, resolveWindow, runTask, type SyncResult } from '../src/jobs/syncJobs.js';
+import { ORDER_STATUS_LABEL, rebateCny, round2 } from '@tk/shared';
+import {
+  activeShopIds,
+  normalizeFulfillment,
+  normalizeOrderStatus,
+  refreshDerivedAggregates,
+  resolveWindow,
+  runTask,
+  snapshotRebate,
+  type SyncResult,
+} from '../src/jobs/syncJobs.js';
 import { MockTikTokShopClient } from '../src/services/tiktok/mockProvider.js';
+import { getRate, rateDay } from '../src/services/rates.js';
 import { all, get, insert, run } from '../src/core/db.js';
 import { config } from '../src/config.js';
 import { ACCOUNTS, auth, boot, dataOf, login, pageOf } from './helper.js';
@@ -9,6 +19,8 @@ import { ACCOUNTS, auth, boot, dataOf, login, pageOf } from './helper.js';
 /**
  * 数据同步与财务结算的自动化回归（开发文档要求：同步 / 财务 / 预警三条链路必须有测试）。
  * 全程 mock 模式，不发任何外网请求；断言集中在幂等、留痕、失败告警与「不重复计钱」。
+ * 品牌服务方口径下另外钉住两件事：返点三列在明细写入时冻结（改 SKU 不回溯历史），
+ * 以及算不出返点的行（未映射 / SKU 没配返点率）计入 failed 而不是按 0 收入进报表。
  */
 
 const { http } = boot();
@@ -28,6 +40,31 @@ const lastLog = (taskType: string, shopId: number | null): Record<string, unknow
     taskType,
     ...(shopId === null ? [] : [shopId]),
   );
+
+/** 明细行 + 所属订单的取价上下文（返点冻结时用的就是这个币种/这一天，逐字复算靠它） */
+interface ItemRow {
+  id: number;
+  sku_id: number | null;
+  quantity: number;
+  item_amount: number;
+  currency: string;
+  order_time: string | null;
+  paid_time: string | null;
+  rebate_rate: number;
+  rebate_cny: number;
+  logistics_cny: number;
+  rebate_matched: number;
+}
+const itemRow = (id: number): ItemRow | undefined =>
+  get<ItemRow>(
+    `SELECT i.id, i.sku_id, i.quantity, i.item_amount, i.rebate_rate, i.rebate_cny, i.logistics_cny, i.rebate_matched,
+            o.currency, o.order_time, o.paid_time
+       FROM tk_order_item i JOIN tk_order o ON o.id = i.order_id WHERE i.id = ?`,
+    id,
+  );
+/** 落库时的取价：订单币种 + 业务发生日（付款时间优先），与 upsertPlatformOrder 同一档 */
+const rateOfOrder = (r: { currency: string; order_time: string | null; paid_time: string | null }): number =>
+  getRate(r.currency, rateDay(String(r.paid_time ?? r.order_time ?? ''))).rate;
 
 /** 临时替换 mock 客户端的某个接口，模拟平台侧异常/空返回 */
 async function withMock<K extends keyof MockTikTokShopClient>(key: K, impl: MockTikTokShopClient[K], fn: () => Promise<void>): Promise<void> {
@@ -128,26 +165,69 @@ describe('订单同步落库与幂等', () => {
     expect([Number(hidden.is_deleted), Number(hidden.total_paid)]).toEqual([1, 45]);
   });
 
-  it('找不到内部 SKU 的明细计入 failed 并让日志变「部分失败」，绝不静默按 0 成本', async () => {
+  it('找不到内部 SKU 的明细计入 failed 并让日志变「部分失败」，绝不静默按 0 返点', async () => {
     expect(first.status).toBe(2);
     expect(first.detail.unmapped_items ?? 0).toBeGreaterThan(0);
-    const unmapped = countOf(`SELECT COUNT(*) AS c FROM tk_order_item i JOIN tk_order o ON o.id = i.order_id WHERE o.shop_id = ? AND i.cost_matched = 0`, SHOP);
+    const unmapped = countOf(`SELECT COUNT(*) AS c FROM tk_order_item i JOIN tk_order o ON o.id = i.order_id WHERE o.shop_id = ? AND i.rebate_matched = 0`, SHOP);
     expect(unmapped).toBeGreaterThan(0);
-    // 这些行不参与成本/利润口径
+    // 未配到返点率的行不许留一个「已冻结但其实没返点」的假快照
+    const fake = countOf(
+      `SELECT COUNT(*) AS c FROM tk_order_item i JOIN tk_order o ON o.id = i.order_id
+        WHERE o.shop_id = ? AND i.rebate_matched = 0 AND (i.rebate_rate <> 0 OR i.rebate_cny <> 0 OR i.logistics_cny <> 0)`,
+      SHOP,
+    );
+    expect(fake).toBe(0);
+    // 这些行不参与任何钱口径
     const listed = pageOf((await http.get(`/api/orders?shop_id=${SHOP}&only_unmapped=1&pageSize=50`).set(auth(await login(http, ACCOUNTS.boss)))).body);
     expect(listed.total).toBeGreaterThan(0);
   });
 
-  it('成本快照冻结：改 SKU 采购成本不回溯历史明细', async () => {
-    const row = get<{ id: number; sku_id: number; cost_snapshot: number }>(
-      `SELECT i.id, i.sku_id, i.cost_snapshot FROM tk_order_item i JOIN tk_order o ON o.id = i.order_id
-        WHERE o.shop_id = ? AND i.cost_matched = 1 AND i.cost_snapshot > 0 LIMIT 1`,
+  it('返点快照冻结：rebate_cny = 实收折 CNY × 冻结返点率，改 SKU 返点率不回溯历史明细', async () => {
+    const row = get<{ id: number; sku_id: number }>(
+      `SELECT i.id, i.sku_id FROM tk_order_item i JOIN tk_order o ON o.id = i.order_id
+        WHERE o.shop_id = ? AND i.rebate_matched = 1 AND i.rebate_cny > 0 LIMIT 1`,
       SHOP,
     );
     expect(row).toBeTruthy();
-    run(`UPDATE product_sku SET purchase_cost = purchase_cost + 999 WHERE id = ?`, row!.sku_id);
-    await runTask('order', SHOP, WIN);
-    expect(Number(get<{ cost_snapshot: number }>(`SELECT cost_snapshot FROM tk_order_item WHERE id = ?`, row!.id)?.cost_snapshot)).toBe(row!.cost_snapshot);
+    const before = itemRow(row!.id)!;
+    const sku = get<{ rebate_rate: number; logistics_cost: number }>(`SELECT rebate_rate, logistics_cost FROM product_sku WHERE id = ?`, before.sku_id)!;
+    // 手算复核：实收折 CNY = item_amount × 业务发生日汇率；应收返点 = 该值 × 冻结返点率；
+    // 物流 = 单件物流成本（本来就是人民币/件）× 数量，不再乘汇率。
+    const amountCny = round2(before.item_amount * rateOfOrder(before));
+    expect(before.rebate_rate).toBe(sku.rebate_rate);
+    expect(before.rebate_cny).toBe(rebateCny(amountCny, sku.rebate_rate));
+    expect(before.logistics_cny).toBe(round2(sku.logistics_cost * before.quantity));
+
+    // 事后品牌把返点率谈到 0.9、物流涨到 88/件：历史单一条都不许动（要点 3）
+    run(`UPDATE product_sku SET rebate_rate = 0.9, logistics_cost = 88 WHERE id = ?`, before.sku_id);
+    try {
+      await runTask('order', SHOP, WIN);
+      const after = itemRow(row!.id)!;
+      expect([Number(after.rebate_rate), Number(after.rebate_cny), Number(after.logistics_cny)]).toEqual([
+        Number(before.rebate_rate),
+        Number(before.rebate_cny),
+        Number(before.logistics_cny),
+      ]);
+      // 重跑同步后仍与「成交当日」的价 + 成交时的率自洽，而不是与新协议 0.9 自洽
+      expect(after.rebate_cny).toBe(rebateCny(round2(after.item_amount * rateOfOrder(after)), before.rebate_rate));
+    } finally {
+      run(`UPDATE product_sku SET rebate_rate = ?, logistics_cost = ? WHERE id = ?`, sku.rebate_rate, sku.logistics_cost, before.sku_id);
+    }
+  });
+
+  it('返点冻结的纯函数口径：没配返点率的 SKU 与找不到 SKU 一样整行退出', () => {
+    // 落库口径（syncJobs.snapshotRebate）：返点率 ≤ 0 一律 rebate_matched=0，三个冻结值全部留空
+    const noRate = snapshotRebate({ rebate_rate: 0, logistics_cost: 14 }, 2, 1000);
+    expect(noRate).toEqual({ rebate_rate: 0, rebate_cny: 0, logistics_cny: 0, rebate_matched: 0 });
+    // 配了返点率才冻结：1000 元实收 × 0.22 = 220；物流 14/件 × 2 件 = 28（物流不折汇）
+    expect(snapshotRebate({ rebate_rate: 0.22, logistics_cost: 14 }, 2, 1000)).toEqual({
+      rebate_rate: 0.22,
+      rebate_cny: 220,
+      logistics_cny: 28,
+      rebate_matched: 1,
+    });
+    // 没映射到 SKU（sku 为空）同样整行退出，绝不允许"按 0 收入继续算利润"
+    expect(snapshotRebate(null, 1, 500).rebate_matched).toBe(0);
   });
 
   it('平台异常时记结构化失败日志，不把异常抛给调度器', async () => {
@@ -164,7 +244,18 @@ describe('订单同步落库与幂等', () => {
       shop_id: SHOP, tk_order_id: `RECENT-${Date.now()}`, order_status: 'COMPLETED',
       order_time: nowUtc(), currency: 'MYR', total_paid: 10,
     });
-    insert('tk_order_item', { order_id: oid, item_amount: 10, cost_matched: 1 });
+    // 手工补一行「有返点」的近期单：冻结值按落库口径一起算，不留假快照
+    // 实收折 CNY = 10 × 今日 MYR 牌价；应收返点 = 该值 × 0.2
+    const fx = getRate('MYR', rateDay(nowUtc())).rate;
+    insert('tk_order_item', {
+      order_id: oid,
+      item_amount: 10,
+      quantity: 1,
+      rebate_rate: 0.2,
+      rebate_cny: rebateCny(round2(10 * fx), 0.2),
+      logistics_cny: 0,
+      rebate_matched: 1,
+    });
     await withMock('getOrders', (async () => []) as MockTikTokShopClient['getOrders'], async () => {
       const [r] = await runTask('order', SHOP, { windowStart: '2026-01-01 00:00:00', windowEnd: '2026-01-02 00:00:00' });
       expect(r.status).toBe(3);
@@ -242,35 +333,48 @@ describe('商品 / 售后 / 联盟 / 派生刷新', () => {
     expect(Number(get<{ is_deleted: number }>(`SELECT is_deleted FROM tk_return WHERE id = ?`, trashedReturn)?.is_deleted)).toBe(1);
   });
 
-  it('映射补齐后跑 aggregate：历史待映射行回填成本快照并留操作日志', () => {
-    const sku = get<{ id: number; purchase_cost: number; first_leg_cost: number }>(
-      `SELECT id, purchase_cost, first_leg_cost FROM product_sku WHERE is_deleted = 0 LIMIT 1`,
+  it('映射补齐后跑 aggregate：历史未配返点率的行回填返点快照并留操作日志', () => {
+    const sku = get<{ id: number; sku_code: string; rebate_rate: number; logistics_cost: number }>(
+      `SELECT id, sku_code, rebate_rate, logistics_cost FROM product_sku WHERE is_deleted = 0 ORDER BY id LIMIT 1`,
     );
+    // 新口径下「回填」的前提是 SKU 上真的配了返点率，否则这一行继续留在待映射清单
+    expect(Number(sku?.rebate_rate ?? 0)).toBeGreaterThan(0);
     const listing = insert('shop_listing', { shop_id: SHOP, sku_id: null, tk_sku_id: 'AGG-TEST-SKU', tk_product_id: 'AGG-TEST-P', seller_sku: 'AGG-TEST', product_name: '待映射', sale_price: 99, map_status: 2 });
     const order = insert('tk_order', { shop_id: SHOP, tk_order_id: 'AGG-TEST-ORDER', order_status: 'COMPLETED', order_time: nowUtc(), currency: 'MYR', total_paid: 99 });
-    const item = insert('tk_order_item', { order_id: order, listing_id: listing, item_amount: 99, quantity: 2, cost_matched: 0 });
+    const item = insert('tk_order_item', { order_id: order, listing_id: listing, item_amount: 99, quantity: 2, rebate_matched: 0 });
 
     const r = refreshDerivedAggregates({ user_id: 1 });
     expect(r.status).toBe(1);
     // listing 状态自愈 + 明细回填
     expect(Number(get<{ map_status: number }>(`SELECT map_status FROM shop_listing WHERE id = ?`, listing)?.map_status)).toBe(2);
-    const after = get<Record<string, unknown>>(`SELECT sku_id, cost_matched, cost_snapshot FROM tk_order_item WHERE id = ?`, item);
+    const after = get<Record<string, unknown>>(`SELECT sku_id, rebate_matched, rebate_cny, logistics_cny FROM tk_order_item WHERE id = ?`, item);
+    expect(Number(after?.rebate_matched)).toBe(0); // SKU 还没绑上，这一行仍然不算返点
+    expect(Number(after?.rebate_cny)).toBe(0);
+
     run(`UPDATE shop_listing SET sku_id = ?, map_status = 1 WHERE id = ?`, sku!.id, listing);
     const r2 = refreshDerivedAggregates({ user_id: 1 });
     expect(Number(r2.detail.item_backfilled)).toBeGreaterThanOrEqual(1);
-    expect(Number(get<{ cost_matched: number }>(`SELECT cost_matched FROM tk_order_item WHERE id = ?`, item)?.cost_matched)).toBe(1);
-    expect(Number(get<{ cost_snapshot: number }>(`SELECT cost_snapshot FROM tk_order_item WHERE id = ?`, item)?.cost_snapshot))
-      .toBe(Math.round(((sku!.purchase_cost + sku!.first_leg_cost) * 2 + Number.EPSILON) * 100) / 100);
-    expect(after?.cost_matched).toBe(0);
+    expect(Number(get<{ rebate_matched: number }>(`SELECT rebate_matched FROM tk_order_item WHERE id = ?`, item)?.rebate_matched)).toBe(1);
+    // 手算：实收折 CNY = 99 × MYR 当日牌价（2.12 × 0.9955 = 2.11）= 208.89；
+    // 应收返点 = 208.89 × 0.22 = 45.9558 → 45.96；物流 = 14/件 × 2 件 = 28（人民币列不折汇）
+    const fx = rateOfOrder(itemRow(item)!);
+    expect(Number(get<{ rebate_cny: number }>(`SELECT rebate_cny FROM tk_order_item WHERE id = ?`, item)?.rebate_cny)).toBe(
+      rebateCny(round2(99 * fx), sku!.rebate_rate),
+    );
+    expect(Number(get<{ logistics_cny: number }>(`SELECT logistics_cny FROM tk_order_item WHERE id = ?`, item)?.logistics_cny)).toBe(
+      round2(sku!.logistics_cost * 2),
+    );
     const log = get<Record<string, unknown>>(`SELECT before_after FROM sys_op_log WHERE target_table = 'tk_order_item' AND target_id = ? ORDER BY id DESC LIMIT 1`, item);
-    expect(String(log?.before_after)).toContain('映射补齐');
+    const logged = String(log?.before_after ?? '');
+    expect(logged).toContain('回填');
+    expect(logged).toContain('"rebate_cny"'); // 回填前后的冻结值可追溯（此前无返点快照 → 现在按当日价冻结）
   });
 
   it('aggregate 幂等：第二次跑不再回填、不新增日志行以外的变化', () => {
-    const before = countOf(`SELECT COUNT(*) AS c FROM tk_order_item WHERE cost_matched = 1`);
+    const before = countOf(`SELECT COUNT(*) AS c FROM tk_order_item WHERE rebate_matched = 1`);
     const r = refreshDerivedAggregates();
     expect(Number(r.detail.item_backfilled)).toBe(0);
-    expect(countOf(`SELECT COUNT(*) AS c FROM tk_order_item WHERE cost_matched = 1`)).toBe(before);
+    expect(countOf(`SELECT COUNT(*) AS c FROM tk_order_item WHERE rebate_matched = 1`)).toBe(before);
   });
 });
 
@@ -390,10 +494,86 @@ describe('卖家表格导入与结算对账', () => {
     const id = Number(get<{ id: number }>(`SELECT id FROM tk_order WHERE tk_order_id = 'CSV-0001'`)?.id);
     expect(id).toBeGreaterThan(0);
     expect(countOf(`SELECT COUNT(*) AS c FROM tk_order_item WHERE order_id = ?`, id)).toBe(1);
-    expect(Number(get<{ cost_matched: number }>(`SELECT cost_matched FROM tk_order_item WHERE order_id = ?`, id)?.cost_matched)).toBe(0);
+    const unbound = get<{ rebate_matched: number; rebate_cny: number; rebate_rate: number }>(
+      `SELECT rebate_matched, rebate_cny, rebate_rate FROM tk_order_item WHERE order_id = ?`, id,
+    );
+    // 找不到内部 SKU → 没有返点率可冻结：整行退出钱口径（不是"返点 0 元"）
+    expect([Number(unbound?.rebate_matched), Number(unbound?.rebate_cny), Number(unbound?.rebate_rate)]).toEqual([0, 0, 0]);
     expect(dataOf<{ run: { inserted: number; updated: number } }>(again.body).run.inserted).toBe(0);
     // 明细缺行直接判参数错误，不落半条订单
     expect((await http.post('/api/sync/import/orders').set(auth(await boss())).send({ shop_id: SHOP, rows: [{ order_id: 'CSV-0002', status: 'X' }] })).status).toBe(400);
+  });
+
+  it('导入路径同样冻结返点：rebate_cny = 实收折 CNY × SKU 返点率，物流 = 单件成本 × 件数', async () => {
+    const listing = get<{ seller_sku: string; sku_id: number }>(
+      `SELECT seller_sku, sku_id FROM shop_listing WHERE shop_id = ? AND sku_id IS NOT NULL AND IFNULL(seller_sku, '') <> '' ORDER BY id LIMIT 1`,
+      SHOP,
+    )!;
+    const sku = get<{ rebate_rate: number; logistics_cost: number }>(`SELECT rebate_rate, logistics_cost FROM product_sku WHERE id = ?`, listing.sku_id)!;
+    // 人民币单（汇率恒 1）：单价 50 × 2 件 = 实收 100；
+    // 应收返点 = 100 × rebate_rate（seed 的 0.22 → 22）；物流 = logistics_cost × 2（seed 的 14 → 28）
+    const res = await http.post('/api/sync/import/orders').set(auth(await boss())).send({
+      shop_id: SHOP,
+      rows: [
+        {
+          order_id: `CSV-REBATE-${Date.now()}`, status: 'COMPLETED', order_time: '2026-09-10 01:00:00', currency: 'CNY',
+          subtotal: 100, total_paid: 100, items: [{ seller_sku: listing.seller_sku, quantity: 2, price: 50 }],
+        },
+      ],
+    });
+    expect(res.status).toBe(200);
+    const row = get<{ item_amount: number; quantity: number; rebate_matched: number; rebate_rate: number; rebate_cny: number; logistics_cny: number }>(
+      `SELECT i.item_amount, i.quantity, i.rebate_matched, i.rebate_rate, i.rebate_cny, i.logistics_cny
+         FROM tk_order_item i JOIN tk_order o ON o.id = i.order_id
+        WHERE o.tk_order_id LIKE 'CSV-REBATE-%' LIMIT 1`,
+    )!;
+    expect(Number(row.item_amount)).toBe(100);
+    expect(Number(row.rebate_matched)).toBe(1);
+    expect(Number(row.rebate_rate)).toBe(sku.rebate_rate);
+    expect(Number(row.rebate_cny)).toBe(rebateCny(round2(100 * rateOfOrder({ currency: 'CNY', order_time: '2026-09-10 01:00:00', paid_time: null })), sku.rebate_rate));
+    expect(Number(row.logistics_cny)).toBe(round2(sku.logistics_cost * 2));
+    // 汇率档位复核：CNY 恒 1，所以 100 元的实收折 CNY 还是 100 → 返点就是 100 × 返点率
+    expect(rateOfOrder({ currency: 'CNY', order_time: '2026-09-10 01:00:00', paid_time: null })).toBe(1);
+    expect(Number(row.rebate_cny)).toBe(round2(100 * sku.rebate_rate));
+  });
+
+  it('SKU 上没配返点率的行单独计入 rebate_unconfigured，且 sku_id 照实保留不写假快照', async () => {
+    const listing = get<{ seller_sku: string; sku_id: number }>(
+      `SELECT seller_sku, sku_id FROM shop_listing WHERE shop_id = ? AND sku_id IS NOT NULL AND IFNULL(seller_sku, '') <> '' ORDER BY id LIMIT 1`,
+      SHOP,
+    )!;
+    const before = get<{ rebate_rate: number }>(`SELECT rebate_rate FROM product_sku WHERE id = ?`, listing.sku_id)!;
+    const extId = `CSV-NORATE-${Date.now()}`;
+    // 品牌还没谈下返点率：映射是好的（listing 已绑 SKU），缺的是比率
+    run(`UPDATE product_sku SET rebate_rate = 0 WHERE id = ?`, listing.sku_id);
+    try {
+      const res = await http.post('/api/sync/import/orders').set(auth(await boss())).send({
+        shop_id: SHOP,
+        rows: [
+          {
+            order_id: extId, status: 'COMPLETED', order_time: '2026-09-10 01:00:00', currency: 'CNY',
+            subtotal: 100, total_paid: 100, items: [{ seller_sku: listing.seller_sku, quantity: 1, price: 100 }],
+          },
+        ],
+      });
+      expect(res.status).toBe(200);
+      const run0 = dataOf<{ run: SyncResult }>(res.body).run;
+      // 两类"算不出返点"分开计数：建映射 vs 配返点率，运营要做的事不一样
+      expect(Number(run0.detail.rebate_unconfigured ?? 0)).toBeGreaterThanOrEqual(1);
+      expect(run0.failed).toBeGreaterThan(0);
+      expect(Number(run0.detail.unmapped_items ?? 0)).toBe(0);
+
+      const row = get<{ sku_id: number | null; rebate_matched: number; rebate_rate: number; rebate_cny: number; logistics_cny: number }>(
+        `SELECT sku_id, rebate_matched, rebate_rate, rebate_cny, logistics_cny FROM tk_order_item i JOIN tk_order o ON o.id = i.order_id WHERE o.tk_order_id = ?`,
+        extId,
+      )!;
+      expect(row.sku_id).toBe(listing.sku_id); // 映射结果照实保留，不把行降级成"未映射"
+      expect([Number(row.rebate_matched), Number(row.rebate_rate), Number(row.rebate_cny), Number(row.logistics_cny)]).toEqual([0, 0, 0, 0]);
+    } finally {
+      run(`UPDATE product_sku SET rebate_rate = ? WHERE id = ?`, before.rebate_rate, listing.sku_id);
+      run(`DELETE FROM tk_order_item WHERE order_id = (SELECT id FROM tk_order WHERE tk_order_id = ?)`, extId);
+      run(`DELETE FROM tk_order WHERE tk_order_id = ?`, extId);
+    }
   });
 
   it('订单全局键已归属另一店铺时拒绝导入，且不改写原店订单', async () => {
@@ -444,16 +624,22 @@ describe('卖家表格导入与结算对账', () => {
     expect(countOf(`SELECT COUNT(*) AS c FROM settlement_txn WHERE statement_id = 'ST-ESC-1'`)).toBe(0);
   });
 
-  it('逐单对账：差异能被拆解项解释，残差≈0', async () => {
+  it('逐单对账：差异能被拆解项解释，残差≈0；平台结算款不再进我们的利润', async () => {
     const res = await http.get('/api/finance/settlement/reconcile?only=settled&pageSize=50').set(auth(await boss()));
     expect(res.status).toBe(200);
-    const d = dataOf<{ list: Record<string, unknown>[]; summary: Record<string, number> }>(res.body);
+    const d = dataOf<{ list: Record<string, number>[]; summary: Record<string, number> }>(res.body);
     expect(d.list.length).toBeGreaterThan(0);
     for (const r of d.list.slice(0, 30)) {
       expect(Number(r.has_settlement)).toBe(1);
       expect(Math.abs(Number(r.explain_residual_cny))).toBeLessThan(1);
       expect(r.stat_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      // 预估侧利润 = 冻结返点 − 冻结物流 − 预估佣金；结算侧只把支出换成平台实扣的达人佣金。
+      // 两个式子里都没有 settled_cny —— 那是打进品牌店的钱，加进来就是把同一笔钱记两遍。
+      expect(Number(r.est_profit_cny)).toBe(round2(Number(r.rebate_cny) - Number(r.logistics_cny) - Number(r.est_commission_cny)));
+      expect(Number(r.settled_profit_cny)).toBe(round2(Number(r.rebate_cny) - Number(r.logistics_cny) - Number(r.settled_commission_cny)));
     }
     expect(Number(d.summary.settled_orders)).toBeGreaterThan(0);
+    // 结算实收仍然单独出列（对账要用），但它没进上面任何一个利润式子
+    expect(Number(d.summary.settled_cny)).toBeGreaterThan(0);
   });
 });

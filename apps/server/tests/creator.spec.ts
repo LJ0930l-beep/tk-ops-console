@@ -7,6 +7,10 @@ import { flagOverdueCollabs, flagOverdueSamples, refreshVideoAggregates, recycle
 
 /**
  * 达人中心（表 9-12 + 6.1 闭环 + 8.1/8.2 权限）
+ *
+ * 品牌服务方（代运营）口径：投产比 = 应收返点 ÷（物流 + 寄样运费 + 坑位费 + 达人佣金）。
+ * 样品的货是品牌白给的，寄样只剩运费这一笔我们掏的钱（sample_shipment 已无 sample_cost 列）。
+ *
  * 覆盖：脱敏 / 防撞单 / 保护期回收 / 10 秒建联 / 合作单状态机 / 费用与投产比口径 / 寄样超期 / 作业函数
  */
 
@@ -21,6 +25,20 @@ const mask = (v: unknown): boolean => v === '***';
 const USER = { boss: 1, limy: 2, wangqiang: 4, chenbd: 5, lubd: 6, hudm: 7, yinuo: 8, whzhao: 12 } as const;
 /** 种子达人（bdUsers[i % 2]）：公海 4/6/8/9/11，chenbd 1(合作中)/3/5(合作中)/7，lubd 2/10 + 12(黑名单) */
 const CREATOR = { aisyah: 1, kevin: 2, mangbert: 3, cosy: 4, fitjay: 5, gadget: 6, lina: 7, tales: 8, deals: 9, nose: 10, finds: 11, glow: 12 } as const;
+
+/**
+ * 种子 SKU 的品牌返点口径（product_sku.rebate_rate / logistics_cost），用来手工复算冻结在订单行上的快照：
+ *   SKU1 ORICO-66059-01：返点率 0.22、单件物流 14 元/件
+ *   SKU3 ORICO-CB2P-01 ：返点率 0.30、单件物流 3.5 元/件
+ *   SKU8 ANTA-LABAN-01 ：返点率 0.15、单件物流 6 元/件
+ */
+const SKU_REBATE: Record<number, { rate: number; logistics: number }> = {
+  1: { rate: 0.22, logistics: 14 },
+  3: { rate: 0.3, logistics: 3.5 },
+  8: { rate: 0.15, logistics: 6 },
+};
+const SEED_SKU1_REBATE_RATE = SKU_REBATE[1].rate;
+const SEED_SKU1_LOGISTICS_PER_UNIT = SKU_REBATE[1].logistics;
 
 const token: Record<string, string> = {};
 
@@ -238,7 +256,7 @@ describe('公海认领 / 退回 / 黑名单（防撞单）', () => {
     // 认领后他人不可改 / 不可删 / 不可寄样
     expect((await http.put(`/api/creators/${id}`).set(auth(token.bd2)).send({ nickname: 'hack' })).status).toBe(403);
     expect((await http.delete(`/api/creators/${id}`).set(auth(token.bd2))).status).toBe(403);
-    expect((await http.post('/api/creators/sample').set(auth(token.bd2)).send({ creator_id: id, sample_cost: 10 })).status).toBe(403);
+    expect((await http.post('/api/creators/sample').set(auth(token.bd2)).send({ creator_id: id, shipping_cost: 10 })).status).toBe(403);
   });
 
   it('非公海达人不能认领；退回公海后可被他人认领', async () => {
@@ -578,17 +596,25 @@ describe('合作单：归属校验 / 状态机 / 费用 / 投产比', () => {
     expect((await http.post(`/api/creators/collab/${zero}/expense`).set(auth(token.boss))).status).toBe(400);
   });
 
-  it('单合作投产比：净 GMV 折 CNY，扣已完成退款、排除样品单；无成本权限脱敏', async () => {
+  it('单合作投产比：应收返点 ÷ 我们掏的钱，扣已完成退款、排除样品单；无成本权限脱敏', async () => {
     const creatorId = await makePublicCreator('t-roi-collab');
     await http.post(`/api/creators/${creatorId}/claim`).set(auth(token.bd));
     const collab = dataOf<{ id: number }>((await http.post('/api/creators/collab').set(auth(token.bd)).send({
       creator_id: creatorId, shop_id: 3, coop_type: 1, commission_rate: 10, promised_videos: 1,
     })).body).id;
-    const sample = dataOf<{ id: number; sample_cost: number }>((await http.post('/api/creators/sample').set(auth(token.bd)).send({
+    /**
+     * 寄样：货是品牌白给的，我们只掏运费 —— 落库只有 shipping_cost，没有任何「样品成本」。
+     * 响应体与 sample_shipment 行都不该再出现 sample_cost 这个字段。
+     */
+    const sample = dataOf<Record<string, unknown>>((await http.post('/api/creators/sample').set(auth(token.bd)).send({
       collab_id: collab, creator_id: creatorId, sku_id: 1, quantity: 2, shipping_cost: 50,
     })).body);
-    // SKU1 = 采购 96 + 头程 22 = 118/件，冻结总额 = 118 × 2
-    expect(sample.sample_cost).toBe(236);
+    expect(sample.id).toBeGreaterThan(0);
+    expect(sample.shipping_cost).toBe(50);
+    expect(sample).not.toHaveProperty('sample_cost');
+    const sampleCols = Object.keys(get<Record<string, unknown>>(`SELECT * FROM sample_shipment WHERE id = ?`, Number(sample.id)) ?? {});
+    expect(sampleCols).toContain('shipping_cost');
+    expect(sampleCols).not.toContain('sample_cost');
 
     const video = dataOf<{ tk_video_id: string }>((await http.post('/api/content/videos').set(auth(token.bd)).send({
       video_url: 'https://www.tiktok.com/@troicollab/video/7599000000000000001', publisher_type: 2, collab_id: collab, creator_id: creatorId, views: 1000,
@@ -602,36 +628,69 @@ describe('合作单：归属校验 / 状态机 / 费用 / 投产比', () => {
     )?.rate_to_cny ?? 1);
     const mkOrder = (isSample: number, tkOrderId: string) =>
       run(`INSERT INTO tk_order (shop_id, tk_order_id, order_status, order_time, currency, total_paid, is_sample_order) VALUES (3, ?, 'COMPLETED', ?, 'USD', 100, ?)`, tkOrderId, orderTime, isSample);
+
+    /**
+     * 冻结返点快照（与 syncJobs.snapshotRebate 同一口径，手工算给断言用）：
+     *   SKU1 品牌返点率 = 0.22、单件物流 = 14 元/件
+     *   income_cny   = round2(item_amount × fx)
+     *   rebate_cny   = round2(income_cny × 0.22)
+     *   logistics_cny = round2(14 × quantity)
+     */
+    const freezeRebate = (itemAmount: number, quantity: number): { rate: number; cny: number; logistics: number } => ({
+      rate: SEED_SKU1_REBATE_RATE,
+      cny: round2(round2(itemAmount * rate) * SEED_SKU1_REBATE_RATE),
+      logistics: round2(SEED_SKU1_LOGISTICS_PER_UNIT * quantity),
+    });
+    const mkItem = (orderId: number, itemAmount: number, commission: number, quantity = 1) => {
+      const snap = freezeRebate(itemAmount, quantity);
+      run(
+        `INSERT INTO tk_order_item (order_id, sku_id, quantity, unit_price, item_amount, creator_id, content_type, content_id,
+                                    commission_rate, est_commission, rebate_rate, rebate_cny, logistics_cny, rebate_matched)
+             VALUES (?, 1, ?, ?, ?, 1, ?, ?, 10, ?, ?, ?, ?, 1)`,
+        orderId, quantity, itemAmount, itemAmount, creatorId, video.tk_video_id, commission, snap.rate, snap.cny, snap.logistics,
+      );
+    };
+
     mkOrder(0, 'ROI-TEST-1');
     const oid = Number(get<{ id: number }>(`SELECT id FROM tk_order WHERE tk_order_id = 'ROI-TEST-1'`)?.id);
-    run(`INSERT INTO tk_order_item (order_id, sku_id, quantity, unit_price, item_amount, creator_id, content_type, content_id, commission_rate, est_commission)
-         VALUES (?, 1, 1, 100, 100, ?, 1, ?, 10, 10)`, oid, creatorId, video.tk_video_id);
+    // 实收 100 USD，佣金 10%：返点 = round2(round2(100 × fx) × 0.22)，物流 = 14 × 1
+    mkItem(oid, 100, 10);
     const itemId = Number(get<{ id: number }>(`SELECT id FROM tk_order_item WHERE order_id = ?`, oid)?.id);
     run(`INSERT INTO tk_return (order_id, shop_id, tk_order_item_id, tk_return_id, return_type, reason, refund_amount, currency, status, apply_time)
          VALUES (?, 3, ?, 'ROI-TEST-RT1', 1, '质量问题', 20, 'USD', 'COMPLETED', ?)`, oid, itemId, orderTime);
     // 未完成的退款不扣减
     run(`INSERT INTO tk_return (order_id, shop_id, tk_order_item_id, tk_return_id, return_type, reason, refund_amount, currency, status, apply_time)
          VALUES (?, 3, ?, 'ROI-TEST-RT2', 1, '买家不想要', 30, 'USD', 'PROCESSING', ?)`, oid, itemId, orderTime);
-    // 免费样品单不计入 GMV
+    // 免费样品单不计入 GMV，也不计入我们的返点
     mkOrder(1, 'ROI-TEST-2');
     const oid2 = Number(get<{ id: number }>(`SELECT id FROM tk_order WHERE tk_order_id = 'ROI-TEST-2'`)?.id);
-    run(`INSERT INTO tk_order_item (order_id, sku_id, quantity, unit_price, item_amount, creator_id, content_type, content_id, commission_rate, est_commission)
-         VALUES (?, 1, 1, 999, 999, ?, 1, ?, 10, 99)`, oid2, creatorId, video.tk_video_id);
+    mkItem(oid2, 999, 99);
+
+    const incomeCny = round2(100 * rate);
+    const rebateCny = round2(incomeCny * SEED_SKU1_REBATE_RATE);
+    const commissionCny = round2(10 * rate);
+    const logisticsCny = round2(SEED_SKU1_LOGISTICS_PER_UNIT * 1);
+    // 投入 = 物流 14 + 寄样运费 50 + 坑位费 0 + 达人佣金（10 USD 折 CNY）
+    const costCny = round2(logisticsCny + 50 + 0 + commissionCny);
 
     const roi = dataOf<Record<string, unknown>>((await http.get(`/api/creators/collab/${collab}/roi?period=all`).set(auth(token.boss))).body);
-    expect(roi.gmv_cny).toBe(round2(100 * rate));
+    expect(roi.gmv_cny).toBe(incomeCny);
     expect(roi.refund_cny).toBe(round2(20 * rate));
     expect(roi.net_gmv_cny).toBe(round2(80 * rate));
-    expect(roi.commission_cny).toBe(round2(10 * rate));
-    expect(roi.sample_cost).toBe(236);
+    expect(roi.commission_cny).toBe(commissionCny);
+    expect(roi.rebate_cny).toBe(rebateCny);
+    expect(roi.logistics_cny).toBe(logisticsCny);
+    expect(roi).not.toHaveProperty('sample_cost');
     expect(roi.sample_shipping).toBe(50);
     expect(roi.fixed_fee_cny).toBe(0);
     expect(roi.orders).toBe(1);
-    expect(roi.cost).toBe(round2(236 + 50 + 0 + round2(10 * rate)));
-    expect(roi.roi).toBe(round2(round2(80 * rate) / round2(236 + 50 + round2(10 * rate))));
+    expect(roi.cost).toBe(costCny);
+    // 投产比 = 我们的收入 ÷ 我们掏的钱（分子不是带货 GMV）
+    expect(roi.roi).toBe(round2(rebateCny / costCny));
     expect(roi.publish_ok).toBe(true);
     expect(roi.video_count).toBe(1);
-    expect(String(roi.formula)).toContain('净 GMV');
+    expect(String(roi.formula)).toContain('应收返点');
+    expect(String(roi.formula)).not.toContain('净 GMV');
     expect(refreshVideoAggregates()).toBeGreaterThanOrEqual(1);
     expect(get<{ orders: number; gmv: number }>(`SELECT orders, gmv FROM video WHERE tk_video_id = ?`, video.tk_video_id)).toEqual({ orders: 1, gmv: round2(80 * rate) });
 
@@ -643,6 +702,11 @@ describe('合作单：归属校验 / 状态机 / 费用 / 投产比', () => {
     const masked = dataOf<Record<string, unknown>>((await http.get(`/api/creators/collab/${collab}/roi?period=all`).set(auth(token.bd))).body);
     expect(masked.gmv_cny).toBe('***');
     expect(masked.net_gmv_cny).toBe('***');
+    // 返点是我们唯一的收入、也是和品牌的商务条款；物流是我们掏的钱 —— 都得掩。
+    // ⚠ logistics_cny 目前漏在 ROI_COST_FIELDS 之外（src/modules/creator.routes.ts:59）：
+    //   cost / roi / 其余成本项都打了码，唯独这一列原样下发给无成本权限的角色，属实现漏改，断言按口径保留。
+    expect(masked.rebate_cny).toBe('***');
+    expect(masked.logistics_cny).toBe('***');
     expect(masked.roi).toBe('***');
     expect(masked.creator_id).not.toBe('***');
   });
@@ -675,12 +739,12 @@ describe('合作单：归属校验 / 状态机 / 费用 / 投产比', () => {
 });
 
 /* ==================================================================== */
-describe('寄样：成本快照 / 发货签收 / 丢件 / 超期 / 样品单导入', () => {
+describe('寄样：只记我们掏的运费 / 发货签收 / 丢件 / 超期 / 样品单导入', () => {
   let collabId = 0;
   let creatorId = 0;
   let sampleId = 0;
 
-  it('新增寄样自动取 SKU 成本快照，发货信息齐 → 在途，合作单自动 1→3', async () => {
+  it('新增寄样只登记寄样运费（货是品牌的），发货信息齐 → 在途，合作单自动 1→3', async () => {
     creatorId = await makePublicCreator('t-sample');
     await http.post(`/api/creators/${creatorId}/claim`).set(auth(token.bd));
     collabId = dataOf<{ id: number }>((await http.post('/api/creators/collab').set(auth(token.bd)).send({
@@ -692,21 +756,40 @@ describe('寄样：成本快照 / 发货签收 / 丢件 / 超期 / 样品单导�
     expect(res.status).toBe(200);
     const d = dataOf<Record<string, unknown>>(res.body);
     sampleId = Number(d.id);
-    expect(d.sample_cost).toBe(round2((158 + 46) * 3));
+    // 我们掏的钱只有运费 60 元：没有样品货值，也不按 SKU 折算任何「样品成本」
+    expect(d.shipping_cost).toBe(60);
+    expect(d).not.toHaveProperty('sample_cost');
     expect(d.status).toBe(2);
     expect(d.collab_id).toBe(collabId);
     expect(get<{ status: number }>(`SELECT status FROM collaboration WHERE id = ?`, collabId)?.status).toBe(3);
     const row = get<Record<string, unknown>>(`SELECT * FROM sample_shipment WHERE id = ?`, sampleId) ?? {};
     expect(String(row.ship_time)).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:/);
+    expect(row.quantity).toBe(3);
+    // 表里连这一列都没有了：样品的货是品牌出的，不存在「样品成本」
+    expect(Object.keys(row)).not.toContain('sample_cost');
+    // 传了旧字段也不会被当成货款收下（zod 直接剥掉）
+    const legacy = dataOf<Record<string, unknown>>((await http.post('/api/creators/sample').set(auth(token.bd)).send({
+      collab_id: collabId, creator_id: creatorId, sku_id: 4, quantity: 1, shipping_cost: 20, sample_cost: 999,
+    })).body);
+    expect(legacy.shipping_cost).toBe(20);
+    expect(Number(get<{ shipping_cost: number }>(`SELECT shipping_cost FROM sample_shipment WHERE id = ?`, Number(legacy.id))?.shipping_cost)).toBe(20);
   });
 
-  it('入参校验：无 SKU 必须填成本 / 平台样品单必须有订单号 / 达人与合作单不匹配', async () => {
-    expect((await http.post('/api/creators/sample').set(auth(token.bd)).send({ creator_id: creatorId })).status).toBe(400);
+  it('入参校验：不挂 SKU 也能登记（本来就没有货款）/ 平台样品单必须有订单号 / 达人与合作单不匹配', async () => {
+    // 寄样不再要求「无 SKU 必须填成本」：我们没有任何货款要记，空着登记待发即可
+    const noSku = dataOf<Record<string, unknown>>(
+      (await http.post('/api/creators/sample').set(auth(token.bd)).send({ collab_id: collabId, creator_id: creatorId })).body,
+    );
+    expect(noSku.shipping_cost).toBe(0);
+    expect(noSku.status).toBe(1);
+    expect(Number(noSku.sku_id ?? 0)).toBe(0);
+    expect(get<Record<string, unknown>>(`SELECT * FROM sample_shipment WHERE id = ?`, Number(noSku.id))?.sku_id).toBe(null);
+    // 平台免费样品（ship_method=1）必须给出平台单号，否则来源无从追溯
     expect((await http.post('/api/creators/sample').set(auth(token.bd)).send({ creator_id: creatorId, ship_method: 1 })).status).toBe(400);
     expect((await http.post('/api/creators/sample').set(auth(token.bd)).send({ creator_id: creatorId, sku_id: 9999 })).status).toBe(404);
-    expect((await http.post('/api/creators/sample').set(auth(token.bd)).send({ collab_id: collabId, creator_id: CREATOR.glow, sample_cost: 1 })).status).toBe(400);
+    expect((await http.post('/api/creators/sample').set(auth(token.bd)).send({ collab_id: collabId, creator_id: CREATOR.glow, shipping_cost: 1 })).status).toBe(400);
     // 公海达人不能寄样
-    expect((await http.post('/api/creators/sample').set(auth(token.bd)).send({ creator_id: CREATOR.cosy, sample_cost: 1 })).status).toBe(403);
+    expect((await http.post('/api/creators/sample').set(auth(token.bd)).send({ creator_id: CREATOR.cosy, shipping_cost: 1 })).status).toBe(403);
   });
 
   it('发货 → 签收（合作单 3→4）→ 丢件限制', async () => {
@@ -724,19 +807,27 @@ describe('寄样：成本快照 / 发货签收 / 丢件 / 超期 / 样品单导�
     expect((await http.post('/api/creators/sample/999999/sign').set(auth(token.bd))).status).toBe(404);
   });
 
-  it('ship / sign 状态推进与 PUT 修改（无成本权限不得改成本）', async () => {
-    const list = pageOf((await http.get(`/api/creators/sample?collab_id=${collabId}`).set(auth(token.bd))).body);
-    expect(list.total).toBe(2);
+  it('ship / sign 状态推进与 PUT 修改（无成本权限不得改寄样运费）', async () => {
+    // 上面登记了 4 条：用例 1 的 2 条（60 / 20）+ 无 SKU 一条 + 发货签收又一条
+    const list = pageOf((await http.get(`/api/creators/sample?collab_id=${collabId}&pageSize=50`).set(auth(token.bd))).body);
+    expect(list.total).toBe(4);
     expect((list.list[0] as Record<string, unknown>).collab_no).toBeTruthy();
     expect((list.list[0] as Record<string, unknown>).sku_code).toBeTruthy();
-    expect((list.list[0] as Record<string, unknown>).sample_cost).toBe('***');
+    // BD 无成本权限：唯一涉及钱的寄样运费一样要打码，且响应里不再有样品成本字段
+    expect((list.list[0] as Record<string, unknown>).shipping_cost).toBe('***');
+    expect(list.list.every((r) => !('sample_cost' in r))).toBe(true);
     expect((list.list[0] as Record<string, unknown>).due_days).toBe(config.sampleContentDueDays);
 
-    expect((await http.put(`/api/creators/sample/${sampleId}`).set(auth(token.bd)).send({ sample_cost: 1 })).status).toBe(403);
+    expect((await http.put(`/api/creators/sample/${sampleId}`).set(auth(token.bd)).send({ shipping_cost: 1 })).status).toBe(403);
     expect((await http.put(`/api/creators/sample/${sampleId}`).set(auth(token.boss)).send({ shipping_cost: 75, remark: null })).status).toBe(200);
     expect(get<{ shipping_cost: number }>(`SELECT shipping_cost FROM sample_shipment WHERE id = ?`, sampleId)?.shipping_cost).toBe(75);
+    // 改挂 SKU / 件数：不会因此产生任何「样品成本」，运费仍是唯一的钱
     expect((await http.put(`/api/creators/sample/${sampleId}`).set(auth(token.boss)).send({ sku_id: 2, quantity: 2 })).status).toBe(200);
-    expect(get<{ sample_cost: number }>(`SELECT sample_cost FROM sample_shipment WHERE id = ?`, sampleId)?.sample_cost).toBe(round2((82 + 19) * 2));
+    const after = get<Record<string, unknown>>(`SELECT * FROM sample_shipment WHERE id = ?`, sampleId) ?? {};
+    expect(Number(after.sku_id)).toBe(2);
+    expect(Number(after.quantity)).toBe(2);
+    expect(Number(after.shipping_cost)).toBe(75);
+    expect(Object.keys(after)).not.toContain('sample_cost');
     expect((await http.put('/api/creators/sample/999999').set(auth(token.boss)).send({ quantity: 2 })).status).toBe(404);
   });
 
@@ -782,7 +873,7 @@ describe('寄样：成本快照 / 发货签收 / 丢件 / 超期 / 样品单导�
 
 /* ==================================================================== */
 describe('ROI 排行 / BD 绩效 / 达人漏斗统计', () => {
-  it('达人维度排行：净 GMV 倒序，含成本与投产比', async () => {
+  it('达人维度排行：接口按投产比降序出行，带货 GMV 只是参考列', async () => {
     const res = await http.get('/api/creators/roi/rank?period=all&limit=10').set(auth(token.boss));
     expect(res.status).toBe(200);
     const d = dataOf<Record<string, unknown>>(res.body);
@@ -790,9 +881,15 @@ describe('ROI 排行 / BD 绩效 / 达人漏斗统计', () => {
     const list = d.list as Record<string, unknown>[];
     expect(list.length).toBeGreaterThan(0);
     expect(list[0]?.handle).toBeTruthy();
-    const gmvs = list.map((r) => Number(r.gmv_cny));
-    expect([...gmvs].sort((a, b) => b - a)).toEqual(gmvs);
-    for (const r of list.slice(0, 3)) expect(typeof Number(r.cost)).toBe('number');
+    // 名次由 rebate_cny ÷ cost 决定，接口自己就得按 ROI 降序出行 ——
+    // 把"按什么排"外包给前端，任何直接调接口的消费方拿到的都是一个按带货规模排的假榜单。
+    const rois = list.map((r) => Number(r.roi ?? -1));
+    expect([...rois].sort((a, b) => b - a)).toEqual(rois);
+    for (const r of list.slice(0, 3)) {
+      expect(typeof Number(r.cost)).toBe('number');
+      expect(typeof Number(r.rebate_cny)).toBe('number'); // 分子：我们的收入
+      expect(r).not.toHaveProperty('sample_cost'); // 样品货值不再是我们的投入
+    }
     expect(roiFieldsVisible(list[0] as Record<string, unknown>)).toBe(true);
   });
 
@@ -801,10 +898,88 @@ describe('ROI 排行 / BD 绩效 / 达人漏斗统计', () => {
     for (const r of d.list) {
       expect(r.gmv_cny).toBe('***');
       expect(r.net_gmv_cny).toBe('***');
+      // 返点＝我们的收入、物流＝我们掏的钱，两者都不能漏给无成本权限的角色
+      expect(r.rebate_cny).toBe('***');
       expect(r.cost).toBe('***');
       expect(r.roi).toBe('***');
       expect(r.handle).not.toBe('***');
     }
+  });
+
+  /**
+   * 排行口径回归（口径切换的核心）：投产比的分子是**我们的收入（应收返点）**，不是带货 GMV。
+   * 造两个达人：A 带货额大但品牌只给 15%，B 带货额小但品牌给 30% —— 按新口径 B 赚得多、排在前，
+   * 按老的「GMV 当分子」则会得出相反的结论（用 GMV 做分子会让一个亏钱的达人排到榜首）。
+   */
+  it('投产比看返点不看带货额：GMV 大但返点少的达人排在后面', async () => {
+    const fx = Number(get<{ rate_to_cny: number }>(
+      `SELECT rate_to_cny FROM exchange_rate WHERE currency = 'USD' AND is_deleted = 0 AND rate_date <= ? ORDER BY rate_date DESC LIMIT 1`,
+      today(),
+    )?.rate_to_cny ?? 1);
+    const orderTime = `${today()} 09:00:00`;
+
+    /** 建「达人 + 合作单 + 一条归因成交」；返点快照按 SKU 当时的品牌口径手工冻结 */
+    const mkAttributedCreator = async (handle: string, skuId: number, itemAmount: number, commissionLocal: number): Promise<number> => {
+      const cid = await makePublicCreator(handle);
+      await http.post(`/api/creators/${cid}/claim`).set(auth(token.bd));
+      await http.post('/api/creators/collab').set(auth(token.bd)).send({ creator_id: cid, shop_id: 3, commission_rate: 10, promised_videos: 1 });
+      run(
+        `INSERT INTO tk_order (shop_id, tk_order_id, order_status, order_time, currency, total_paid, is_sample_order)
+         VALUES (3, ?, 'COMPLETED', ?, 'USD', ?, 0)`,
+        `RANK-${handle}`, orderTime, itemAmount,
+      );
+      const oid = Number(get<{ id: number }>(`SELECT id FROM tk_order WHERE tk_order_id = ?`, `RANK-${handle}`)?.id);
+      const sku = SKU_REBATE[skuId] as { rate: number; logistics: number };
+      run(
+        `INSERT INTO tk_order_item (order_id, sku_id, quantity, unit_price, item_amount, creator_id, content_type,
+                                    commission_rate, est_commission, rebate_rate, rebate_cny, logistics_cny, rebate_matched)
+             VALUES (?, ?, 1, ?, ?, ?, 3, 10, ?, ?, ?, ?, 1)`,
+        oid, skuId, itemAmount, itemAmount, cid, commissionLocal, sku.rate,
+        //   rebate_cny = round2(round2(item_amount × fx) × 返点率)；logistics_cny = round2(单件物流 × 1 件)
+        round2(round2(itemAmount * fx) * sku.rate), round2(sku.logistics * 1),
+      );
+      return cid;
+    };
+
+    // A：带货 1000 USD，SKU8 返点 15%，佣金 100 USD
+    const creatorA = await mkAttributedCreator('t-rank-lowrate', 8, 1000, 100);
+    // B：带货 600 USD，SKU3 返点 30%，佣金 30 USD
+    const creatorB = await mkAttributedCreator('t-rank-highrate', 3, 600, 30);
+
+    // 手工复算（USD 折 CNY：A 实收 1000×fx，B 600×fx）
+    const aIncome = round2(1000 * fx);
+    const aRebate = round2(aIncome * 0.15); // SKU8 品牌只给 15%
+    const aCost = round2(6 + 0 + 0 + round2(100 * fx)); // 物流 6 + 寄样 0 + 坑位 0 + 佣金 100 USD
+    const bIncome = round2(600 * fx);
+    const bRebate = round2(bIncome * 0.3); // SKU3 品牌给 30%
+    const bCost = round2(3.5 + 0 + 0 + round2(30 * fx));
+
+    const d = dataOf<{ list: Record<string, unknown>[] }>((await http.get('/api/creators/roi/rank?period=all&limit=200').set(auth(token.boss))).body);
+    const rowA = d.list.find((r) => Number(r.creator_id) === creatorA) as Record<string, unknown>;
+    const rowB = d.list.find((r) => Number(r.creator_id) === creatorB) as Record<string, unknown>;
+    expect(rowA).toBeTruthy();
+    expect(rowB).toBeTruthy();
+
+    // 带货规模（品牌的生意）A 更大，我们的收入（返点）却是 B 更多
+    expect(Number(rowA.gmv_cny)).toBe(aIncome);
+    expect(Number(rowB.gmv_cny)).toBe(bIncome);
+    expect(Number(rowA.gmv_cny)).toBeGreaterThan(Number(rowB.gmv_cny));
+    expect(Number(rowA.rebate_cny)).toBe(aRebate);
+    expect(Number(rowB.rebate_cny)).toBe(bRebate);
+    expect(Number(rowA.rebate_cny)).toBeLessThan(Number(rowB.rebate_cny));
+    // 投入 = 物流 + 寄样运费 + 坑位费 + 达人佣金（样品货值不在里面）
+    expect(Number(rowA.cost)).toBe(aCost);
+    expect(Number(rowB.cost)).toBe(bCost);
+    // 投产比 = 返点 ÷ 投入
+    expect(Number(rowA.roi)).toBe(round2(aRebate / aCost));
+    expect(Number(rowB.roi)).toBe(round2(bRebate / bCost));
+    // 排名结论：B 的投产比高于 A，A 排在后面（若分子仍是带货 GMV，两者会反过来）
+    expect(Number(rowB.roi)).toBeGreaterThan(Number(rowA.roi));
+    const rankedByRoi = d.list
+      .filter((r) => r.roi !== null)
+      .sort((x, y) => Number(y.roi) - Number(x.roi))
+      .map((r) => Number(r.creator_id));
+    expect(rankedByRoi.indexOf(creatorB)).toBeLessThan(rankedByRoi.indexOf(creatorA));
   });
 
   it('region / scope 过滤 + BD 维度聚合', async () => {

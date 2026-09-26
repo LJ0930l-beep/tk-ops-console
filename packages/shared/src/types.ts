@@ -87,14 +87,15 @@ export interface ProductSku extends BaseEntity {
   spu_id: number;
   sku_code: string;
   spec: string | null;
-  purchase_cost: number;
-  first_leg_cost: number;
+  /** 品牌给的返点率（小数，0.18 = 实收 GMV 的 18% 归我们）—— 我们唯一的收入口径 */
+  rebate_rate: number;
+  /** 单件物流成本（头程 + 海外仓，人民币），品牌方承担时填 0 */
+  logistics_cost: number;
   weight_g: number | null;
   package_size: string | null;
   status: number;
   spu_code?: string;
   name_cn?: string;
-  unit_cost?: number;
 }
 
 export interface ShopListing extends BaseEntity {
@@ -144,8 +145,14 @@ export interface TkOrderItem extends BaseEntity {
   unit_price: number;
   discount: number;
   item_amount: number;
-  cost_snapshot: number;
-  cost_matched: 0 | 1;
+  /** 冻结在成交时刻的品牌返点率（事后改 SKU 不影响历史单） */
+  rebate_rate: number;
+  /** 冻结的应收返点（人民币）= 实收折 CNY × rebate_rate */
+  rebate_cny: number;
+  /** 冻结的物流支出（人民币）= 单件物流成本 × 数量 */
+  logistics_cny: number;
+  /** 0 = 这一行还没配到返点率：不参与利润，也不许当成 0 收入（同「未映射不计成本」） */
+  rebate_matched: 0 | 1;
   creator_id: number | null;
   content_type: number | null;
   content_id: string | null;
@@ -227,7 +234,7 @@ export interface SampleShipment extends BaseEntity {
   creator_id: number;
   sku_id: number | null;
   quantity: number;
-  sample_cost: number;
+  /** 寄样运费（我们掏的钱；样品货值是品牌出的，不再记在我们成本里） */
   shipping_cost: number;
   ship_method: number;
   tk_order_id: string | null;
@@ -394,7 +401,8 @@ export interface DashboardSummary {
   orders: number;
   refund_amount: number;
   refund_rate: number;
-  est_cost: number;
+  est_rebate: number;
+  est_logistics: number;
   est_gross_profit: number;
   est_profit_rate: number;
   settled_amount: number;
@@ -409,7 +417,8 @@ export interface DashboardSummary {
   live_today: number;
   gmv_trend: { date: string; gmv: number; orders: number; profit: number }[];
   shop_rank: { shop_id: number; shop_name: string; gmv: number; orders: number; profit: number }[];
-  creator_rank: { creator_id: number; handle: string; gmv: number; orders: number; cost: number; roi: number | null }[];
+  /** `rebate` 是我们从该达人带货里应得的返点；`roi` = 返点 ÷（物流+佣金+广告+费用） */
+  creator_rank: { creator_id: number; handle: string; gmv: number; orders: number; rebate: number; roi: number | null }[];
   content_type_split: { type: string; gmv: number; orders: number }[];
   bd_rank: { user_id: number; real_name: string; outreach: number; agreed: number; gmv: number }[];
   can_see_cost: boolean;
@@ -423,7 +432,10 @@ export interface ProfitRow {
   gmv: number;
   refund: number;
   net_gmv: number;
-  cost: number;
+  /** 应收返点（人民币）：我们唯一收入，= 实收 × 成交时冻结的返点率 */
+  rebate: number;
+  /** 物流支出（人民币，头程/海外仓）；品牌承担时为 0 */
+  logistics: number;
   commission: number;
   ad_spend: number;
   expense: number;
@@ -491,7 +503,10 @@ export interface CreatorDaily {
   gmv: number;
   refund: number;
   net_gmv: number;
-  sample_cost: number;
+  /** 我们按这一天的实收 GMV 应得的返点（人民币） */
+  rebate: number;
+  /** 寄样运费（我们的支出；样品货值由品牌承担，不记这里） */
+  sample_shipping: number;
   commission: number;
   source: string;
 }
@@ -601,7 +616,7 @@ export const DEFAULT_ALERT_RULES: Omit<AlertRule, 'id' | 'created_at' | 'updated
   { rule_code: 'NEW_PRODUCT_FAIL', rule_name: '冷启失败候选', target_type: 'product', scope_json: '{}', metric: 'day7_valid_interaction', operator: '<', threshold: 1, window_days: 7, priority: 0, cooldown_hours: 48, version: 1, status: 1, params_json: '{}', remark: '第7天仍无有效互动/订单/内容承接' },
   { rule_code: 'NEW_PRODUCT_END', rule_name: '新品期结束', target_type: 'product', scope_json: '{}', metric: 'days_since_launch', operator: '>=', threshold: 14, window_days: 14, priority: 2, cooldown_hours: 336, version: 1, status: 1, params_json: '{}', remark: '第14天移出新品池，进入常规ABC分层' },
   { rule_code: 'VIDEO_DECAY', rule_name: '视频衰减', target_type: 'video', scope_json: '{}', metric: 'ma3_over_peak7', operator: '<', threshold: 0.5, window_days: 7, priority: 1, cooldown_hours: 72, version: 1, status: 1, params_json: '{"consecutive":2}', remark: '连续2周期3日均值<近7日峰值50%且方向一致' },
-  { rule_code: 'ADS_LOSS', rule_name: '广告低于盈亏线', target_type: 'ads', scope_json: '{}', metric: 'roas_vs_breakeven', operator: '<', threshold: 1, window_days: 7, priority: 0, cooldown_hours: 24, version: 1, status: 1, params_json: '{}', remark: 'ROAS<Break-even ROAS（1/广告前贡献毛利率）' },
+  { rule_code: 'ADS_LOSS', rule_name: '广告低于盈亏线', target_type: 'ads', scope_json: '{}', metric: 'roas_vs_breakeven', operator: '<', threshold: 1, window_days: 7, priority: 0, cooldown_hours: 24, version: 1, status: 1, params_json: '{}', remark: 'ROAS<Break-even ROAS（1/贡献毛利率；毛利率=（应收返点−物流−达人佣金）÷实收）' },
   /* 选品流水线（方案第十一章 11.2 超时规则 + 第三节首页动作清单新增条目）
      天数默认值与 apps/server/src/config.ts 的 SELECTION_* 一致，两处都可调 */
   { rule_code: 'SELECTION_REGISTER_STALE', rule_name: '候选品登记未进测试', target_type: 'selection', scope_json: '{}', metric: 'days_since_register', operator: '>', threshold: 7, window_days: 7, priority: 1, cooldown_hours: 72, version: 1, status: 1, params_json: '{}', remark: '登记后>7天未进入上架测试，提醒登记人（方案11.2阶段一）' },
@@ -638,11 +653,21 @@ export interface SelectionFlowRow {
   name: string;
   image_url: string | null;
   category: string | null;
-  supplier: string | null;
-  purchase_price: number;
-  moq: number;
-  lead_days: number;
+  /** 品牌方（货是品牌的，我们不背货款；替代原「供应商」） */
+  brand_name: string | null;
+  /** 建议售价（店铺币种） */
+  list_price: number;
+  /** 计划折扣率（0.2 = 让 20%）。只作档案与复盘口径，不参与利润回算 */
+  planned_discount: number;
+  /** 品牌给的返点率（我们唯一收入的比例） */
+  rebate_rate: number;
+  /** 计划达人佣金率（我们掏 or 品牌代付；两边不许重复记） */
+  commission_rate: number;
+  /** 计划物流费率（占实收比例；品牌承担填 0） */
+  logistics_rate: number;
+  /** 预估贡献毛利率 = 返点率 − 佣金率 − 物流费率，服务端算，不手填 */
   est_margin: number;
+  /** 盈亏平衡 ROAS = 1 / 预估贡献毛利率 */
   breakeven_roas: number;
   source: string | null;
   shop_id: number | null;

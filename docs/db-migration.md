@@ -13,12 +13,12 @@
 但「以后再改」最容易变成「永远改不了」，因为没人知道到底还欠多少。所以欠债现在是**可计量、只减不增**的：
 见 `apps/server/tests/dialect-ratchet.spec.ts`。
 
-## 2. 欠债清单（2026-09-22 实测，`npm run test -w @tk/server` 会守住这些数字）
+## 2. 欠债清单（数字与 `tests/dialect-ratchet.spec.ts` 的 BUDGET 同步，2026-09-25 复测；`npm run test -w @tk/server` 会守住这些数字）
 
 | 写法 | 处数 | 换库要做什么 |
 | --- | --- | --- |
-| `datetime('now')` | 117 | MySQL `NOW()` / PG `CURRENT_TIMESTAMP`（含 DDL 默认值与 `updated_at` 触发器） |
-| `datetime(...)` 函数调用 | 125 | MySQL `DATETIME()` 可直接用；PG 要改成 `::timestamp` 比较 |
+| `datetime('now')` | 122 | MySQL `NOW()` / PG `CURRENT_TIMESTAMP`（含 DDL 默认值与 `updated_at` 触发器） |
+| `datetime(...)` 函数调用 | 130 | MySQL `DATETIME()` 可直接用；PG 要改成 `::timestamp` 比较 |
 | `IFNULL(...)` | 59 | MySQL 有 `IFNULL`；PG 只有 `COALESCE` —— 建议统一改 `COALESCE`，两侧都支持，**这是唯一一处可以无脑先改的** |
 | `substr(order_time,1,10)` 取日期 | 38 | MySQL `LEFT()` / PG `substr(...)` 可用但语义要核对；建议统一走 `tz_day()`（见下条） |
 | `julianday(...)` 日期差 | 10 | MySQL `DATEDIFF` / PG `a - b` |
@@ -30,6 +30,21 @@
 
 两张 DDL（`schema.sqlite.sql` / `schema.mysql.sql`）的表/列集合由 `tests/schema-drift.spec.ts` 对拍，
 所以 MySQL 那份不会继续悄悄过期。
+
+### 2.1 口径切换也是一次搬家（2026-09-25 采购口径 → 品牌返点口径）
+
+同一次改表里最容易出事不是"新列没加"，而是**旧数据按新语义被误读**。这次的处理写在
+`migrate.ts: migrateRebateCaliber()`，规则值得抄给以后任何一次口径变更：
+
+1. **能等价换算的才换算**：`first_leg_cost → logistics_cost`（本来就是同一笔钱）、`supplier → brand_name`、
+   选品的 `est_margin → rebate_rate`（佣金/物流未拆时两者相等）。
+2. **换不出来的绝不发明**：历史订单行的 `cost_snapshot` 是货款，推不出返点率 —— 于是那些行落在
+   `rebate_matched = 0`，即"不计利润"，而不是拿一个猜的比率把报表填满。老库升级后利润区会先空掉，
+   这是**对的**：它要求人先把返点率配进 SKU，再重跑派生汇总（`POST /api/sync/run {task_type:'aggregate'}`）。
+3. 迁移只跑一次：靠 `schema_migration` 表里的版本号（`2026-09-25-brand-rebate-caliber-v1`）幂等；
+   旧列在两份 DDL 里都已不再声明，所以迁移末尾 `DROP COLUMN`，否则 `schema-drift` 会红。
+4. 演示夹具（`apps/data/tk_ops.db`）随 seed 重生成，不靠迁移搬 —— 迁移只服务"别人手里那份真库"。
+
 
 ## 3. 真要搬的时候按这个顺序
 

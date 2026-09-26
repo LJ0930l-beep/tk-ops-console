@@ -1,14 +1,15 @@
 <template>
   <div class="page">
-    <el-alert type="error" :closable="false" show-icon class="notice" title="以下数据行不计入成本与利润，且会持续在工作台告警">
+    <el-alert type="error" :closable="false" show-icon class="notice" title="以下数据行没配到品牌返点率 → 不参与利润，且会持续在工作台告警">
       <template #default>
-        成本按订单明细的 <code>cost_snapshot</code> 冻结，取不到内部 SKU 的行一律不参与毛利/利润计算（绝不按 0 成本计入）。请尽快补齐映射：绑定后历史订单会在下次汇总时回填成本。
+        利润只认订单明细成交时冻结的 <code>rebate_cny</code> / <code>logistics_cny</code>。取不到内部 SKU、或 SKU 返点率还是 0 的行，一律整体排除在收入与利润之外
+        （<b>既不按 0 返点计、也不按 0 收入计</b>，它们不是「不赚钱」，是「这一行的账还没建立」）。请尽快补齐映射与返点率：配好后历史订单会在下次汇总时回填返点快照。
       </template>
     </el-alert>
 
     <el-card shadow="never">
       <el-tabs v-model="tab">
-        <el-tab-pane label="A. 未映射的店铺商品" name="listing">
+        <el-tab-pane label="A. 未映射到内部 SKU 的店铺商品" name="listing">
           <ResourcePage
             ref="rpA"
             api="/products/listing"
@@ -32,7 +33,7 @@
     </ResourcePage>
         </el-tab-pane>
 
-        <el-tab-pane label="B. 已出单但取不到成本的订单行" name="order-item">
+        <el-tab-pane label="B. 已出单但没配到品牌返点率的订单行" name="order-item">
           <el-form inline @submit.prevent="loadOrderItems(1)">
             <el-form-item label="店铺">
               <el-select v-model="oiQuery.shop_id" clearable filterable placeholder="全部" style="width: 160px">
@@ -64,14 +65,19 @@
               <template #default="{ row }">{{ row.sku_code ?? '—' }}</template>
             </el-table-column>
             <el-table-column prop="quantity" label="数量" width="80" />
-            <el-table-column prop="item_amount" label="明细金额(店铺币种)" width="150" align="right">
+            <el-table-column prop="item_amount" label="带货金额(店铺币种)" width="150" align="right">
               <template #default="{ row }"><span class="money">{{ fmtMoney(row.item_amount) }}</span></template>
             </el-table-column>
             <el-table-column prop="order_time" label="下单时间" width="150">
               <template #default="{ row }">{{ fmtDateTime(row.order_time ?? row.paid_time) }}</template>
             </el-table-column>
-            <el-table-column prop="miss_reason" label="缺失原因" min-width="180" show-overflow-tooltip>
+            <el-table-column prop="miss_reason" label="不计利润的原因" min-width="180" show-overflow-tooltip>
               <template #default="{ row }">{{ reason(row) }}</template>
+            </el-table-column>
+            <el-table-column label="利润口径" width="130">
+              <template #default>
+                <el-tag size="small" type="danger" effect="plain">不计利润（非 0 利润）</el-tag>
+              </template>
             </el-table-column>
             <el-table-column label="操作" width="110" fixed="right">
               <template #default="{ row }">
@@ -79,7 +85,7 @@
               </template>
             </el-table-column>
             <template #empty>
-              <el-empty description="没有取不到成本的订单行——所有已出单明细都已映射到内部 SKU">
+              <el-empty description="没有没配到返点率的订单行——所有已出单明细都能算出应收返点，利润口径完整">
                 <el-button :icon="Refresh" @click="loadOrderItems(1)">重新检查</el-button>
               </el-empty>
             </template>
@@ -112,7 +118,10 @@
           </el-select>
         </el-form-item>
       </el-form>
-      <span class="tip">绑定后该行才计入成本与利润；若 seller_sku 与 SKU 编码一致，可到「店铺商品映射」页用自动匹配批量处理。</span>
+      <span class="tip">
+        绑定后这一行才可能算出应收返点、才参与利润；如果选中的 SKU 品牌返点率还是 0，绑上照样不计利润——请一并到「商品 SKU」把返点率配好。
+        若 seller_sku 与 SKU 编码一致，可到「店铺商品映射」页用自动匹配批量处理。
+      </span>
       <template #footer>
         <el-button @click="bindVisible = false">取消</el-button>
         <el-button type="primary" :loading="binding" @click="doBind">保存绑定</el-button>
@@ -125,7 +134,7 @@
 import { computed, onMounted, reactive, ref } from 'vue';
 import { ElMessage } from 'element-plus';
 import { Refresh, RefreshLeft, Search } from '@element-plus/icons-vue';
-import { MAP_STATUS } from '@tk/shared';
+import { MAP_STATUS, MASK, num, round2 } from '@tk/shared';
 import { useRouter } from 'vue-router';
 import { apiGet, apiPut, errMsg, type Paged } from '@/api/client';
 import { useDictStore } from '@/stores/dict';
@@ -151,7 +160,12 @@ onMounted(async () => {
 async function loadSkus() {
   try {
     const r = await apiGet<Paged<Record<string, unknown>>>('/products/sku', { page: 1, pageSize: 200 });
-    skuOpts.value = (r.list ?? []).map((s) => ({ value: Number(s.id), label: `${String(s.sku_code)}｜${String(s.spec ?? '')}｜${String(s.name_cn ?? '')}` }));
+    skuOpts.value = (r.list ?? []).map((s) => {
+      const rate = s.rebate_rate;
+      // 没成本权限时后端把返点率掩码成 ***：这里就只标一句「返点率见商品中心」，不猜数字
+      const rateText = rate === MASK ? '返点率需成本权限' : num(rate) > 0 ? `返点 ${round2(num(rate) * 100)}%` : '未配返点·不计利润';
+      return { value: Number(s.id), label: `${String(s.sku_code)}｜${String(s.spec ?? '')}｜${String(s.name_cn ?? '')}｜${rateText}` };
+    });
   } catch (e) {
     skuOpts.value = [];
     // 失败必须说一声：静默成空列表，界面就只显示「暂无数据」，
@@ -188,7 +202,7 @@ function listingRowClass({ row }: { row: Record<string, unknown> }): string {
   return Number(row.map_status) === MAP_STATUS.UNMAPPED || row.sku_id == null ? 'listing-row-warn' : '';
 }
 
-/* ---------- Tab B：订单行取不到成本 ---------- */
+/* ---------- Tab B：没配到品牌返点率的订单行 ---------- */
 const oiLoading = ref(false);
 const oiRows = ref<Record<string, unknown>[]>([]);
 const oiTotal = ref(0);
@@ -222,9 +236,9 @@ function resetOi() {
 
 function reason(row: Record<string, unknown>) {
   if (row.miss_reason) return String(row.miss_reason);
-  if (row.sku_id == null) return '未绑定内部 SKU（无映射）';
-  if (Number(row.cost_matched) === 0) return '成本快照未匹配（绑定过晚或 SKU 已删）';
-  return '成本缺失';
+  if (row.sku_id == null) return '未绑定内部 SKU（映射都没有，谈不上返点率）';
+  if (Number(row.rebate_matched ?? 0) === 0) return '没配到品牌返点率（SKU 返点率为 0 / 绑定过晚 / SKU 已删）';
+  return '没配到品牌返点率';
 }
 
 const fmtMoney = (v: unknown) => (v == null || v === '' || v === '***' ? '-' : Number(v).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
@@ -259,7 +273,7 @@ async function doBind() {
   binding.value = true;
   try {
     await apiPut(`/products/listing/${bindListingId.value}`, { sku_id: bindSkuId.value ?? null });
-    ElMessage.success('已绑定内部 SKU，利润将在下次汇总时纳入该成本');
+    ElMessage.success('已绑定内部 SKU；该 SKU 配了品牌返点率之后，这些订单行才会在下次汇总时算进利润');
     bindVisible.value = false;
     rpA.value?.reload();
     loadOrderItems();

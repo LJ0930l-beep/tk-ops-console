@@ -5,15 +5,33 @@ export const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 1
 /** 安全数值：null/undefined/NaN → 0 */
 export const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : Number(v) || 0);
 
-/** 人民币成本：采购成本 + 头程成本 */
-export const unitCostCny = (sku: { purchase_cost: number; first_leg_cost: number }): number =>
-  round2(num(sku.purchase_cost) + num(sku.first_leg_cost));
+/* ==================== 品牌服务方口径（代运营/服务商，不背货款） ====================
+ * 我们不是买货卖货：货是品牌的，我们按实收 GMV 拿品牌给的返点/佣金分成，这是唯一收入。
+ * 所以成本侧不再有「采购价」，只剩我们自己掏出去的钱 —— 达人佣金、坑位费、寄样运费、物流、投流、工具费。
+ * 约定：`rebate_rate` 是**品牌给我们的净分成**。达人佣金若由品牌代付，就把佣金率填 0，
+ * 不要返点和佣金两边各记一次（那是同一笔钱，双记会把毛利算成负的）。
+ */
 
-/** 单笔预估毛利 = 实收折算人民币 − 成本快照 − 预估达人佣金折算 */
+/** 单件物流成本（头程 + 海外仓），品牌方承担时填 0 */
+export const unitLogisticsCny = (sku: { logistics_cost: number }): number => round2(num(sku.logistics_cost));
+
+/** 应收返点（人民币）= 实收金额折 CNY × 品牌返点率 */
+export const rebateCny = (amountCny: number, rebateRate: number): number => round2(num(amountCny) * num(rebateRate));
+
+/** 贡献毛利率 = 毛利 ÷ 实收金额；实收为 0 时返回 0 */
+export const contributionMarginRate = (profitCny: number, amountCny: number): number =>
+  num(amountCny) > 0 ? Math.round((num(profitCny) / num(amountCny)) * 10000) / 10000 : 0;
+
+/** 盈亏平衡 ROAS = 1 ÷ 贡献毛利率。毛利率 ≤ 0 表示这单没有正的分成空间，不存在平衡点 → null */
+export const breakevenRoas = (marginRate: number): number | null =>
+  num(marginRate) > 0 ? round2(1 / num(marginRate)) : null;
+
+/** 单笔预估毛利 = 应收返点 − 物流支出 − 达人佣金（全部人民币口径） */
 export function estItemProfitCny(input: {
   item_amount: number;
   currency: string;
-  cost_snapshot: number;
+  rebate_rate: number;
+  logistics_cny: number;
   est_commission: number;
   commission_currency?: string;
   rate_to_cny: number;
@@ -23,20 +41,25 @@ export function estItemProfitCny(input: {
   const commissionCny = round2(
     num(input.est_commission) * (input.commission_currency === 'CNY' || !input.commission_currency ? 1 : rate),
   );
-  return round2(incomeCny - num(input.cost_snapshot) - commissionCny);
+  return round2(rebateCny(incomeCny, input.rebate_rate) - num(input.logistics_cny) - commissionCny);
 }
 
-/** 达人/合作投产比 = 带货净 GMV ÷（样品成本 + 寄样运费 + 坑位费 + 达人佣金），全部人民币口径 */
+/**
+ * 达人/合作投产比 = 这一单我们赚到的返点 ÷（物流 + 寄样运费 + 坑位费 + 达人佣金），全部人民币口径。
+ * 分子刻意不用带货 GMV：那是品牌的生意，返点才是我们的生意 —— 用 GMV 做分子会让一个亏钱的达人排到榜首。
+ * `logistics_cny` 可选：合作单维度的明细物流常已并进返点侧算过，不重复扣时留空即可。
+ */
 export function collabRoi(input: {
-  net_gmv_cny: number;
-  sample_cost: number;
+  rebate_cny: number;
   sample_shipping: number;
   fixed_fee_cny: number;
   commission_cny: number;
+  logistics_cny?: number;
 }): number | null {
-  const cost = num(input.sample_cost) + num(input.sample_shipping) + num(input.fixed_fee_cny) + num(input.commission_cny);
+  const cost =
+    num(input.logistics_cny) + num(input.sample_shipping) + num(input.fixed_fee_cny) + num(input.commission_cny);
   if (cost <= 0) return null;
-  return round2(num(input.net_gmv_cny) / cost);
+  return round2(num(input.rebate_cny) / cost);
 }
 
 /** 广告 ROI = GMV ÷ 消耗 */

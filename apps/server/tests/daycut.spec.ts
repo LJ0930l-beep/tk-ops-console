@@ -1,13 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { REGION_TZ_OFFSET, isUsableZone, statDateInZone, zoneDayStartUtc, zoneOffsetMinutes } from '@tk/shared';
-import { computeOrderProfit } from '../src/services/profit.js';
-import { get, insert } from '../src/core/db.js';
+import { REGION_TZ_OFFSET, isUsableZone, rebateCny, round2, statDateInZone, zoneDayStartUtc, zoneOffsetMinutes } from '@tk/shared';
+import { computeOrderProfit, computeProfitReport } from '../src/services/profit.js';
+import { get, insert, run } from '../src/core/db.js';
 import { ACCOUNTS, auth, boot, dataOf, login } from './helper.js';
 
 /**
  * 报表切日口径（PRD §3 + 附录「站点自然日」）：
  * 一切以 tk_shop.timezone 的 IANA 时区为准（含夏令时），时区缺失才退回站点固定偏移；
  * SQL 聚合（tz_day）与 JS 计算（siteDay/siteDayOf）必须落在同一个自然日。
+ * 切日切错的代价在新口径下更直接：返点按「报表自然日的汇率」折 CNY 冻结，
+ * 归错一天就等于用了另一天的牌价，整行的返点/物流/佣金/利润都会挪到别的日期上。
  */
 
 const { db, http } = boot();
@@ -98,6 +100,17 @@ describe('端到端：一家美国店的跨日订单', () => {
     status: 1,
     owner_id: bossId,
   });
+  /**
+   * 钉住这两个报表自然日的美元牌价，让返点/利润能被纯手算复现：
+   * 洛杉矶 6/30 用 7.5、1/14 用 7.2（不插这两行的话它们会掉进 seed 里"最近一条未来价"那一档，读起来不直观）。
+   */
+  const pinRate = (day: string, rate: number): void => {
+    run(`DELETE FROM exchange_rate WHERE currency = 'USD' AND rate_date = ?`, day);
+    insert('exchange_rate', { rate_date: day, currency: 'USD', rate_to_cny: rate, source: 2 });
+  };
+  pinRate('2026-06-30', 7.5);
+  pinRate('2026-01-14', 7.2);
+
   const orderAt = (t: string): number => {
     const oid = insert('tk_order', {
       shop_id: shopId,
@@ -108,7 +121,22 @@ describe('端到端：一家美国店的跨日订单', () => {
       total_paid: 100,
       is_sample_order: 0,
     });
-    insert('tk_order_item', { order_id: oid, item_amount: 100, cost_matched: 1, quantity: 1, unit_price: 100, est_commission: 5, cost_snapshot: 30 });
+    // 实收 100 USD、返点率 0.2、单件物流 3 元、佣金 5 USD：
+    // 6/30 那单 → 折 CNY 750，返点 750×0.2=150，佣金 5×7.5=37.5，毛利 150−3−37.5=109.5
+    // 1/14 那单 → 折 CNY 720，返点 720×0.2=144，佣金 5×7.2=36  ，毛利 144−3−36  =105
+    const laDay = statDateInZone(t, LA);
+    const fx = laDay === '2026-06-30' ? 7.5 : 7.2;
+    insert('tk_order_item', {
+      order_id: oid,
+      item_amount: 100,
+      quantity: 1,
+      unit_price: 100,
+      rebate_rate: 0.2,
+      rebate_cny: rebateCny(round2(100 * fx), 0.2),
+      logistics_cny: 3,
+      rebate_matched: 1,
+      est_commission: 5,
+    });
     return oid;
   };
   const summer = orderAt('2026-07-01 06:30:00');
@@ -117,6 +145,31 @@ describe('端到端：一家美国店的跨日订单', () => {
   it('利润引擎的 stat_date 按洛杉矶自然日归属', () => {
     expect(computeOrderProfit(summer).stat_date).toBe('2026-06-30');
     expect(computeOrderProfit(winter).stat_date).toBe('2026-01-14');
+  });
+
+  it('整行的钱（返点/物流/佣金/利润）整笔落在站点自然日，不按 UTC 劈成两天', () => {
+    const rep = computeProfitReport({ dim: 'day', start: '2026-01-14', end: '2026-06-30', shopIds: [shopId] });
+    expect(rep.list.map((r) => r.dim_key)).toEqual(['2026-01-14', '2026-06-30']);
+    const summerRow = rep.list.find((r) => r.dim_key === '2026-06-30')!;
+    const winterRow = rep.list.find((r) => r.dim_key === '2026-01-14')!;
+    // 6/30：实收折 CNY 100×7.5=750，返点 150，物流 3，佣金 37.5 → 利润 109.5
+    expect(summerRow.gmv).toBe(750);
+    expect(summerRow.rebate).toBe(150);
+    expect(summerRow.logistics).toBe(3);
+    expect(summerRow.commission).toBe(37.5);
+    expect(summerRow.profit).toBe(109.5); // 150 − 3 − 37.5
+    // 1/14：实收折 CNY 100×7.2=720，返点 144，物流 3，佣金 36 → 利润 105
+    expect(winterRow.gmv).toBe(720);
+    expect(winterRow.rebate).toBe(144);
+    expect(winterRow.logistics).toBe(3);
+    expect(winterRow.commission).toBe(36);
+    expect(winterRow.profit).toBe(105); // 144 − 3 − 36
+    // 合计 = 两行之和：切日错一天，两行的钱就会跑到别的日期上，合计虽然不变但按日曲线会变形
+    expect(rep.total.rebate).toBe(294); // 150 + 144
+    expect(rep.total.profit).toBe(214.5); // 109.5 + 105
+    // 取价按报表自然日：UTC 6/30 与 UTC 7/1 的订单不能共用 7/1 的牌价
+    expect(computeOrderProfit(summer).rate_source_date).toBe('2026-06-30');
+    expect(computeOrderProfit(winter).rate_source_date).toBe('2026-01-14');
   });
 
   it('订单日报按日曲线同样落在站点自然日', async () => {

@@ -6,10 +6,11 @@
  * 与 real 使用同一条 upsert 路径，并把「幂等」「重叠窗口」写成可断言的测试。
  *
  * 刻意内置四类数据（方案 6.2 / 6.4）：
- *   A 新订单，能经映射表找到内部 SKU → 冻结成本快照
- *   B 新订单，平台 SKU 本地从没同步过 → 明细映射不上（cost_matched=0 并告警）
- *   C 新订单，命中「卖家 SKU 填错」的 listing → 有 listing 但没有内部 SKU
- *   D 达人免费样品单（is_sample_order=1，不计 GMV）
+ *   A 新订单，能经映射表找回内部 SKU → 成交时冻结品牌返点率与应收返点（rebate_matched=1）
+ *     （前提是那档 SKU 配了 rebate_rate > 0；返点率没配的 SKU 会退化成下面 B/C 那一档，整行进不了利润）
+ *   B 新订单，平台 SKU 本地从没同步过 → 明细映射不上（rebate_matched=0 并告警）
+ *   C 新订单，命中「卖家 SKU 填错」的 listing → 有 listing 但没有内部 SKU（同样 rebate_matched=0）
+ *   D 达人免费样品单（is_sample_order=1，不计 GMV，也就不计返点）
  *   E 状态往前推进的旧订单（验证增量更新而非只插新）
  *   F 带联盟归因（达人 handle + 视频 ID）的联盟订单
  */

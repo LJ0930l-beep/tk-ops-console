@@ -1,5 +1,17 @@
 import { DatabaseSync } from 'node:sqlite';
-import { DEFAULT_ROLES, REGION_TZ_OFFSET, SELECTION_CHECKLIST_KEYS, SELECTION_STAGE_LABELS, buildCollabNo, round2, statDateInZone } from '@tk/shared';
+import {
+  DEFAULT_ROLES,
+  REGION_TZ_OFFSET,
+  SELECTION_CHECKLIST_KEYS,
+  SELECTION_STAGE_LABELS,
+  breakevenRoas,
+  buildCollabNo,
+  contributionMarginRate,
+  rebateCny,
+  round2,
+  statDateInZone,
+  unitLogisticsCny,
+} from '@tk/shared';
 import { seedV2DemoData } from './seedV2.js';
 import { config } from '../config.js';
 import { hashPassword } from '../core/auth.js';
@@ -161,23 +173,28 @@ export function seedDemoData(opts: { reset?: boolean } = {}): void {
     );
   }
 
+  /* 品牌服务（代运营）口径下的 SKU 经济模型：货是品牌的，我们不垫货款，所以没有「采购价」这一列。
+     - rebate_rate：品牌按实收 GMV 返给我们的比例（0.12~0.35），是我们唯一的收入口径。
+       同一 SPU 的颜色/尺码共用品牌给的商品级返点，不按 SKU 变脸；高毛利小家电高、大牌服饰低。
+     - logistics_cost：单件物流成本（头程 + 海外仓操作，人民币/件），按重量/体积走，品牌包邮的填 0。
+     达人佣金在 collaboration / 订单行上记，不在这两列里，避免同一笔钱两边各扣一次。 */
   const skuIds: number[] = [];
   const skuSpecs: [number, string, string, number, number, number][] = [
-    [0, '白/6USB+2C/3m', '白色 3米', 96, 22, 780],
-    [0, '黑/6USB+2C/1.8m', '黑色 1.8米', 82, 19, 640],
-    [1, '灰/双口36W', '灰色', 21, 6, 96],
-    [2, '米白/1.6m', '米白', 158, 46, 3200],
-    [2, '深灰/1.6m', '深灰', 158, 46, 3200],
-    [3, '白/4L', '白色 4L', 112, 34, 1500],
-    [3, '绿/4L', '绿色 4L', 118, 34, 1500],
-    [4, '黑/M', '黑色 M', 46, 12, 210],
-    [4, '黑/L', '黑色 L', 46, 12, 215],
-    [4, '蓝/XL', '蓝色 XL', 49, 12, 220],
-    [5, '白/38', '白色 38', 132, 38, 620],
-    [5, '白/40', '白色 40', 132, 38, 640],
-    [5, '灰/42', '灰色 42', 138, 38, 660],
+    [0, '白/6USB+2C/3m', '白色 3米', 0.22, 14, 780],
+    [0, '黑/6USB+2C/1.8m', '黑色 1.8米', 0.22, 12, 640],
+    [1, '灰/双口36W', '灰色', 0.3, 3.5, 96],
+    [2, '米白/1.6m', '米白', 0.28, 24, 3200],
+    [2, '深灰/1.6m', '深灰', 0.28, 24, 3200],
+    [3, '白/4L', '白色 4L', 0.32, 16, 1500],
+    [3, '绿/4L', '绿色 4L', 0.32, 16, 1500],
+    [4, '黑/M', '黑色 M', 0.15, 6, 210],
+    [4, '黑/L', '黑色 L', 0.15, 6, 215],
+    [4, '蓝/XL', '蓝色 XL', 0.15, 6.5, 220],
+    [5, '白/38', '白色 38', 0.18, 11, 620],
+    [5, '白/40', '白色 40', 0.18, 11, 640],
+    [5, '灰/42', '灰色 42', 0.18, 12, 660],
   ];
-  for (const [si, skuTail, spec, purchase, firstLeg, weight] of skuSpecs) {
+  for (const [si, skuTail, spec, rebateRate, logisticsCost, weight] of skuSpecs) {
     const spu = spuIds[si] as number;
     const seq = skuIds.filter((_, idx) => skuSpecs[idx]?.[0] === si).length + 1;
     const code = `${spus[si]?.[0]}-${String(seq).padStart(2, '0')}`;
@@ -187,8 +204,8 @@ export function seedDemoData(opts: { reset?: boolean } = {}): void {
         spu_id: spu,
         sku_code: code,
         spec: spec.replace(/\s/g, ''),
-        purchase_cost: purchase,
-        first_leg_cost: firstLeg,
+        rebate_rate: rebateRate,
+        logistics_cost: logisticsCost,
         weight_g: weight,
         package_size: '20x15x8',
         status: 1,
@@ -325,15 +342,14 @@ export function seedDemoData(opts: { reset?: boolean } = {}): void {
     if (i % 3 === 2) return;
     const c = get<{ creator_id: number; shop_id: number }>(`SELECT creator_id, shop_id FROM collaboration WHERE id=?`, clid);
     const sku = skuIds[i % skuIds.length] as number;
-    const unit = get<{ purchase_cost: number; first_leg_cost: number }>(`SELECT purchase_cost, first_leg_cost FROM product_sku WHERE id=?`, sku);
     const shipped = i % 4 !== 0;
     insert('sample_shipment', {
       collab_id: clid,
       creator_id: c?.creator_id as number,
       sku_id: sku,
       quantity: rng.int(1, 2),
-      sample_cost: round2(((unit?.purchase_cost ?? 0) + (unit?.first_leg_cost ?? 0)) * 1),
-      shipping_cost: rng.int(18, 65),
+      // 样品的货是品牌白给的（代运营口径下我们不下单备货），我们只掏寄出去的运费
+      shipping_cost: rng.int(15, 60),
       ship_method: rng.pick([1, 2, 2, 3]),
       tracking_no: shipped ? `JNT${rng.int(10000000, 99999999)}` : null,
       ship_time: shipped ? iso(daysAgo(28 - i * 2, 6)) : null,
@@ -401,8 +417,19 @@ export function seedDemoData(opts: { reset?: boolean } = {}): void {
   }
 
   const rateOf = (date: string, cur: string) => get<{ rate_to_cny: number }>(`SELECT rate_to_cny FROM exchange_rate WHERE rate_date=? AND currency=?`, date, cur)?.rate_to_cny ?? RATE[cur] ?? 1;
+  /**
+   * 冻结快照专用的取价函数：和利润引擎 services/rates.getRate 走同一条路径
+   * （报表自然日 → 该币种更早的最近一条 → 常量兜底）。
+   * 快照里的 rebate_cny 必须能用「引擎那天用的汇率」复算出来，否则报表与明细永远对不上。
+   */
+  const rateForStatDay = (statDay: string, cur: string): number =>
+    get<{ rate_to_cny: number }>(
+      `SELECT rate_to_cny FROM exchange_rate WHERE is_deleted = 0 AND currency = ? AND rate_date <= ? ORDER BY rate_date DESC, id DESC LIMIT 1`,
+      cur,
+      statDay,
+    )?.rate_to_cny ?? RATE[cur] ?? 1;
 
-  /* ---------- 订单 + 明细（成本快照 + 带货归因） ---------- */
+  /* ---------- 订单 + 明细（返点快照 + 带货归因） ---------- */
   const mappedListings = listings.filter((l) => l.sku);
   const orderIds: number[] = [];
   for (let n = 0; n < 260; n++) {
@@ -411,6 +438,10 @@ export function seedDemoData(opts: { reset?: boolean } = {}): void {
     const shopIdx = n % shopId.length;
     const shop = shopId[shopIdx] as number;
     const cur = shopSpecs[shopIdx]?.[2] as string;
+    const region = shopSpecs[shopIdx]?.[1] as string;
+    // 折人民币的口径与利润引擎一致：按「站点时区切出来的报表自然日」取牌价，不是按 UTC 日
+    const statDay = statDateInZone(iso(orderDate), shopSpecs[shopIdx]?.[3] as string, REGION_TZ_OFFSET[region] ?? 0);
+    const fx = rateForStatDay(statDay, cur);
     const pool = mappedListings.filter((l) => l.shop === shop);
     const itemCount = rng.int(1, Math.min(3, pool.length));
     const status = rng.pick(['COMPLETED', 'COMPLETED', 'COMPLETED', 'DELIVERED', 'SHIPPED', 'TO_BE_SHIPPED', 'CANCELLED']);
@@ -447,12 +478,14 @@ export function seedDemoData(opts: { reset?: boolean } = {}): void {
       const gross = round2(l.price * qty);
       const share = k === itemCount - 1 ? remaining : round2(Math.min(remaining, gross * 0.08));
       remaining = round2(remaining - share);
-      const unit = get<{ purchase_cost: number; first_leg_cost: number }>(`SELECT purchase_cost, first_leg_cost FROM product_sku WHERE id=?`, l.sku as number);
-      const unitCost = (unit?.purchase_cost ?? 0) + (unit?.first_leg_cost ?? 0);
+      const unit = get<{ rebate_rate: number; logistics_cost: number }>(`SELECT rebate_rate, logistics_cost FROM product_sku WHERE id=?`, l.sku as number);
+      const rebateRate = Number(unit?.rebate_rate ?? 0);
       const creatorVideo = rng.next() > 0.45 ? rng.pick(videoIds) : null;
       const vid = creatorVideo ? get<{ tk_video_id: string; creator_id: number }>(`SELECT tk_video_id, creator_id FROM video WHERE id=?`, creatorVideo) : undefined;
       const rate = rng.pick([0, 0, 10, 12, 15, 18, 20]);
       const itemAmount = round2(gross - share);
+      // 返点按成交当天的实收（折人民币）算，佣金在店铺币种下算 —— 与 estItemProfitCny 同一套换算
+      const incomeCny = round2(itemAmount * fx);
       insert('tk_order_item', {
         order_id: oid,
         listing_id: l.id,
@@ -461,8 +494,12 @@ export function seedDemoData(opts: { reset?: boolean } = {}): void {
         unit_price: l.price,
         discount: share,
         item_amount: itemAmount,
-        cost_snapshot: round2(unitCost * qty * (RATE.CNY ?? 1)),
-        cost_matched: 1,
+        rebate_rate: rebateRate,
+        rebate_cny: rebateCny(incomeCny, rebateRate),
+        // 单件物流成本本来就是人民币/件，× 数量即可（RATE.CNY 恒为 1，写出来只为声明「不再折汇」）
+        logistics_cny: round2(unitLogisticsCny({ logistics_cost: Number(unit?.logistics_cost ?? 0) }) * qty * (RATE.CNY ?? 1)),
+        // 能走到这里的行都是映射到内部 SKU 且品牌给了返点率的；没返点率的行不许按 0 收入参与利润
+        rebate_matched: 1,
         creator_id: vid?.creator_id ?? null,
         content_type: vid ? 1 : rng.pick([3, 5]),
         content_id: vid?.tk_video_id ?? (rng.next() > 0.7 ? String(rng.pick(videoIds)) : null),
@@ -470,7 +507,7 @@ export function seedDemoData(opts: { reset?: boolean } = {}): void {
         est_commission: round2((itemAmount * rate) / 100),
       });
     }
-    // 待映射订单行：cost_matched=0，必须进告警而不是按 0 成本计算
+    // 待映射订单行：没有 SKU 就没有返点率可冻结，rebate_matched=0，必须进告警而不是按 0 返点参与利润
     if (n % 23 === 0) {
       const unmapped = listings.find((l) => !l.sku && l.shop === shop);
       if (unmapped) {
@@ -482,8 +519,10 @@ export function seedDemoData(opts: { reset?: boolean } = {}): void {
           unit_price: 39.9,
           discount: 0,
           item_amount: 39.9,
-          cost_snapshot: 0,
-          cost_matched: 0,
+          rebate_rate: 0,
+          rebate_cny: 0,
+          logistics_cny: 0,
+          rebate_matched: 0,
           content_type: 5,
           commission_rate: 0,
           est_commission: 0,
@@ -713,39 +752,54 @@ export function seedDemoData(opts: { reset?: boolean } = {}): void {
     d.setUTCHours(hour, minute, 0, 0);
     return d;
   };
+  /**
+   * 候选品的预估贡献毛利率：返点率 − 达人佣金率 − 自付物流费率。
+   * base 取 1（"每 1 元实收 GMV"），所以直接套 shared 的 contributionMarginRate 就好，
+   * 不在这里再写一遍四舍五入 —— 前后端必须是同一个万分位口径。
+   */
+  const selMargin = (rebate: number, commission: number, logistics: number): number =>
+    contributionMarginRate(rebate - commission - logistics, 1);
+  /* 代运营口径的候选品台账：三率都是「占实收 GMV 的小数比例」（0.28 = 28%），
+     和订单行 / 合作单里按百分数存的 commission_rate 不是一个量纲，别混用。
+     佣金按"我们掏"记（品牌代付的品才把 commission_rate 填 0），所以 margin 天生比老口径薄。 */
   const selections: {
-    name: string; category: string; supplier: string; price: number; moq: number; lead: number; margin: number;
+    name: string; category: string; brand: string; price: number; discount: number;
+    rebate: number; commission: number; logistics: number;
     source: string; stage: number; dwell: number; testDwell?: number; hours?: number; owner: number; shop: number;
     conclusion?: number; note?: string; adjust?: string; snap?: string; done?: string[]; spu?: number; reject?: string;
   }[] = [
-    { name: '折叠硅胶洗碗刷', category: '家居', supplier: '义乌百洁', price: 3.2, moq: 500, lead: 7, margin: 0.62, source: '市场调研', stage: 1, dwell: 2, owner: selOwner[0] ?? 1, shop: 0 },
-    { name: '磁吸手机支架车载款', category: '3C数码', supplier: '深圳锐目', price: 11.5, moq: 300, lead: 10, margin: 0.48, source: '竞品对标', stage: 1, dwell: 5, owner: selOwner[0] ?? 1, shop: Number(shopId[1]) },
-    { name: '宠物自动喂食器', category: '家居', supplier: '宁波宠趣', price: 46, moq: 100, lead: 15, margin: 0.41, source: '达人推荐', stage: 1, dwell: 9, owner: selOwner[1] ?? 2, shop: Number(shopId[0]) },
-    { name: '便携榨汁杯 Type-C', category: '3C数码', supplier: '中山小电', price: 18.8, moq: 200, lead: 12, margin: 0.55, source: '市场调研', stage: 2, dwell: 4, testDwell: 3, owner: selOwner[0] ?? 1, shop: Number(shopId[0]), snap: selSnap(8200, 0.031, 0.062, 0.014, 0.021, 1240, 0.31) },
-    { name: '可降解垃圾袋加厚', category: '家居', supplier: '潍坊绿源', price: 5.6, moq: 1000, lead: 6, margin: 0.66, source: '供应链推荐', stage: 2, dwell: 11, testDwell: 10, owner: selOwner[1] ?? 2, shop: Number(shopId[1]), snap: selSnap(15600, 0.019, 0.038, 0.007, 0.034, 980, 0.18) },
-    { name: '硅胶保鲜盖十二件套', category: '家居', supplier: '东莞硅胶厂', price: 9.4, moq: 400, lead: 9, margin: 0.58, source: '竞品对标', stage: 2, dwell: 17, testDwell: 16, owner: selOwner[0] ?? 1, shop: Number(shopId[2] ?? shopId[0]), snap: selSnap(9100, 0.022, 0.041, 0.008, 0.052, 610, 0.09) },
-    { name: '高颜值收纳箱透明', category: '家居', supplier: '台州塑业', price: 13.2, moq: 300, lead: 8, margin: 0.6, source: '市场调研', stage: 2, dwell: 3, hours: 52, owner: selOwner[1] ?? 2, shop: Number(shopId[0]), snap: selSnap(4300, 0.052, 0.094, 0.026, 0.012, 2180, 0.42) },
-    { name: '无线蓝牙麦克风', category: '3C数码', supplier: '深圳声谷', price: 27.5, moq: 150, lead: 14, margin: 0.44, source: '达人推荐', stage: 3, dwell: 4, testDwell: 13, owner: selOwner[0] ?? 1, shop: Number(shopId[1]), conclusion: 1, note: '测试期 CTR 与转化率均达基准 1.6 倍，退货率低于类目均值，建议进入销售准备', snap: selSnap(12800, 0.041, 0.083, 0.021, 0.018, 3420, 0.38) },
-    { name: '儿童防夹手门挡', category: '家居', supplier: '义乌童安', price: 4.1, moq: 800, lead: 7, margin: 0.52, source: '供应链推荐', stage: 3, dwell: 1, testDwell: 12, owner: selOwner[1] ?? 2, shop: Number(shopId[0]), conclusion: 3, note: '主图点击尚可但转化明显低于基准', adjust: '换主图（场景图）+ 标题加「防夹手」关键词 + 详情页补尺寸图', snap: selSnap(6700, 0.034, 0.021, 0.004, 0.028, 260, 0.11) },
-    { name: '厨房计时器磁吸款', category: '家居', supplier: '温州计时', price: 7.8, moq: 500, lead: 8, margin: 0.57, source: '竞品对标', stage: 4, dwell: 8, owner: selOwner[0] ?? 1, shop: Number(shopId[1]), conclusion: 1, note: '测试通过', done: ['profile', 'price', 'channel'], snap: selSnap(11200, 0.038, 0.071, 0.019, 0.016, 2760, 0.36), spu: selSpu[0]?.id },
-    { name: '可折叠沥水篮', category: '家居', supplier: '揭阳塑品', price: 10.6, moq: 350, lead: 10, margin: 0.54, source: '市场调研', stage: 4, dwell: 3, owner: selOwner[1] ?? 2, shop: Number(shopId[2] ?? shopId[0]), conclusion: 1, note: '测试通过', done: ['profile', 'price', 'stock', 'channel', 'compliance'], snap: selSnap(9800, 0.036, 0.068, 0.017, 0.02, 2210, 0.34), spu: selSpu[1]?.id },
-    { name: '桌面理线器套装', category: '3C数码', supplier: '东莞硅胶', price: 6.3, moq: 600, lead: 6, margin: 0.61, source: '供应链推荐', stage: 5, dwell: 6, owner: selOwner[0] ?? 1, shop: Number(shopId[0]), conclusion: 1, note: '测试通过，已正式上架', done: ['profile', 'price', 'stock', 'channel', 'finance', 'compliance'], snap: selSnap(13400, 0.044, 0.079, 0.023, 0.014, 4180, 0.44), spu: selSpu[2]?.id ?? selSpu[0]?.id },
-    { name: '低价塑料水杯', category: '家居', supplier: '台州杯业', price: 2.4, moq: 2000, lead: 5, margin: 0.22, source: '竞品对标', stage: 6, dwell: 20, owner: selOwner[1] ?? 2, shop: Number(shopId[1]), conclusion: 2, reject: '毛利率仅 22%，扣物流后为负；同类目已有三家低价内卷，不具备投放空间', snap: selSnap(5200, 0.012, 0.018, 0.002, 0.071, 90, -0.08) },
-    { name: '网红迷你加湿器', category: '3C数码', supplier: '深圳小电', price: 15.9, moq: 200, lead: 12, margin: 0.47, source: '达人推荐', stage: 6, dwell: 31, owner: selOwner[0] ?? 1, shop: Number(shopId[0]), conclusion: 2, reject: '退货率 11.4%（雾化量与描述不符），复测仍高，判定不通过', snap: selSnap(7600, 0.029, 0.052, 0.011, 0.114, 540, 0.06) },
+    { name: '折叠硅胶洗碗刷', category: '家居', brand: '美丽雅', price: 12.9, discount: 0.1, rebate: 0.28, commission: 0.1, logistics: 0.05, source: '市场调研', stage: 1, dwell: 2, owner: selOwner[0] ?? 1, shop: 0 },
+    { name: '磁吸手机支架车载款', category: '3C数码', brand: 'ESR亿色', price: 199, discount: 0.15, rebate: 0.22, commission: 0.1, logistics: 0.04, source: '竞品对标', stage: 1, dwell: 5, owner: selOwner[0] ?? 1, shop: Number(shopId[1]) },
+    { name: '宠物自动喂食器', category: '家居', brand: '小佩PETKIT', price: 159, discount: 0.08, rebate: 0.18, commission: 0.08, logistics: 0.07, source: '达人推荐', stage: 1, dwell: 9, owner: selOwner[1] ?? 2, shop: Number(shopId[0]) },
+    { name: '便携榨汁杯 Type-C', category: '3C数码', brand: 'OSTMARS', price: 59, discount: 0.12, rebate: 0.3, commission: 0.1, logistics: 0.06, source: '市场调研', stage: 2, dwell: 4, testDwell: 3, owner: selOwner[0] ?? 1, shop: Number(shopId[0]), snap: selSnap(8200, 0.031, 0.062, 0.014, 0.021, 1240, 0.13) },
+    { name: '可降解垃圾袋加厚', category: '家居', brand: 'e洁', price: 189, discount: 0.2, rebate: 0.2, commission: 0.09, logistics: 0.08, source: '品牌方指定', stage: 2, dwell: 11, testDwell: 10, owner: selOwner[1] ?? 2, shop: Number(shopId[1]), snap: selSnap(15600, 0.019, 0.038, 0.007, 0.034, 980, -0.02) },
+    { name: '硅胶保鲜盖十二件套', category: '家居', brand: '茶花', price: 16.9, discount: 0.15, rebate: 0.16, commission: 0.08, logistics: 0.06, source: '竞品对标', stage: 2, dwell: 17, testDwell: 16, owner: selOwner[0] ?? 1, shop: Number(shopId[2] ?? shopId[0]), snap: selSnap(9100, 0.022, 0.041, 0.008, 0.052, 610, -0.06) },
+    { name: '高颜值收纳箱透明', category: '家居', brand: '爱丽思IRIS', price: 45.9, discount: 0.1, rebate: 0.32, commission: 0.12, logistics: 0.08, source: '市场调研', stage: 2, dwell: 3, hours: 52, owner: selOwner[1] ?? 2, shop: Number(shopId[0]), snap: selSnap(4300, 0.052, 0.094, 0.026, 0.012, 2180, 0.15) },
+    { name: '无线蓝牙麦克风', category: '3C数码', brand: '得胜TAKSTAR', price: 1899, discount: 0.08, rebate: 0.26, commission: 0.1, logistics: 0.04, source: '达人推荐', stage: 3, dwell: 4, testDwell: 13, owner: selOwner[0] ?? 1, shop: Number(shopId[1]), conclusion: 1, note: '测试期 CTR 与转化率均达基准 1.6 倍，退货率低于类目均值，建议进入销售准备', snap: selSnap(12800, 0.041, 0.083, 0.021, 0.018, 3420, 0.11) },
+    { name: '儿童防夹手门挡', category: '家居', brand: 'babycare', price: 29.9, discount: 0.2, rebate: 0.19, commission: 0.07, logistics: 0.06, source: '品牌方指定', stage: 3, dwell: 1, testDwell: 12, owner: selOwner[1] ?? 2, shop: Number(shopId[0]), conclusion: 3, note: '主图点击尚可但转化明显低于基准', adjust: '换主图（场景图）+ 标题加「防夹手」关键词 + 详情页补尺寸图', snap: selSnap(6700, 0.034, 0.021, 0.004, 0.028, 260, -0.01) },
+    { name: '厨房计时器磁吸款', category: '家居', brand: '炊大皇', price: 349, discount: 0.1, rebate: 0.28, commission: 0.11, logistics: 0.06, source: '竞品对标', stage: 4, dwell: 8, owner: selOwner[0] ?? 1, shop: Number(shopId[1]), conclusion: 1, note: '测试通过', done: ['profile', 'price', 'channel'], snap: selSnap(11200, 0.038, 0.071, 0.019, 0.016, 2760, 0.1), spu: selSpu[0]?.id },
+    { name: '可折叠沥水篮', category: '家居', brand: '佳帮手', price: 21.9, discount: 0.12, rebate: 0.25, commission: 0.1, logistics: 0.05, source: '市场调研', stage: 4, dwell: 3, owner: selOwner[1] ?? 2, shop: Number(shopId[2] ?? shopId[0]), conclusion: 1, note: '测试通过', done: ['profile', 'price', 'stock', 'channel', 'compliance'], snap: selSnap(9800, 0.036, 0.068, 0.017, 0.02, 2210, 0.11), spu: selSpu[1]?.id },
+    { name: '桌面理线器套装', category: '3C数码', brand: '绿联UGREEN', price: 35.9, discount: 0.1, rebate: 0.3, commission: 0.1, logistics: 0.04, source: '平台榜单', stage: 5, dwell: 6, owner: selOwner[0] ?? 1, shop: Number(shopId[0]), conclusion: 1, note: '测试通过，已正式上架', done: ['profile', 'price', 'stock', 'channel', 'finance', 'compliance'], snap: selSnap(13400, 0.044, 0.079, 0.023, 0.014, 4180, 0.15), spu: selSpu[2]?.id ?? selSpu[0]?.id },
+    { name: '低价塑料水杯', category: '家居', brand: '希乐', price: 89, discount: 0.25, rebate: 0.12, commission: 0.06, logistics: 0.05, source: '竞品对标', stage: 6, dwell: 20, owner: selOwner[1] ?? 2, shop: Number(shopId[1]), conclusion: 2, reject: '品牌只给 12% 返点，扣掉 6% 佣金与自付物流只剩 1%（盈亏平衡 ROAS 100，投流必亏）；同类目已有三家低价内卷，不具备投放空间', snap: selSnap(5200, 0.012, 0.018, 0.002, 0.071, 90, -0.08) },
+    { name: '网红迷你加湿器', category: '3C数码', brand: '小熊', price: 79.9, discount: 0.18, rebate: 0.24, commission: 0.09, logistics: 0.05, source: '达人推荐', stage: 6, dwell: 31, owner: selOwner[0] ?? 1, shop: Number(shopId[0]), conclusion: 2, reject: '计划毛利 10% 看着能打，但退货率 11.4%（雾化量与描述不符）把返点吃光，复测仍高，判定不通过', snap: selSnap(7600, 0.029, 0.052, 0.011, 0.114, 540, -0.03) },
   ];
   selections.forEach((s, i) => {
     const entered = iso(selDaysAgo(s.dwell, 9, i % 60));
+    const estMargin = selMargin(s.rebate, s.commission, s.logistics);
     const id = insert('selection_flow', {
       code: `SEL-${new Date().getUTCFullYear()}-${String(i + 1).padStart(4, '0')}`,
       name: s.name,
       image_url: null,
       category: s.category,
-      supplier: s.supplier,
-      purchase_price: s.price,
-      moq: s.moq,
-      lead_days: s.lead,
-      est_margin: s.margin,
-      breakeven_roas: s.margin > 0 ? Math.round((1 / s.margin) * 100) / 100 : 0,
+      brand_name: s.brand,
+      // list_price 用分配到的测试店铺的币种（还没分店的登记项按跨境主币种 USD 记）
+      list_price: s.price,
+      planned_discount: s.discount,
+      rebate_rate: s.rebate,
+      commission_rate: s.commission,
+      logistics_rate: s.logistics,
+      est_margin: estMargin,
+      breakeven_roas: breakevenRoas(estMargin) ?? 0,
       source: s.source,
       // shop=0 表示「还没分到测试店铺」——登记阶段的候选品本来就该是这样，
       // 顺带把「无店铺候选品只对登记人可见」这条范围口径放进演示数据里

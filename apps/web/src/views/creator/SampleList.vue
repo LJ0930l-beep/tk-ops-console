@@ -5,7 +5,7 @@
       type="info"
       show-icon
       :closable="false"
-      title="寄样成本为下单时 SKU 成本快照（后续改价不回溯）；红底 = 超期未出内容，黄底 = 已签收临近 7 天出内容期限。样品单回填 tk_order_id 后该订单不计 GMV。"
+      title="寄样只记运费（样品货值是品牌出的，不进我们的账）；红底 = 超期未出内容，黄底 = 已签收临近 7 天出内容期限。样品单回填 tk_order_id 后该订单不计 GMV，也不计返点。"
     />
     <ResourcePage
       ref="rp"
@@ -32,7 +32,7 @@
         <el-button v-if="canShip(row)" link type="primary" size="small" @click="openAct('ship', row)">发货</el-button>
         <el-button v-if="canSign(row)" link type="success" size="small" @click="openAct('sign', row)">登记签收</el-button>
         <el-button v-if="canContent(row)" link type="warning" size="small" @click="mark(row, 'content', reload)">标记已出内容</el-button>
-        <el-popconfirm v-if="canLost(row)" title="标记丢件后该样品成本仍计入达人 ROI 分母，确认？" @confirm="mark(row, 'lost', reload)">
+        <el-popconfirm v-if="canLost(row)" title="标记丢件后这笔寄样运费仍计入达人投产比分母，确认？" @confirm="mark(row, 'lost', reload)">
           <template #reference><el-button link type="danger" size="small">丢件</el-button></template>
         </el-popconfirm>
       </template>
@@ -122,8 +122,7 @@ const columns = computed<ColumnDef[]>(() => [
   { prop: 'sku_code', label: 'SKU', width: 140 },
   { prop: 'spu_name', label: '商品(SPU)', minWidth: 140 },
   { prop: 'quantity', label: '数量', width: 70 },
-  { prop: 'sample_cost', label: '样品成本(CNY)🔒', type: 'money', width: 135 },
-  { prop: 'shipping_cost', label: '运费(CNY)🔒', type: 'money', width: 120 },
+  { prop: 'shipping_cost', label: '寄样运费(CNY)🔒', type: 'money', width: 140 },
   { prop: 'ship_method', label: '寄样方式', width: 120, type: 'tag', options: methodOptions },
   { prop: 'tk_order_id', label: '平台样品单号', width: 170 },
   { prop: 'tracking_no', label: '快递单号', width: 170 },
@@ -138,10 +137,9 @@ const columns = computed<ColumnDef[]>(() => [
 const formFields = computed<FormFieldDef[]>(() => [
   { key: 'creator_id', label: '达人', type: 'select', required: true, options: () => creatorOpts.value, span: 8 },
   { key: 'collab_id', label: '关联合作单', type: 'select', options: () => collabOpts.value, span: 8, placeholder: '可空（非合作寄样）' },
-  { key: 'sku_id', label: '寄样 SKU', type: 'select', options: () => skuOpts.value, span: 8, placeholder: '空 = 手工填成本' },
+  { key: 'sku_id', label: '寄样 SKU', type: 'select', options: () => skuOpts.value, span: 8, placeholder: '样品货值由品牌承担，这里只为追溯是哪个品' },
   { key: 'quantity', label: '数量', type: 'number', required: true, min: 1, precision: 0, default: 1, span: 8 },
-  { key: 'sample_cost', label: '样品成本(CNY)', type: 'number', min: 0, precision: 2, default: 0, span: 8, placeholder: '选 SKU 时后端按成本快照覆盖' },
-  { key: 'shipping_cost', label: '运费(CNY)', type: 'number', min: 0, precision: 2, default: 0, span: 8 },
+  { key: 'shipping_cost', label: '寄样运费(CNY)', type: 'number', min: 0, precision: 2, default: 0, span: 8, placeholder: '我们掏的运费；平台免费样品填 0' },
   { key: 'ship_method', label: '寄样方式', type: 'select', required: true, options: methodOptions, default: 2, span: 8 },
   { key: 'tk_order_id', label: '平台样品单号', span: 8, placeholder: 'ship_method=平台免费样品必填' },
   { key: 'tracking_no', label: '快递单号', span: 8 },
@@ -196,7 +194,8 @@ function beforeSubmit(values: Row): Row {
   if (Number(v.ship_method) === 1 && !v.tk_order_id) ElMessage.warning('平台免费样品必须回填平台样品单号，后端会校验（400）');
   if (Number(v.status) === SAMPLE_STATUS.IN_TRANSIT && !v.tracking_no) ElMessage.warning('状态=在途必须填快递单号，后端会校验（400）');
   if (Number(v.status) === SAMPLE_STATUS.SIGNED && !v.sign_time) ElMessage.warning('状态=已签收必须填签收时间，后端会校验（400）');
-  if (!v.sku_id && !Number(v.sample_cost)) ElMessage.warning('未选 SKU 时请手工填样品成本，避免成本漏计');
+  // 新口径下寄样的唯一支出就是运费：填 0 会让这个达人的投产比虚高（分母少一笔）
+  if (Number(v.ship_method) !== 1 && !Number(v.shipping_cost)) ElMessage.warning('寄样运费填 0：这个达人的投入侧会少一笔钱，投产比会偏高（平台免费样品才是 0）');
   return v;
 }
 
@@ -259,7 +258,7 @@ async function mark(row: Row, action: 'content' | 'lost', reload: () => void) {
   try {
     if (action === 'content') await apiPut(`/creators/sample/${String(row.id)}`, { status: SAMPLE_STATUS.CONTENT_DONE });
     else await apiPost(`/creators/sample/${String(row.id)}/lost`, {});
-    ElMessage.success(action === 'content' ? '已标记出内容' : '已标记丢件（成本仍计入达人 ROI 分母）');
+    ElMessage.success(action === 'content' ? '已标记出内容' : '已标记丢件（这笔寄样运费仍计入达人投产比分母）');
     reload();
   } catch (e) {
     ElMessage.error(errMsg(e));

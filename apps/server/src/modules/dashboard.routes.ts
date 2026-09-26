@@ -4,12 +4,15 @@
  * 三条硬规矩：
  *  1. 数字一律来自 services/profit.ts 的利润引擎（D11：订单汇总条 / 利润报表 / 工作台三处必须同源），
  *     本文件不写一行统计 SQL，只做「入参归一 + 权限 + 掩码 + 告警文案」。
- *  2. 成本敏感字段（预估成本 / 预估毛利 / 毛利率 / 实际到账）无 can_see_cost 时按字段级掩码出 '***'，
+ *  2. 钱敏感字段（应收返点 / 物流支出 / 预估毛利 / 毛利率 / 实际到账）无 can_see_cost 时按字段级掩码出 '***'，
  *     不是隐藏字段（TC-01）；同时保留 can_see_cost=false 让前端整块折叠。
- *  3. 样品单不计 GMV、未映射行不计成本、按站点时区切日 —— 全部由引擎保证，这里只透传区间。
+ *     返点是**我们的收入**、也是和品牌签下来的商务条款，非成本权限一样不能露出金额。
+ *  3. 样品单不计 GMV、未配返点率的行（rebate_matched=0）不计收入也不计佣金、按站点时区切日
+ *     —— 全部由引擎保证，这里只透传区间并把口径写在文案里。
  */
 import { Router, type Request } from 'express';
-import type { CurrentUser } from '@tk/shared';
+import type { CurrentUser, DashboardSummary } from '@tk/shared';
+import { collabRoi } from '@tk/shared';
 import { get } from '../core/db.js';
 import { ok, qv, wrap } from '../core/http.js';
 import { maskFields, requireMenu, shopScope, type AuthedRequest } from '../core/auth.js';
@@ -21,8 +24,40 @@ const current = (req: Request): CurrentUser => (req as AuthedRequest).user;
 
 export const dashboardRouter = Router();
 
-/** 成本敏感字段：PRD §3.1 指标卡权限列标 can_see_cost 的四张卡 */
-const COST_FIELDS = ['est_cost', 'est_gross_profit', 'est_profit_rate', 'settled_amount'];
+/** 钱敏感字段：PRD §3.1 指标卡权限列标 can_see_cost 的那几张卡（est_cost 已随口径换成返点 + 物流两项） */
+const COST_FIELDS = ['est_rebate', 'est_logistics', 'est_gross_profit', 'est_profit_rate', 'settled_amount'];
+
+/** 达人榜行里属于「我们自己的钱」的列：无 can_see_cost 时一并掩掉 */
+const CREATOR_COST_FIELDS = ['cost', 'roi', 'rebate_cny', 'rebate', 'sample_shipping', 'fixed_fee_cny', 'commission_cny'];
+
+/** 引擎可能同时给 rebate / rebate_cny 两种键名，取到有值的那个（取不到就是没配，绝不补 0） */
+const moneyOf = (row: Record<string, unknown>, keys: string[]): number | null => {
+  for (const k of keys) {
+    const v = row[k];
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+  }
+  return null;
+};
+
+/**
+ * 达人榜 ROI 归一：分子必须是**我们收到的返点**，不能是带货 GMV。
+ * 带货 GMV 是品牌的生意，拿它做分子会让一个「带得多、返点低、佣金高」的亏钱达人排到榜首。
+ * 引擎已经用 shared 的 collabRoi 出数；行里带着成本明细时这里再核一次（同一函数、不会分叉），
+ * 没有明细就原样透传 —— 绝不用 net_gmv 兜底重算，那是把口径错误藏进图表。
+ */
+function creatorRankView(rows: DashboardSummary['creator_rank'], canSeeCost: boolean): Record<string, unknown>[] {
+  return (rows as Record<string, unknown>[]).map((r) => {
+    const rebate = moneyOf(r, ['rebate_cny', 'rebate']);
+    const shipping = moneyOf(r, ['sample_shipping']);
+    const fixedFee = moneyOf(r, ['fixed_fee_cny']);
+    const commission = moneyOf(r, ['commission_cny']);
+    const roi =
+      rebate !== null && (shipping !== null || fixedFee !== null || commission !== null)
+        ? collabRoi({ rebate_cny: rebate, sample_shipping: shipping ?? 0, fixed_fee_cny: fixedFee ?? 0, commission_cny: commission ?? 0 })
+        : r.roi;
+    return maskFields({ ...r, roi }, CREATOR_COST_FIELDS, canSeeCost);
+  });
+}
 
 /** 区间归一：默认近 30 天（days 可给 1~365），也接受显式 start/end（from/to 作别名） */
 function dashRange(req: Request): { start: string; end: string; days: number } {
@@ -109,6 +144,8 @@ dashboardRouter.get(
     }
     ok(res, {
       ...maskFields({ ...payload } as unknown as Record<string, unknown>, COST_FIELDS, user.can_see_cost),
+      /** 达人榜单独过一遍掩码：COST_FIELDS 只处理顶层键，榜单行的钱藏在数组里 */
+      creator_rank: creatorRankView(payload.creator_rank, user.can_see_cost),
       /** 区间说明：anchored=1 表示区间内无单，已把窗口平移到最新一单所在日 */
       period: { ...range, anchored: payload.range.anchored, actual_start: payload.range.start, actual_end: payload.range.end },
       visible_shops: shops,
@@ -142,7 +179,14 @@ dashboardRouter.get(
   requireMenu('dashboard'),
   wrap((req, res) => {
     const range = dashRange(req);
-    const payload = dashboardMetrics(current(req), { start: range.start, end: range.end });
-    ok(res, { range: { ...range, ...payload.range }, gmv_trend: payload.gmv_trend, shop_rank: payload.shop_rank, creator_rank: payload.creator_rank });
+    const user = current(req);
+    const payload = dashboardMetrics(user, { start: range.start, end: range.end });
+    ok(res, {
+      range: { ...range, ...payload.range },
+      gmv_trend: payload.gmv_trend,
+      shop_rank: payload.shop_rank,
+      // 与 /summary 同一个 ROI 归一 + 掩码，两块图不能一个按返点算、一个按 GMV 算
+      creator_rank: creatorRankView(payload.creator_rank, user.can_see_cost),
+    });
   }),
 );

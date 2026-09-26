@@ -8,7 +8,7 @@
  */
 import { all, get, insert, update } from '../../core/db.js';
 import { badRequest, notFound } from '../../core/http.js';
-import { DEFAULT_ALERT_RULES } from '@tk/shared';
+import { breakevenRoas, DEFAULT_ALERT_RULES } from '@tk/shared';
 import { rateToCnyExpr, todayUtc } from '../rates.js';
 import { scanCreatorTrends, scanProductChannels, scanVideoDecay } from '../analytics.js';
 import { SELECTION_EVALUATORS } from './selection.js';
@@ -251,12 +251,16 @@ function evalAdsLoss(rule: RuleRow, end: string): Hit[] {
     end,
   );
   const orderRate = rateToCnyExpr('o.currency', 'substr(o.order_time, 1, 10)');
-  const margins = all<{ shop_id: number; gmv: Num; cost: Num; commission: Num }>(
+  // 我们是品牌服务方：广告花出去要买回的是"我们应得的返点"，不是品牌的 GMV。
+  // 所以毛利额 = 应收返点 − 物流 − 达人佣金；分母仍用 GMV，这样"盈亏平衡 ROAS"还是那个熟悉的
+  // "每 1 元广告要带回多少元 GMV 才不亏"，只是分子换成了我们的钱。
+  const margins = all<{ shop_id: number; gmv: Num; rebate: Num; logistics: Num; commission: Num }>(
     `SELECT o.shop_id, ROUND(SUM(i.item_amount * ${orderRate}), 2) AS gmv,
-            ROUND(SUM(i.cost_snapshot), 2) AS cost, ROUND(SUM(i.est_commission * ${orderRate}), 2) AS commission
+            ROUND(SUM(i.rebate_cny), 2) AS rebate, ROUND(SUM(i.logistics_cny), 2) AS logistics,
+            ROUND(SUM(i.est_commission * ${orderRate}), 2) AS commission
        FROM tk_order_item i
        JOIN tk_order o ON o.id = i.order_id AND o.is_deleted = 0
-      WHERE i.is_deleted = 0 AND i.cost_matched = 1 AND o.order_status <> 'CANCELLED' AND o.is_sample_order = 0
+      WHERE i.is_deleted = 0 AND i.rebate_matched = 1 AND o.order_status <> 'CANCELLED' AND o.is_sample_order = 0
         AND substr(o.order_time, 1, 10) BETWEEN ? AND ?
       GROUP BY o.shop_id`,
     start,
@@ -264,17 +268,17 @@ function evalAdsLoss(rule: RuleRow, end: string): Hit[] {
   );
   const marginOf = new Map(margins.map((m) => {
     const gmv = n(m.gmv);
-    return [Number(m.shop_id), gmv > 0 ? (gmv - n(m.cost) - n(m.commission)) / gmv : 0];
+    return [Number(m.shop_id), gmv > 0 ? (n(m.rebate) - n(m.logistics) - n(m.commission)) / gmv : 0];
   }));
   const hits: Hit[] = [];
   for (const a of ads) {
     const spend = n(a.spend);
     if (spend <= 0) continue;
     const roas = n(a.gmv) / spend;
-    // 广告前贡献毛利率（简化口径：净 GMV-采购成本-佣金；平台费/物流未扣，写入证据可解释）
     const margin = marginOf.get(Number(a.shop_id)) ?? 0;
-    if (margin <= 0) continue;
-    const breakeven = 1 / margin;
+    // 毛利率 ≤ 0（这店根本赚不回佣金与物流）时不存在平衡点：不报"低于平衡线"，那是误导
+    const breakeven = breakevenRoas(margin);
+    if (breakeven === null) continue;
     const metric = roas / breakeven;
     if (!compare(metric, rule.operator, rule.threshold)) continue;
     hits.push({
@@ -291,7 +295,7 @@ function evalAdsLoss(rule: RuleRow, end: string): Hit[] {
         roas: r2(roas * 100) / 100,
         contribution_margin: r4(margin),
         breakeven_roas: r2(breakeven * 100) / 100,
-        margin_note: '贡献毛利率=（GMV-成本快照-佣金）/GMV，未扣平台费/物流',
+        margin_note: '贡献毛利率=（应收返点−物流−达人佣金）/GMV，未扣平台费与期间费用',
       },
     });
   }

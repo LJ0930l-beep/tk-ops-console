@@ -1231,8 +1231,10 @@ financeRouter.get(
           return r.gmv;
         case 'net_gmv':
           return r.net_gmv;
-        case 'cost':
-          return r.cost;
+        case 'rebate':
+          return r.rebate;
+        case 'logistics':
+          return r.logistics;
         case 'commission':
           return r.commission;
         case 'ad_spend':
@@ -1268,7 +1270,8 @@ const PROFIT_HEADERS = [
   'GMV(CNY)',
   '退款(CNY)',
   '净GMV(CNY)',
-  '成本(CNY)',
+  '应收返点(CNY)',
+  '物流支出(CNY)',
   '佣金(CNY)',
   '广告费(CNY)',
   '费用(CNY)',
@@ -1308,7 +1311,8 @@ financeRouter.get(
       r.gmv,
       r.refund,
       r.net_gmv,
-      r.cost,
+      r.rebate,
+      r.logistics,
       r.commission,
       r.ad_spend,
       r.expense,

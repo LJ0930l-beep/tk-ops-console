@@ -7,7 +7,7 @@
  *     一条语句跑完全表，不在 JS 里逐行拼 SQL。
  *  2. 只回写「系统汇总列」（video.orders/gmv、creator.gmv_level、shop_listing.last_sync_at），
  *     人工录入列一律不碰。
- *  3. 达人带货 GMV 复用利润引擎（同一折算、切日与剔除口径）；video.gmv 落库为人民币
+ *  3. 达人带货 GMV 复用利润引擎（同一折算、切日与「未配返点率整行剔除」口径）；video.gmv 落库为人民币
  *     —— 内容中心把 SUM(v.gmv) 直接当 gmv_cny 用，两边必须同一口径。
  *  4. 返回值是「真正发生变化的行数」（幂等：连跑两次第二次为 0），并各写一条
  *     sync_log(task_type='aggregate') 供同步页排查。
@@ -74,12 +74,16 @@ function withAggregateLog(
 
 /* ==================== 表 15 video：带货订单数与 GMV ==================== */
 
-/** 视频带货归因：tk_order_item.content_id = video.tk_video_id；样品单/取消单/未映射行不计 */
+/** 视频带货归因：tk_order_item.content_id = video.tk_video_id；样品单/取消单/未配返点率的行不计 */
 const VIDEO_ITEM_FROM = `FROM tk_order_item i
          JOIN tk_order o ON o.id = i.order_id AND o.is_deleted = 0
          JOIN tk_shop s ON s.id = o.shop_id
-        WHERE i.is_deleted = 0 AND i.cost_matched = 1
+        WHERE i.is_deleted = 0 AND i.rebate_matched = 1
           AND o.order_status <> 'CANCELLED' AND o.is_sample_order = 0`;
+// rebate_matched=0 = 这一行没映射到内部 SKU，也就没有品牌给的返点率。
+// 它必须被**排除**而不是按 0 计入：0 的语义是「品牌确实一分钱返点都不给我们」，
+// 排除的语义才是「这一行还没配」——混成一个数，带货榜与后面的投流/寄样建议就分不清是数据缺还是生意差
+// （和当年 COALESCE(rate,1) 把缺汇率当 1:1 是同一类缺陷：不许给缺失值发明一个默认数）。
 
 /** 明细实收折人民币：按订单日取价，取不到用 SQL 侧兜底牌价（与利润引擎同一套常量） */
 // 汇率必须走 rateToCnyExpr：裸 rateSqlExpr 缺价时返回 NULL，SUM(金额 * NULL) 会把这一行静默吞掉
@@ -139,8 +143,11 @@ export function gmvLevelOf(netGmvCny: number): string {
 
 /**
  * 近 30 天带货净 GMV 回写 creator.gmv_level。
- * 带货额直接复用利润引擎（未映射行与样品单已经剔除）；区间内没有带货的达人不写回，
+ * 带货额直接复用利润引擎（未配返点率的行与样品单已经剔除）；区间内没有带货的达人不写回，
  * 保留人工评级，避免新签达人被无脑降级成 C。
+ * 档位口径**不改成返点额**：gmv_level 描述的是「这个达人能带多大的品牌生意」（对外谈判用的量级），
+ * 我们赚多少是另一件事 —— 返点/寄样运费在 analytics_creator_daily 里，由 analytics.rebuildCreatorDaily
+ * 按日回写（本页不重复写这张宽表，两处写就会有两处口径）。
  */
 export function refreshCreatorAggregates(
   userId: number | null = null,

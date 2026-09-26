@@ -1,6 +1,7 @@
 # TikTok 运营管理后台
 
-TikTok Shop 选品流水线 / 多店铺 / 达人建联 / 短视频与直播 / 广告投放 / 利润核算 一体化运营后台。
+TikTok Shop 选品流水线 / 多店铺 / 达人建联 / 短视频与直播 / 广告投放 / 返点与利润核算 一体化运营后台。
+收入口径是**品牌服务方**：货是品牌的，我们按实收 GMV 拿品牌返点，系统里没有采购价。
 
 详细需求见 docs/prd.md，开发规范见 docs/development-standards.md，Epic 拆分见 docs/epics.md。
 
@@ -12,7 +13,7 @@ TikTok Shop 选品流水线 / 多店铺 / 达人建联 / 短视频与直播 / �
 | --- | --- |
 | `npm run dev` | 同时起后端（:8787）与前端（:5173，代理 `/api`） |
 | `npm run lint` | 后端 `tsc --noEmit` + 前端 `vue-tsc --noEmit` |
-| `npm run test` | 后端 vitest（377 例，2 例外呼用例默认跳过）+ 前端单测（10 例） |
+| `npm run test` | 后端 vitest（400 例，2 例外呼用例默认跳过）+ 前端单测（10 例） |
 | `npm run smoke` | 全链路冒烟：内存库起真 HTTP 服务，8 角色 × 全部 GET + 写链路 + 导出 + 限流，退出码非 0 即有 FAIL |
 | `npm run e2e` | Playwright 端到端 63 例：RBAC 可见性（含"侧边栏分组 == menu_perms"）/ 导入中心 / 行动中心闭环 / 选品流水线全程 / 37 个页面逐个打开。自己起临时库与服务端，不碰 `apps/data/tk_ops.db` |
 | `npm run openapi` | 重新生成 `docs/openapi.json` 与前端 `ApiPath` 路径类型；改了路由就得跑，CI 会检查生成物是否落后 |

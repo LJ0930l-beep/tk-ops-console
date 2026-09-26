@@ -5,15 +5,18 @@
  *  1. 每次执行（含手动补跑）都写一条 sync_log：时间段、fetched/inserted/updated/failed、状态、耗时。
  *  2. 增量窗口前后重叠 config.syncOverlapMinutes 分钟，靠 tk_order_id / tk_return_id /
  *     (shop_id,tk_sku_id) 唯一索引去重 —— 宁可多拉，不能漏单，重复拉不产生重复行。
- *  3. 成本在订单明细写入时冻结：cost_snapshot =（采购 + 头程）× 数量（人民币）。
- *     映射不到内部 SKU 的行 sku_id=NULL、cost_matched=0，绝不按 0 成本参与利润，并 sendAlert。
+ *  3. 返点在订单明细写入时冻结：rebate_cny = 实收（item_amount）折 CNY × 品牌返点率，
+ *     logistics_cny = 单件物流成本 × 数量（两者都是人民币）。
+ *     映射不到内部 SKU、或 SKU 上没配返点率的行 sku_id 照实保留、rebate_matched=0，
+ *     这一行整体退出成本/毛利/利润口径（绝不按 0 收入参与计算，也不许猜一个比率），并 sendAlert。
  *
  * 「拉取」全部走 services/tiktok/client.ts 的工厂（mock / real 同一套入库代码路径），
  * 本文件只负责归一化 + 写库 + 日志 + 告警。
  */
-import { MAP_STATUS, normalizeHandle, round2, unitCostCny } from '@tk/shared';
+import { MAP_STATUS, normalizeHandle, rebateCny, round2, unitLogisticsCny } from '@tk/shared';
 import { config } from '../config.js';
 import { countRateFallbacks, rebuildCreatorDaily, rebuildProductChannelDaily, rebuildShopChannelDaily, rebuildVideoDaily } from '../services/analytics.js';
+import { getRate, rateDay } from '../services/rates.js';
 import { all, get, insert, run, scalar, tx, update } from '../core/db.js';
 import { maskError } from '../core/redact.js';
 import { sendAlert, writeOpLog } from '../core/oplog.js';
@@ -152,8 +155,14 @@ export function orderHeadOf(shopId: number, o: PlatformOrder, syncedAt = utcStam
 
 interface ResolvedItem {
   listing_id: number | null;
+  /** 解析到的内部 SKU；null = 待映射。有 SKU 不等于算得出返点，能不能进利润看 snapshotRebate 的 rebate_matched */
   sku_id: number | null;
-  cost_matched: 0 | 1;
+}
+
+/** 映射到内部 SKU 的订单行明细（返点率与物流成本都取自 product_sku 当时的配置） */
+interface SkuRebateSource {
+  rebate_rate: number;
+  logistics_cost: number;
 }
 
 /** tk_sku_id（优先）或 seller_sku → shop_listing → product_sku；找不到即未映射 */
@@ -171,21 +180,44 @@ export function resolveItemSku(shopId: number, tkSkuId: string | null, sellerSku
     sellerSku ?? '',
     tkSkuId ?? '',
   );
-  if (!row) return { listing_id: null, sku_id: null, cost_matched: 0 };
+  if (!row) return { listing_id: null, sku_id: null };
   const listingId = Number(row.listing_id);
   const skuId = row.sku_id === null || row.sku_id === undefined ? null : Number(row.sku_id);
-  return skuId ? { listing_id: listingId, sku_id: skuId, cost_matched: 1 } : { listing_id: listingId, sku_id: null, cost_matched: 0 };
+  return { listing_id: listingId, sku_id: skuId };
 }
 
-/** 成本快照：冻结当时的（采购 + 头程）× 数量，人民币 */
-export function snapshotCost(sku: { purchase_cost: number; first_leg_cost: number }, quantity: number): number {
-  return round2(unitCostCny({ purchase_cost: Number(sku.purchase_cost), first_leg_cost: Number(sku.first_leg_cost) }) * Math.max(1, quantity));
+/** 一行明细冻结下来的返点口径 */
+export interface RebateSnapshot {
+  rebate_rate: number;
+  rebate_cny: number;
+  logistics_cny: number;
+  rebate_matched: 0 | 1;
+}
+
+/**
+ * 返点快照：把成交当时的品牌返点率、应收返点、物流支出钉死在明细行上（事后改 SKU 不回溯历史单）。
+ *  - `rebate_cny = 实收折 CNY × rebate_rate`（shared 的 rebateCny 单一算法），
+ *    `amountCny` 必须由调用方按 rates.ts 的取价顺序（当日 → 更早最近 → 更晚最近 → 兜底常量）折好；
+ *  - `logistics_cny = 单件物流成本 × 数量`：product_sku.logistics_cost 本身就是人民币/件
+ *    （旧 cost_snapshot 同口径），所以这里不再乘汇率，只做 round2 收口到分；
+ *  - `rebate_matched`：只有解析到「返点率 > 0」的 SKU 才置 1。返点率没配就是 0 ——
+ *    这一行退出全部利润口径，绝不拿 0 或猜出来的比率把报表填满。
+ */
+export function snapshotRebate(sku: SkuRebateSource | null | undefined, quantity: number, amountCny: number): RebateSnapshot {
+  const rate = Number(sku?.rebate_rate ?? 0) || 0;
+  if (!sku || rate <= 0) return { rebate_rate: 0, rebate_cny: 0, logistics_cny: 0, rebate_matched: 0 };
+  return {
+    rebate_rate: rate,
+    rebate_cny: rebateCny(amountCny, rate),
+    logistics_cny: round2(unitLogisticsCny({ logistics_cost: Number(sku.logistics_cost) }) * Math.max(1, Number(quantity) || 1)),
+    rebate_matched: 1,
+  };
 }
 
 /**
  * 单笔订单 upsert（含明细）。
- * 已存在的订单只刷新状态与物流节点，**不重写历史 cost_snapshot / 映射结果**（方案表 7「冻结」），
- * 映射后补齐的历史行由 refreshDerivedAggregates 统一处理并留痕。
+ * 已存在的订单只刷新状态与物流节点，**不重写历史返点快照 / 映射结果**（方案表 7「冻结」），
+ * 映射或返点率后补的历史行由 refreshDerivedAggregates 统一处理并留痕。
  */
 export function upsertPlatformOrder(shopId: number, o: PlatformOrder, c: Counters): void {
   const tkOrderId = String(o.order_id ?? '').trim();
@@ -196,7 +228,7 @@ export function upsertPlatformOrder(shopId: number, o: PlatformOrder, c: Counter
   }
   if (exist && Number(exist.shop_id) !== shopId) {
     // tk_order_id is globally unique today. A duplicate imported under another shop must fail
-    // closed instead of silently re-parenting the existing order and its cost/attribution history.
+    // closed instead of silently re-parenting the existing order and its rebate/attribution history.
     throw new Error('已有订单号归属其他店铺，已拒绝跨店改写');
   }
   const head = orderHeadOf(shopId, o);
@@ -214,6 +246,9 @@ export function upsertPlatformOrder(shopId: number, o: PlatformOrder, c: Counter
   const items = o.items ?? [];
   bump(c, 'items', items.length);
   if (!items.length) return;
+
+  // 实收折 CNY 的取价：订单币种 + 业务发生日（付款时间优先，退回下单时间），一单一次取价，明细共用
+  const rateInfo = getRate(String(head.currency ?? ''), rateDay(String(head.paid_time ?? head.order_time ?? '')));
 
   const existing = all<{ id: number; listing_id: number | null; unit_price: number; quantity: number }>(
     `SELECT id, listing_id, unit_price, quantity FROM tk_order_item WHERE order_id = ? AND is_deleted = 0 ORDER BY id ASC`,
@@ -239,13 +274,13 @@ export function upsertPlatformOrder(shopId: number, o: PlatformOrder, c: Counter
       continue;
     }
 
-    let costSnapshot = 0;
     let skuId = resolved.sku_id;
-    if (resolved.cost_matched === 1 && skuId) {
-      const sku = get<{ purchase_cost: number; first_leg_cost: number }>(`SELECT purchase_cost, first_leg_cost FROM product_sku WHERE id = ? AND is_deleted = 0`, skuId);
-      if (sku) costSnapshot = snapshotCost(sku, qty);
-      else skuId = null;
+    let sku: SkuRebateSource | undefined;
+    if (skuId) {
+      sku = get<SkuRebateSource>(`SELECT rebate_rate, logistics_cost FROM product_sku WHERE id = ? AND is_deleted = 0`, skuId);
+      if (!sku) skuId = null;
     }
+    const snapshot = snapshotRebate(sku, qty, round2(amount * rateInfo.rate));
     insert('tk_order_item', {
       order_id: orderId,
       listing_id: resolved.listing_id,
@@ -254,23 +289,40 @@ export function upsertPlatformOrder(shopId: number, o: PlatformOrder, c: Counter
       unit_price: unit,
       discount,
       item_amount: amount,
-      cost_snapshot: costSnapshot,
-      cost_matched: skuId ? 1 : 0,
+      rebate_rate: snapshot.rebate_rate,
+      rebate_cny: snapshot.rebate_cny,
+      logistics_cny: snapshot.logistics_cny,
+      rebate_matched: snapshot.rebate_matched,
       created_by: SYSTEM_USER_ID,
     } as never);
-    if (!skuId) {
+    if (!snapshot.rebate_matched) {
       c.failed += 1;
-      bump(c, 'unmapped_items');
+      // 两类「算不出返点」分开计数：运营要做的事不一样（一个是建映射，一个是配返点率）
+      bump(c, skuId ? 'rebate_unconfigured' : 'unmapped_items');
     }
   }
 }
 
-/** 明细映射不上 → 每次同步都告警（方案 6.4：不能悄悄按 0 成本算） */
-function alertUnmapped(shop: ShopCredential, count: number): void {
-  if (count <= 0) return;
+/**
+ * 明细算不出应收返点 → 每次同步都告警（方案 6.4：不能悄悄按 0 收入算利润）。
+ * 两类原因分开说：没映射到内部 SKU / 映射了但 SKU 没配返点率。
+ */
+function alertUnmapped(shop: ShopCredential, c: Counters): void {
+  const noSku = c.detail.unmapped_items ?? 0;
+  const noRate = c.detail.rebate_unconfigured ?? 0;
+  const total = noSku + noRate;
+  if (total <= 0) return;
+  const why =
+    noSku && noRate
+      ? `其中 ${noSku} 条找不到内部 SKU、${noRate} 条已映射但 SKU 未配品牌返点率`
+      : noSku
+        ? '这些行找不到内部 SKU'
+        : '这些行已映射到内部 SKU，但 SKU 上的品牌返点率还是 0';
   sendAlert({
-    title: `订单成本映射失败 ${count} 行`,
-    detail: `店铺「${shop.shopName}」本次同步有 ${count} 条订单明细找不到内部 SKU，已进「待映射清单」；这些行不计入成本与利润，请尽快在商品中心完成映射`,
+    title: `订单返点无法计算 ${total} 行`,
+    detail:
+      `店铺「${shop.shopName}」本次同步有 ${total} 条订单明细算不出应收返点（${why}），` +
+      `已进「待映射清单」；这些行不计入返点、成本与利润，请尽快在商品中心完成映射或配置返点率`,
     level: 'error',
   });
 }
@@ -288,7 +340,7 @@ export async function syncOrdersForShop(shopId: number, opts: SyncOptions = {}):
         pushError(c, `订单 ${String(o.order_id ?? '?')} 落库失败：${e instanceof Error ? e.message : String(e)}`);
       }
     }
-    alertUnmapped(shop, c.detail.unmapped_items ?? 0);
+    alertUnmapped(shop, c);
   });
 }
 
@@ -344,7 +396,7 @@ export function toPlatformOrder(row: Record<string, unknown>): PlatformOrder {
 }
 
 /**
- * 手工导入订单：与接口同步共用 upsertPlatformOrder（同一套成本快照 + 去重 + 告警），
+ * 手工导入订单：与接口同步共用 upsertPlatformOrder（同一套返点冻结 + 去重 + 告警），
  * 因此重复导入同一批次不会产生重复行。
  */
 export async function importOrdersForShop(
@@ -366,7 +418,7 @@ export async function importOrdersForShop(
         pushError(c, `导入订单 ${order.order_id ?? '?'} 失败：${e instanceof Error ? e.message : String(e)}`);
       }
     }
-    alertUnmapped(shop, c.detail.unmapped_items ?? 0);
+    alertUnmapped(shop, c);
   });
 }
 
@@ -625,18 +677,20 @@ export function pickAttributionTarget(shopId: number, a: PlatformAffiliateOrder)
 /* ==================== 派生汇总刷新 ==================== */
 
 /**
- * 派生汇总刷新：映射纠偏 + 成本回填 + 四张分析宽表重建。
+ * 派生汇总刷新：映射纠偏 + 返点回填 + 四张分析宽表重建。
  *  1. listing.map_status 与 sku_id 保持一致（人工在库里直接改了 sku 也能纠偏）；
- *  2. 把 cost_matched=0（从来没有快照）且映射已补齐的历史明细按当前成本补一次，逐行写操作日志；
+ *  2. 把 rebate_matched=0（从来没冻结过返点）且现在能算出返点的历史明细按当前 SKU 返点率补一次，逐行写操作日志。
+ *     两类行都在候选内：明细没有 sku_id 但 listing 后来绑上了，以及 sku_id 一直有、只是 SKU 上后配了返点率
+ *     （老库口径切换后正是后者，见 migrate.ts 的「配好返点率后重跑派生汇总」）；
  *  3. 重建 analytics_*（§15.2 宽表）—— 以前「派生汇总刷新」根本不动宽表，
  *     宽表只有夜里那条 cron 会重算，界面点完「刷新」数字还是旧的。
- * 已冻结过 cost_snapshot 的历史行绝不回溯（方案表 7 + 要点 5.1）。
+ * 已冻结过 rebate_cny 的历史行绝不回溯（UPDATE 再带一次 rebate_matched = 0 兜底，方案表 7 + 要点 5.1）。
  *
  * 窗口：这是全量重算，不是增量。调用方没给窗口时按**源数据实际跨度**（最早订单 → 现在）算，
  * 并把生效窗口写进 sync_log；以前退化成 resolveWindow 的「最近 24 小时」，
  * 在历史数据上等于什么都没算，日志却报「成功」——这就是 #33。
  */
-/** 源数据实际跨度（UTC）：宽表与成本回填都是全量重算，窗口必须覆盖到最早一单 */
+/** 源数据实际跨度（UTC）：宽表与返点回填都是全量重算，窗口必须覆盖到最早一单 */
 function fullDataWindow(): SyncWindow {
   const span = get<{ lo: string | null; hi: string | null }>(
     `SELECT MIN(order_time) AS lo, MAX(order_time) AS hi FROM tk_order WHERE is_deleted = 0`,
@@ -680,23 +734,51 @@ export function refreshDerivedAggregates(opts: SyncOptions = {}, shopIds?: numbe
           ...scopeParams,
         );
       }
-      const stale = all<{ id: number; listing_id: number; quantity: number; order_id: number }>(
-        `SELECT i.id, i.listing_id, i.quantity, i.order_id
+      const stale = all<{
+        id: number;
+        sku_id: number | null;
+        listing_sku_id: number | null;
+        quantity: number;
+        order_id: number;
+        item_amount: number;
+        currency: string;
+        order_time: string | null;
+        paid_time: string | null;
+      }>(
+        `SELECT i.id, i.sku_id, i.quantity, i.order_id, i.item_amount,
+                l.sku_id AS listing_sku_id, o.currency, o.order_time, o.paid_time
            FROM tk_order_item i
            JOIN tk_order o ON o.id = i.order_id AND o.is_deleted = 0
-           JOIN shop_listing l ON l.id = i.listing_id AND l.shop_id = o.shop_id
-          WHERE i.is_deleted = 0 AND i.cost_matched = 0 AND i.sku_id IS NULL AND l.sku_id IS NOT NULL${orderShopFilter}`,
+           LEFT JOIN shop_listing l ON l.id = i.listing_id AND l.shop_id = o.shop_id AND l.is_deleted = 0
+          WHERE i.is_deleted = 0 AND i.rebate_matched = 0 AND COALESCE(i.sku_id, l.sku_id) IS NOT NULL${orderShopFilter}`,
         ...scopeParams,
       );
       for (const row of stale) {
-        const sku = get<{ id: number; purchase_cost: number; first_leg_cost: number; sku_code: string }>(
-          `SELECT k.id, k.purchase_cost, k.first_leg_cost, k.sku_code
-             FROM product_sku k JOIN shop_listing l ON l.id = ? AND l.sku_id = k.id AND k.is_deleted = 0`,
-          row.listing_id,
-        );
+        // 明细自带的 sku 优先（成交时解析到的），其次才认 listing 现在绑的 sku
+        const hitSkuId = row.sku_id ?? row.listing_sku_id;
+        const sku = hitSkuId
+          ? get<{ id: number; rebate_rate: number; logistics_cost: number; sku_code: string }>(
+              `SELECT id, rebate_rate, logistics_cost, sku_code FROM product_sku WHERE id = ? AND is_deleted = 0`,
+              Number(hitSkuId),
+            )
+          : undefined;
         if (!sku) continue;
-        const cost = snapshotCost(sku, Number(row.quantity));
-        run(`UPDATE tk_order_item SET sku_id = ?, cost_snapshot = ?, cost_matched = 1, updated_at = datetime('now') WHERE id = ?`, sku.id, cost, row.id);
+        // 折算口径与落库时完全一致：订单币种 + 业务发生日（付款时间优先）
+        const info = getRate(String(row.currency ?? ''), rateDay(String(row.paid_time ?? row.order_time ?? '')));
+        const snapshot = snapshotRebate(sku, Number(row.quantity), round2(Number(row.item_amount) * info.rate));
+        // SKU 上返点率还是 0 → 这一行继续留在待映射清单，不许写一个「已冻结但其实没返点」的假快照
+        if (!snapshot.rebate_matched) continue;
+        const changed = run(
+          `UPDATE tk_order_item
+              SET sku_id = ?, rebate_rate = ?, rebate_cny = ?, logistics_cny = ?, rebate_matched = 1, updated_at = datetime('now')
+            WHERE id = ? AND rebate_matched = 0`,
+          sku.id,
+          snapshot.rebate_rate,
+          snapshot.rebate_cny,
+          snapshot.logistics_cny,
+          row.id,
+        );
+        if (!changed.changes) continue;
         itemBackfilled += 1;
         writeOpLog({
           user_id: user,
@@ -704,8 +786,17 @@ export function refreshDerivedAggregates(opts: SyncOptions = {}, shopIds?: numbe
           action: 'update',
           target_table: 'tk_order_item',
           target_id: row.id,
-          before: { order_id: row.order_id, sku_id: null, cost_matched: 0, cost_snapshot: 0 },
-          after: { order_id: row.order_id, sku_id: sku.id, sku_code: sku.sku_code, cost_matched: 1, cost_snapshot: cost, reason: '映射补齐后按当前成本回填（此前无快照）' },
+          before: { order_id: row.order_id, sku_id: row.sku_id ?? null, rebate_matched: 0, rebate_cny: 0, logistics_cny: 0 },
+          after: {
+            order_id: row.order_id,
+            sku_id: sku.id,
+            sku_code: sku.sku_code,
+            rebate_matched: 1,
+            rebate_rate: snapshot.rebate_rate,
+            rebate_cny: snapshot.rebate_cny,
+            logistics_cny: snapshot.logistics_cny,
+            reason: '映射或品牌返点率补齐后按当前 SKU 配置回填（此前无返点快照）',
+          },
         });
       }
     });

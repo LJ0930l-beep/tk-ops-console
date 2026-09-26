@@ -42,8 +42,10 @@
 
       <el-alert type="warning" :closable="false" show-icon style="margin-bottom: 8px">
         <template #title>
-          利润 = 结算实收（缺失时回退预估净 GMV）− 成本快照 − 达人佣金 − 分摊广告 − 分摊费用；利润率 = 利润 ÷ 净 GMV。
-          灰字「预估」行为未结算订单，共 {{ estimatedRows }} 行；实际到账以结算流水为准。样品单默认不计 GMV（PRD §5.7）。
+          我们的收入只有品牌返点：贡献毛利 = 应收返点 −（物流支出 + 达人佣金 + 分摊广告 + 分摊费用），货款与货值都在品牌那边，从来不进我们的账。
+          「带货 GMV / 净带货 GMV / 结算实收」是品牌的生意规模与平台打款，只作分母与对账用，不是我们的收入。贡献毛利率 = 贡献毛利 ÷ 净带货 GMV。
+          灰字「预估」行为未结算订单，共 {{ estimatedRows }} 行。样品单默认不计 GMV（PRD §5.7）；
+          没配到品牌返点率的订单行整体不在本表内（连 GMV 一起剔，不是按 0 返点算），去「商品中心 → 待映射清单」补齐。
         </template>
       </el-alert>
     </el-card>
@@ -69,17 +71,20 @@
         <el-table-column prop="orders" label="订单数" width="90" align="right">
           <template #default="{ row }">{{ int(row.orders) }}</template>
         </el-table-column>
-        <el-table-column prop="gmv" label="GMV" width="120" align="right">
+        <el-table-column prop="gmv" label="带货 GMV" width="120" align="right">
           <template #default="{ row }">{{ money(row.gmv) }}</template>
         </el-table-column>
         <el-table-column prop="refund" label="退款" width="110" align="right">
           <template #default="{ row }">{{ money(row.refund) }}</template>
         </el-table-column>
-        <el-table-column prop="net_gmv" label="净 GMV" width="120" align="right">
+        <el-table-column prop="net_gmv" label="净带货 GMV" width="125" align="right">
           <template #default="{ row }">{{ money(row.net_gmv) }}</template>
         </el-table-column>
-        <el-table-column prop="cost" label="成本" width="110" align="right">
-          <template #default="{ row }">{{ money(row.cost) }}</template>
+        <el-table-column prop="rebate" label="应收返点·我们的收入" width="150" align="right">
+          <template #default="{ row }">{{ money(row.rebate) }}</template>
+        </el-table-column>
+        <el-table-column prop="logistics" label="物流支出" width="115" align="right">
+          <template #default="{ row }">{{ money(row.logistics) }}</template>
         </el-table-column>
         <el-table-column prop="commission" label="达人佣金" width="110" align="right">
           <template #default="{ row }">{{ money(row.commission) }}</template>
@@ -90,22 +95,22 @@
         <el-table-column prop="expense" label="费用" width="110" align="right">
           <template #default="{ row }">{{ money(row.expense) }}</template>
         </el-table-column>
-        <el-table-column prop="settled_amount" label="结算实收" width="120" align="right">
+        <el-table-column prop="settled_amount" label="结算实收(带货)" width="135" align="right">
           <template #default="{ row }">{{ money(row.settled_amount) }}</template>
         </el-table-column>
-        <el-table-column prop="profit" label="利润" width="120" align="right">
+        <el-table-column prop="profit" label="贡献毛利" width="120" align="right">
           <template #default="{ row }">
             <span :class="num(row.profit) < 0 ? 'neg' : 'pos'">{{ money(row.profit) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="profit_rate" label="利润率" width="100" align="right">
+        <el-table-column prop="profit_rate" label="贡献毛利率" width="105" align="right">
           <template #default="{ row }">
             <span :class="num(row.profit_rate) < 0 ? 'neg' : 'pos'">{{ rate(row) }}</span>
           </template>
         </el-table-column>
         <el-table-column prop="currency" label="币种" width="80" />
         <template #empty>
-          <el-empty description="所选期间没有数据：确认订单/结算/广告已同步，或放宽期间" />
+          <el-empty description="所选期间没有可算利润的行：确认订单/结算/广告已同步、SKU 都配到了品牌返点率，或放宽期间" />
         </template>
       </el-table>
     </el-card>
@@ -124,6 +129,12 @@ import type { RowLike } from '@/types/row';
 
 type Dim = 'shop' | 'sku' | 'creator' | 'month';
 
+/**
+ * /finance/profit 现在按品牌服务方口径回：收入侧是 `rebate`（应收返点），支出侧是 `logistics`（物流），
+ * 不再有 `cost`（货款在品牌那边）。shared 的 ProfitRow 还没跟上这两个键，先在本页按接口实际返回收口。
+ */
+type Row = ProfitRow & { rebate: number; logistics: number };
+
 const dict = useDictStore();
 
 /** 报表维度（PRD §3.8 利润报表：必做 4 个维度） */
@@ -135,7 +146,7 @@ const DIMS: { value: Dim; label: string }[] = [
 ];
 
 const shops = ref<{ id: number; shop_name: string }[]>([]);
-const rows = ref<ProfitRow[]>([]);
+const rows = ref<Row[]>([]);
 const loading = ref(false);
 const dim = ref<Dim>('shop');
 const period = ref<[string, string]>([monthStart(0), dayText(new Date())]);
@@ -153,7 +164,7 @@ const estimatedRows = computed(() => rows.value.filter((r) => Number(r.is_estima
 const money = (v: unknown) => (v === '***' ? '***' : num(v).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
 const int = (v: unknown) => (v === null || v === undefined ? '-' : num(v).toLocaleString('zh-CN'));
 const rate = (r: RowLike) => `${num(r.profit_rate).toFixed(2)}%`;
-const rowClass = ({ row }: { row: ProfitRow }) => (Number(row.is_estimated) === 1 ? 'estimated-row' : '');
+const rowClass = ({ row }: { row: Row }) => (Number(row.is_estimated) === 1 ? 'estimated-row' : '');
 
 function dayText(d: Date): string {
   const p = (n: number) => String(n).padStart(2, '0');
@@ -178,7 +189,7 @@ const exportParams = computed<Record<string, unknown>>(() => ({
 async function load(): Promise<void> {
   loading.value = true;
   try {
-    const data = await apiGet<ProfitRow[] | { list?: ProfitRow[] }>('/finance/profit', {
+    const data = await apiGet<Row[] | { list?: Row[] }>('/finance/profit', {
       dim: dim.value,
       from: period.value[0],
       to: period.value[1],
@@ -205,9 +216,9 @@ function resetQuery(): void {
   void load();
 }
 
-/** 常驻合计行：金额求和，利润率按合计口径重算（不是各行利润率平均） */
-function summary({ columns: cols, data }: { columns: { property: string }[]; data: ProfitRow[] }): string[] {
-  const sum = (f: (r: ProfitRow) => number) => round2(data.reduce((a, r) => a + num(f(r)), 0));
+/** 常驻合计行：金额（含应收返点/物流）逐列求和；率一律不求和，合计口径重算 */
+function summary({ columns: cols, data }: { columns: { property: string }[]; data: Row[] }): string[] {
+  const sum = (f: (r: Row) => number) => round2(data.reduce((a, r) => a + num(f(r)), 0));
   const netGmv = sum((r) => num(r.net_gmv));
   const profit = sum((r) => num(r.profit));
   return cols.map((c, i) => {
@@ -216,12 +227,13 @@ function summary({ columns: cols, data }: { columns: { property: string }[]; dat
       case 'orders':
         return int(sum((r) => num(r.orders)));
       case 'profit_rate':
+        // 率不能相加：按合计的「贡献毛利 ÷ 净带货 GMV」重算
         return `${profitRate(profit, netGmv).toFixed(2)}%`;
       case 'currency':
       case 'dim_name':
         return '';
       default:
-        return money(sum((r) => num(r[c.property as keyof ProfitRow] as number)));
+        return money(sum((r) => num(r[c.property as keyof Row] as number)));
     }
   });
 }

@@ -1,15 +1,20 @@
 /**
  * 商品中心（方案表 3 product_spu / 表 4 product_sku / 表 5 shop_listing）
  *
+ * 品牌服务方（代运营）口径：货是品牌的，我们不背货款，SKU 上与钱有关的只有两个字段 ——
+ * `rebate_rate`（品牌给我们的返点率，0-1，我们唯一收入的比例）与
+ * `logistics_cost`（单件物流成本，人民币/件，品牌承担时填 0）。
+ *
  * 两条口径必须守住：
- *  1. 成本只维护在 product_sku 一处；改 purchase_cost / first_leg_cost 只影响**之后**同步进来的订单，
- *     历史 tk_order_item.cost_snapshot 是落库时冻结的快照，本文件任何接口都不回写。
+ *  1. 返点与物流只维护在 product_sku 一处；改 rebate_rate / logistics_cost 只影响**之后**同步进来的订单，
+ *     历史 tk_order_item.rebate_cny / logistics_cny 是落库时冻结的快照，本文件任何接口都不回写。
+ *     rebate_rate = 0 视为「未配返点率」，同步进来的明细行 rebate_matched=0，整行退出利润口径。
  *  2. 映射关系（shop_listing.sku_id）是利润准不准的命门，绑定前后一律写 sys_op_log before/after；
- *     shop_listing 有店铺维度，所有列表接口走 shopScope 隔离；成本字段按 can_see_cost 掩码。
+ *     shop_listing 有店铺维度，所有列表接口走 shopScope 隔离；返点率与物流成本按 can_see_cost 掩码。
  */
 import { Router, type Request } from 'express';
 import { z } from 'zod';
-import { DATA_SCOPE, MAP_STATUS, round2, unitCostCny, type CurrentUser } from '@tk/shared';
+import { DATA_SCOPE, MAP_STATUS, round2, type CurrentUser } from '@tk/shared';
 import { all, get, insert, scalar, softDelete, tx, update, type SqlParam } from '../core/db.js';
 import { badRequest, forbidden, notFound, ok, parseBody, qv, wrap } from '../core/http.js';
 import { Q, queryList, queryPage } from '../core/query.js';
@@ -20,8 +25,8 @@ import { rateToCnyExpr } from '../services/rates.js';
 import { sendTable, type ExportCell } from '../core/export.js';
 
 const MODULE = '商品中心';
-/** 无成本查看权限时要掩码的字段 */
-const SKU_COST_FIELDS = ['purchase_cost', 'first_leg_cost', 'unit_cost'];
+/** 无成本查看权限时要掩码的字段：返点率是我们的商务条件，和运费一样敏感 */
+const SKU_COST_FIELDS = ['rebate_rate', 'logistics_cost'];
 
 const current = (req: Request): CurrentUser => (req as AuthedRequest).user;
 
@@ -64,12 +69,18 @@ const spuBody = z.object({
   status: z.number().int().min(1).max(3).default(1),
 });
 
+/**
+ * 品牌返点率：0-1 的比例（0.18 = 实收 GMV 的 18% 归我们），0 = 未配置。
+ * 上限必须是 1 —— 有人会把「18%」填成 18，那是金额不是比率，会让返点直接放大 100 倍。
+ */
+const rebateRate = z.number().min(0, '品牌返点率不能为负数').max(1, '品牌返点率是比例（0.18 = 实收 GMV 的 18% 归我们），请填 0~1 的小数，不要填成金额');
+
 const skuBody = z.object({
   spu_id: z.number().int().positive(),
   sku_code: z.string().min(1).max(64),
   spec: z.string().max(200).nullish(),
-  purchase_cost: z.number().min(0).default(0),
-  first_leg_cost: z.number().min(0).default(0),
+  rebate_rate: rebateRate.default(0),
+  logistics_cost: z.number().min(0, '单件物流成本不能为负数').default(0),
   weight_g: z.number().int().min(0).nullish(),
   package_size: z.string().max(50).nullish(),
   status: z.number().int().min(0).max(1).default(1),
@@ -259,8 +270,7 @@ productRouter.get(
     const id = Number(req.params.id);
     mustGetSpu(id);
     const rows = all<Record<string, unknown>>(
-      `SELECT k.*, p.spu_code,
-              ROUND(k.purchase_cost + k.first_leg_cost, 2) AS unit_cost
+      `SELECT k.*, p.spu_code
          FROM product_sku k JOIN product_spu p ON p.id = k.spu_id
         WHERE k.spu_id = ? AND k.is_deleted = 0 ORDER BY k.sku_code ASC`,
       id,
@@ -269,7 +279,7 @@ productRouter.get(
   }),
 );
 
-/* ==================== 表 4 SKU 与成本 ==================== */
+/* ==================== 表 4 SKU 与返点 ==================== */
 
 function skuListQ(req: Parameters<typeof current>[0]): { q: Q; from: string } {
   const user = current(req);
@@ -278,7 +288,11 @@ function skuListQ(req: Parameters<typeof current>[0]): { q: Q; from: string } {
     .eq('k.spu_id', qv(req, 'spu_id'))
     .eq('k.status', qv(req, 'status'))
     .eq('p.category', qv(req, 'category'), false);
-  if (qv(req, 'cost_missing') === '1') q.and('k.purchase_cost + k.first_leg_cost = 0');
+  /**
+   * 「未配返点率」清单：新口径下这就是旧的「成本未维护」那一档待办（rebate_rate=0 的行同步进来全部不计利润）。
+   * 查询键 rebate_missing 是正式名，cost_missing 是旧前端/用例的别名，两个都认。
+   */
+  if (qv(req, 'rebate_missing') === '1' || qv(req, 'cost_missing') === '1') q.and('k.rebate_rate = 0');
   const shopId = qv(req, 'shop_id');
   if (shopId) {
     assertShopInScope(user, Number(shopId));
@@ -295,11 +309,11 @@ function skuListQ(req: Parameters<typeof current>[0]): { q: Q; from: string } {
   return { q, from: `product_sku k JOIN product_spu p ON p.id = k.spu_id AND p.is_deleted = 0` };
 }
 
-/** SKU 视图：合成单件成本 + 成本查看权限掩码 + 最近一次改价人/时间（来自操作日志） */
+/** SKU 视图：返点率 + 单件物流成本 + 成本查看权限掩码 + 最近一次改口径人/时间（来自操作日志） */
 function skuView(user: CurrentUser) {
   return (row: Record<string, unknown>): Record<string, unknown> => {
-    const purchase = Number(row.purchase_cost ?? 0);
-    const firstLeg = Number(row.first_leg_cost ?? 0);
+    const rate = Number(row.rebate_rate ?? 0);
+    const logistics = Number(row.logistics_cost ?? 0);
     const log = get<{ op_time: string; user_name: string | null }>(
       `SELECT l.op_time, u.real_name AS user_name FROM sys_op_log l LEFT JOIN sys_user u ON u.id = l.user_id
         WHERE l.is_deleted = 0 AND l.target_table = 'product_sku' AND l.target_id = ?
@@ -310,9 +324,8 @@ function skuView(user: CurrentUser) {
     return maskFields(
       {
         ...row,
-        purchase_cost: purchase,
-        first_leg_cost: firstLeg,
-        unit_cost: round2(purchase + firstLeg),
+        rebate_rate: rate,
+        logistics_cost: logistics,
         last_cost_by: log?.user_name ?? null,
         last_cost_at: log?.op_time ?? null,
       },
@@ -362,24 +375,23 @@ productRouter.post(
     if (!get(`SELECT id FROM product_spu WHERE id = ? AND is_deleted = 0`, body.spu_id)) throw badRequest('所属商品(spu_id)不存在');
     if (get(`SELECT id FROM product_sku WHERE sku_code = ? AND is_deleted = 0`, body.sku_code)) throw badRequest(`SKU 编码 ${body.sku_code} 已存在`);
     const id = insert('product_sku', { ...rowOf(body), created_by: user.id });
-    const unitCost = unitCostCny({ purchase_cost: Number(body.purchase_cost), first_leg_cost: Number(body.first_leg_cost) });
     writeOpLog({
       user_id: user.id,
       module: MODULE,
       action: 'create',
       target_table: 'product_sku',
       target_id: id,
-      after: { ...body, unit_cost: unitCost },
+      after: body,
       ip: req.ip,
     });
-    ok(res, { id, sku_code: body.sku_code, unit_cost: unitCost });
+    ok(res, { id, sku_code: body.sku_code, rebate_rate: body.rebate_rate, logistics_cost: body.logistics_cost });
   }),
 );
 
 /**
- * 改成本：只影响之后同步的订单。
- * 这里只做两件事 —— 落库 + 写 before/after 操作日志（成本口径要能在成本时间线里追溯）；
- * 历史 tk_order_item.cost_snapshot 一律不回写。
+ * 改返点率 / 物流成本：只影响之后同步的订单。
+ * 这里只做两件事 —— 落库 + 写 before/after 操作日志（商务口径要能在成本时间线里追溯）；
+ * 历史 tk_order_item.rebate_cny / logistics_cny 一律不回写。
  */
 productRouter.put(
   '/sku/:id',
@@ -389,7 +401,8 @@ productRouter.put(
     const before = get<Record<string, unknown>>(`SELECT * FROM product_sku WHERE id = ? AND is_deleted = 0`, id);
     if (!before) throw notFound('SKU 不存在或已删除');
     const body = parseBody(skuBody.partial(), req.body);
-    const touchingCost = body.purchase_cost !== undefined || body.first_leg_cost !== undefined;
+    /** 返点率与物流成本都是钱口径，改哪个都算「动成本」 */
+    const touchingCost = body.rebate_rate !== undefined || body.logistics_cost !== undefined;
     if (touchingCost && !user.can_see_cost) throw forbidden('当前角色无成本维护权限');
     if (body.spu_id && !get(`SELECT id FROM product_spu WHERE id = ? AND is_deleted = 0`, body.spu_id)) throw badRequest('所属商品(spu_id)不存在');
     if (body.sku_code && get(`SELECT id FROM product_sku WHERE sku_code = ? AND id <> ? AND is_deleted = 0`, body.sku_code, id)) {
@@ -397,27 +410,28 @@ productRouter.put(
     }
     update('product_sku', id, rowOf(body));
     const after = { ...before, ...body };
-    const beforeUnit = round2(Number(before.purchase_cost ?? 0) + Number(before.first_leg_cost ?? 0));
-    const afterUnit = round2(Number(after.purchase_cost ?? 0) + Number(after.first_leg_cost ?? 0));
-    const costChanged =
-      touchingCost && (Number(before.purchase_cost) !== Number(after.purchase_cost) || Number(before.first_leg_cost) !== Number(after.first_leg_cost));
-    // 留痕带上合成单件成本 unit_cost：成本时间线要能直接看出改价前后差异
+    const rebateChanged = Number(before.rebate_rate ?? 0) !== Number(after.rebate_rate ?? 0);
+    const costChanged = touchingCost && (rebateChanged || Number(before.logistics_cost ?? 0) !== Number(after.logistics_cost ?? 0));
+    // 留痕只存原始两列，成本时间线自己折算成「返点率 % + 物流元/件」
     logIfChanged({
       user_id: user.id,
       module: MODULE,
       action: 'update',
       target_table: 'product_sku',
       target_id: id,
-      before: { ...before, unit_cost: beforeUnit },
-      after: { ...after, unit_cost: afterUnit },
-      keys: ['sku_code', 'spec', 'purchase_cost', 'first_leg_cost', 'unit_cost', 'weight_g', 'package_size', 'status'],
+      before,
+      after,
+      keys: ['sku_code', 'spec', 'rebate_rate', 'logistics_cost', 'weight_g', 'package_size', 'status'],
       ip: req.ip,
     });
     ok(res, {
       id,
       cost_changed: costChanged,
-      unit_cost: afterUnit,
-      tip: '成本修改只对之后同步进来的订单生效，历史订单沿用落库时冻结的 cost_snapshot',
+      rebate_rate: Number(after.rebate_rate ?? 0),
+      logistics_cost: Number(after.logistics_cost ?? 0),
+      tip: rebateChanged
+        ? '返点率修改只对之后同步进来的订单生效，历史订单沿用落库时冻结的 rebate_cny；老历史行请在同步页重跑「派生汇总」回填'
+        : '成本修改只对之后同步进来的订单生效，历史订单沿用落库时冻结的 rebate_cny / logistics_cny',
     });
   }),
 );
@@ -440,7 +454,7 @@ productRouter.delete(
 );
 
 /**
- * 成本变更时间线：数据源就是 sys_op_log（操作日志没有更新入口，天然当审计账本用）。
+ * 返点率 / 物流成本变更时间线：数据源就是 sys_op_log（操作日志没有更新入口，天然当审计账本用）。
  * 无成本权限的人不返回该清单（requireMenu 已挡住 product 菜单，这里再加一道成本判断）。
  */
 productRouter.get(
@@ -449,7 +463,7 @@ productRouter.get(
     const user = current(req);
     if (!user.can_see_cost) throw forbidden('无成本查看权限');
     const id = Number(req.params.id);
-    const sku = get<Record<string, unknown>>(`SELECT id, sku_code, purchase_cost, first_leg_cost FROM product_sku WHERE id = ? AND is_deleted = 0`, id);
+    const sku = get<Record<string, unknown>>(`SELECT id, sku_code, rebate_rate, logistics_cost FROM product_sku WHERE id = ? AND is_deleted = 0`, id);
     if (!sku) throw notFound('SKU 不存在或已删除');
     const logs = all<Record<string, unknown>>(
       `SELECT l.id, l.op_time, l.action, l.user_id, u.real_name AS user_name, l.before_after
@@ -458,38 +472,40 @@ productRouter.get(
         ORDER BY l.id DESC`,
       id,
     );
+    /** 比例折算成百分数：时间线是给人看的，0.18 不如 18% 直观 */
+    const pctOf = (v: unknown): number => round2(Number(v ?? 0) * 100);
     const timeline: Record<string, unknown>[] = [];
     for (const l of logs) {
       const parsed = JSON.parse(String(l.before_after ?? '{}')) as { before?: Record<string, unknown>; after?: Record<string, unknown> };
       const b = parsed.before ?? {};
       const a = parsed.after ?? {};
-      const hasCost = b.purchase_cost !== undefined || b.first_leg_cost !== undefined || a.purchase_cost !== undefined || a.first_leg_cost !== undefined;
-      // 只有成本字段真的变了才算一条改价记录；只改规格/状态的 update 不进时间线
-      const costChanged = b.purchase_cost !== a.purchase_cost || b.first_leg_cost !== a.first_leg_cost;
+      const hasCost = b.rebate_rate !== undefined || b.logistics_cost !== undefined || a.rebate_rate !== undefined || a.logistics_cost !== undefined;
+      // 只有钱口径字段真的变了才算一条变更记录；只改规格/状态的 update 不进时间线
+      const costChanged = b.rebate_rate !== a.rebate_rate || b.logistics_cost !== a.logistics_cost;
       if (!hasCost || !costChanged) continue;
-      const beforeUnit = round2(Number(b.purchase_cost ?? 0) + Number(b.first_leg_cost ?? 0));
-      const afterUnit = round2(Number(a.purchase_cost ?? 0) + Number(a.first_leg_cost ?? 0));
       timeline.push({
         log_id: Number(l.id),
         op_time: String(l.op_time),
         action: String(l.action),
         user_id: Number(l.user_id),
         user_name: l.user_name ?? null,
-        before_purchase_cost: b.purchase_cost ?? null,
-        after_purchase_cost: a.purchase_cost ?? null,
-        before_first_leg_cost: b.first_leg_cost ?? null,
-        after_first_leg_cost: a.first_leg_cost ?? null,
-        before_unit_cost: beforeUnit,
-        after_unit_cost: afterUnit,
-        diff_unit_cost: round2(afterUnit - beforeUnit),
+        before_rebate_rate: b.rebate_rate ?? null,
+        after_rebate_rate: a.rebate_rate ?? null,
+        before_rebate_pct: b.rebate_rate === undefined ? null : pctOf(b.rebate_rate),
+        after_rebate_pct: a.rebate_rate === undefined ? null : pctOf(a.rebate_rate),
+        before_logistics_cost: b.logistics_cost ?? null,
+        after_logistics_cost: a.logistics_cost ?? null,
+        diff_logistics_cost: round2(Number(a.logistics_cost ?? 0) - Number(b.logistics_cost ?? 0)),
       });
     }
     ok(res, {
       sku_id: id,
       sku_code: String(sku.sku_code),
-      current_unit_cost: round2(Number(sku.purchase_cost) + Number(sku.first_leg_cost)),
+      current_rebate_rate: Number(sku.rebate_rate ?? 0),
+      current_rebate_pct: pctOf(sku.rebate_rate),
+      current_logistics_cost: Number(sku.logistics_cost ?? 0),
       timeline,
-      tip: '成本变更只对之后落库的订单生效，历史 cost_snapshot 不回溯',
+      tip: '返点率与物流成本变更只对之后落库的订单生效，历史 rebate_cny / logistics_cny 不回溯；老历史行请重跑「派生汇总」',
     });
   }),
 );
@@ -503,7 +519,9 @@ const LISTING_FROM = `shop_listing l
 
 const LISTING_SELECT = `l.*, s.shop_name, s.currency, s.region, k.sku_code, k.spec, p.spu_code, p.name_cn,
        (SELECT COUNT(*) FROM tk_order_item oi WHERE oi.listing_id = l.id AND oi.is_deleted = 0) AS order_item_count,
-       (SELECT COUNT(*) FROM tk_order_item oi WHERE oi.listing_id = l.id AND oi.is_deleted = 0 AND oi.sku_id IS NULL) AS unmapped_item_count`;
+       /* 新口径下「没算出来」有两种：没绑内部 SKU、绑了但 SKU 没配返点率 —— 都落在 rebate_matched=0，
+          这一列就是这条映射上不进利润的行数 */
+       (SELECT COUNT(*) FROM tk_order_item oi WHERE oi.listing_id = l.id AND oi.is_deleted = 0 AND oi.rebate_matched = 0) AS unmapped_item_count`;
 
 function listingQ(req: Parameters<typeof current>[0]): Q {
   return withScope(new Q('l.is_deleted = 0'), shopScope(current(req), 'l.shop_id'))
@@ -618,7 +636,7 @@ productRouter.put(
       id,
       sku_id: nextSkuId,
       map_status: mapStatus,
-      tip: '历史订单行的成本快照保持冻结，仅之后同步的订单按新映射取成本',
+      tip: '历史订单行的返点快照保持冻结，仅之后同步的订单按新映射取品牌返点率',
     });
   }),
 );
@@ -648,8 +666,13 @@ productRouter.delete(
 
 /* ==================== 待映射清单 ==================== */
 
-const UNMAPPED_ITEMS_SUB = `(SELECT COUNT(*) FROM tk_order_item oi WHERE oi.listing_id = l.id AND oi.is_deleted = 0 AND oi.sku_id IS NULL)`;
-const UNMAPPED_AMOUNT_SUB = `(SELECT COALESCE(SUM(oi.item_amount), 0) FROM tk_order_item oi WHERE oi.listing_id = l.id AND oi.is_deleted = 0 AND oi.sku_id IS NULL)`;
+/**
+ * 「未映射」在新口径下等于「这一行算不出应收返点」：
+ * 明细没绑到内部 SKU，或绑到了但 SKU 的品牌返点率还是 0 —— 两种都落 rebate_matched = 0。
+ */
+const UNMAPPED_ITEM_WHERE = `oi.is_deleted = 0 AND oi.rebate_matched = 0`;
+const UNMAPPED_ITEMS_SUB = `(SELECT COUNT(*) FROM tk_order_item oi WHERE oi.listing_id = l.id AND ${UNMAPPED_ITEM_WHERE})`;
+const UNMAPPED_AMOUNT_SUB = `(SELECT COALESCE(SUM(oi.item_amount), 0) FROM tk_order_item oi WHERE oi.listing_id = l.id AND ${UNMAPPED_ITEM_WHERE})`;
 const UNMAPPED_COUNT = `${UNMAPPED_ITEMS_SUB} AS unmatched_item_count`;
 const UNMAPPED_AMOUNT = `${UNMAPPED_AMOUNT_SUB} AS unmatched_amount`;
 
@@ -670,8 +693,8 @@ const UNMAPPED_EXPORT_COLUMNS = [
   { key: 'shop_name', label: '店铺' },
   { key: 'region', label: '站点' },
   { key: 'currency', label: '币种' },
-  { key: 'unmatched_item_count', label: '未匹配订单行数' },
-  { key: 'unmatched_amount', label: '未匹配金额(原币)' },
+  { key: 'unmatched_item_count', label: '算不出返点的订单行数' },
+  { key: 'unmatched_amount', label: '受影响金额(原币)' },
   { key: 'map_status', label: '映射状态' },
   { key: 'updated_at', label: '更新时间' },
 ];
@@ -696,8 +719,9 @@ productRouter.get(
 );
 
 /**
- * 待映射清单 = map_status=2 的 listing + 其未匹配订单行数与影响金额；
- * rows 里额外给出所有「没有成本快照」的订单行，供运营定位到底是哪几笔单算不出利润。
+ * 待映射清单 = map_status=2 的 listing + 其算不出返点的订单行数与影响金额；
+ * rows 里额外给出所有「没有返点快照（rebate_matched=0）」的订单行，供运营定位到底是哪几笔单进不了利润。
+ * 清单里的行有两类，处理动作不一样，所以把 sku_id 一并给出：NULL=补映射，非 NULL=去 SKU 上配返点率。
  */
 productRouter.get(
   '/unmapped',
@@ -714,14 +738,14 @@ productRouter.get(
     const rows = all<Record<string, unknown>>(
       `SELECT oi.id AS item_id, o.id AS order_id, o.tk_order_id, o.order_time, o.order_status, o.currency,
               o.shop_id, s.shop_name, l.id AS listing_id, l.tk_sku_id, l.seller_sku, l.product_name,
-              oi.quantity, oi.unit_price, oi.item_amount,
+              oi.sku_id, oi.quantity, oi.unit_price, oi.item_amount,
               ROUND(oi.item_amount * ${RATE_TO_CNY}, 2) AS item_amount_cny,
               ${RATE_TO_CNY} AS rate_to_cny
          FROM tk_order_item oi
          JOIN tk_order o ON o.id = oi.order_id AND o.is_deleted = 0
          JOIN tk_shop s ON s.id = o.shop_id
          LEFT JOIN shop_listing l ON l.id = oi.listing_id
-        WHERE oi.is_deleted = 0 AND (oi.sku_id IS NULL OR oi.cost_matched = 0) ${orderScope.sql}
+        WHERE oi.is_deleted = 0 AND oi.rebate_matched = 0 ${orderScope.sql}
         ORDER BY o.order_time DESC LIMIT 50`,
       ...orderScope.params,
     );
@@ -737,7 +761,7 @@ productRouter.get(
       ...page,
       rows,
       totals: totals ?? { listing_count: 0, unmatched_items: 0, unmatched_amount: 0 },
-      warn: '以下订单行没有成本快照，已从成本/毛利/利润计算中整体排除（绝不按 0 成本参与计算），请尽快完成映射或补成本价',
+      warn: '以下订单行算不出应收返点（没映射到内部 SKU，或 SKU 未配品牌返点率），已从返点/毛利/利润计算中整体排除（绝不按 0 收入参与计算），请尽快完成映射或配置返点率，然后重跑「派生汇总」',
     });
   }),
 );
@@ -840,7 +864,12 @@ function parseImportRows<T>(req: { body: unknown }, schema: z.ZodType<T>): { row
   return { rows, failed, total: raw.length };
 }
 
-/** 导入行允许只给 spu_code（按款号归属 spu），故 spu_id 从必填放宽为选填 */
+/**
+ * 导入行允许只给 spu_code（按款号归属 spu），故 spu_id 从必填放宽为选填。
+ * 列名即模板表头：sku_code / spec / rebate_rate / logistics_cost / weight_g / package_size / status；
+ * rebate_rate 走同一个 0~1 校验 —— 表格里把 18% 填成 18 的行会被逐行挡下（reason 里带中文说明），
+ * 而不是静默落库后让返点放大 100 倍。
+ */
 const importSkuRow = skuBody.extend({ spu_id: skuBody.shape.spu_id.optional(), spu_code: z.string().max(64).nullish() });
 
 productRouter.post(
@@ -891,15 +920,15 @@ productRouter.post(
 
 /* ==================== 导出（can_export 才可调，并写导出日志） ==================== */
 
+/** SKU 导出列：返点率是比例（0.18），物流成本是人民币/件；没有「合成单件成本」这一列了 */
 const EXPORT_COLUMNS = [
   'sku_code',
   'spu_code',
   'name_cn',
   'category',
   'spec',
-  'purchase_cost',
-  'first_leg_cost',
-  'unit_cost',
+  'rebate_rate',
+  'logistics_cost',
   'weight_g',
   'package_size',
   'status',

@@ -317,10 +317,12 @@ syncRouter.get(
         ...scope.params,
       )?.c ?? 0,
     );
+    // 待补返点的明细行数：rebate_matched=0 = SKU 没映射上、品牌返点率还没配到这一行。
+    // 健康度只看这个计数，不在这里补率也不补金额 —— 这些行在利润与宽表口径里是「排除」，不是「0 收入」。
     const unmappedItems = Number(
       get<{ c: number }>(
         `SELECT COUNT(*) AS c FROM tk_order_item i JOIN tk_order o ON o.id = i.order_id AND o.is_deleted = 0
-          WHERE i.is_deleted = 0 AND i.cost_matched = 0 ${scope.sql.replace(/s\.id/g, 'o.shop_id')}`,
+          WHERE i.is_deleted = 0 AND i.rebate_matched = 0 ${scope.sql.replace(/s\.id/g, 'o.shop_id')}`,
         ...scope.params,
       )?.c ?? 0,
     );

@@ -19,16 +19,15 @@ const SNAP = { impressions: 9000, ctr: 0.035, cart_rate: 0.06, cvr: 0.018, refun
 /** 把 UTC 时间往前挪 N 天，格式与库里的 datetime 文本一致（不用 datetime() SQL 函数，别再添方言债） */
 const daysAgoStamp = (n: number): string => new Date(Date.now() - n * 86_400_000).toISOString().replace('T', ' ').slice(0, 19);
 
+/** 品牌服务方的经济账：返点 60% − 佣金 8% − 物流 2% = 毛利 50% ⇒ 盈亏平衡 ROAS = 2 */
+const ECON = { brand_name: '测试品牌', list_price: 39.9, planned_discount: 0.1, rebate_rate: 0.6, commission_rate: 0.08, logistics_rate: 0.02 };
+
 const register = async (owner: string, over: Record<string, unknown> = {}) =>
   ctx.http.post('/api/selection').set(auth(tok[owner])).send({
     name: '选品回归样品',
     category: '家居',
-    supplier: '测试供应商',
-    purchase_price: 8.8,
-    moq: 200,
-    lead_days: 7,
-    est_margin: 0.5,
     source: '市场调研',
+    ...ECON,
     ...over,
   });
 
@@ -69,9 +68,33 @@ describe('登记', () => {
     expect(logs.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('名称必填，毛利率只能 0-1', async () => {
+  it('毛利率与盈亏平衡 ROAS 是推出来的：手填的数字不算数', async () => {
+    // 前端表单不再让填这两个数，但接口必须自己顶住 —— 否则报表里会出现"手算毛利"的第二套口径
+    const res = await register('ops', { est_margin: 0.99, breakeven_roas: 99 });
+    expect(res.status).toBe(200);
+    const data = dataOf<{ id: number; est_margin: number; breakeven_roas: number }>(res.body);
+    expect(Number(data.est_margin)).toBeCloseTo(0.5, 4);
+    expect(Number(data.breakeven_roas)).toBeCloseTo(2, 2);
+    const put = await ctx.http.put(`/api/selection/${data.id}`).set(auth(tok.ops)).send({ est_margin: 0.99 });
+    expect(put.status).toBe(200);
+    const row = get<{ est_margin: number }>(`SELECT est_margin FROM selection_flow WHERE id = ?`, data.id);
+    expect(Number(row?.est_margin)).toBeCloseTo(0.5, 4);
+  });
+
+  it('改返点率会带动毛利率与平衡线；比率填成百分数会被拒', async () => {
+    const id = Number(dataOf<{ id: number }>((await register('ops')).body).id);
+    // 品牌把返点从 60% 调到 30%：毛利 0.5 → 0.2，平衡 ROAS 从 2 抬到 5 —— 投放能不能加预算就是这个数说了算
+    const put = await ctx.http.put(`/api/selection/${id}`).set(auth(tok.ops)).send({ rebate_rate: 0.3 });
+    expect(put.status).toBe(200);
+    const body = dataOf<{ est_margin: number; breakeven_roas: number }>(put.body);
+    expect(Number(body.est_margin)).toBeCloseTo(0.2, 4);
+    expect(Number(body.breakeven_roas)).toBeCloseTo(5, 1);
+    expect((await register('ops', { rebate_rate: 60 })).status).toBe(400);
+    expect((await register('ops', { commission_rate: 1.6 })).status).toBe(400);
+  });
+
+  it('名称必填', async () => {
     expect((await register('ops', { name: '' })).status).toBe(400);
-    expect((await register('ops', { est_margin: 1.6 })).status).toBe(400);
   });
 });
 

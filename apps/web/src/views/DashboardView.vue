@@ -25,7 +25,7 @@
       <el-card v-for="k in kpiCards" :key="k.label" shadow="never" class="kpi">
         <div class="kpi-head">
           <span class="kpi-label">{{ k.label }}</span>
-          <el-tag v-if="k.masked" size="small" type="info">需成本权限</el-tag>
+          <el-tag v-if="k.masked" size="small" type="info">需金额权限</el-tag>
         </div>
         <div class="kpi-value" :class="k.class">{{ k.value }}</div>
         <div class="kpi-sub">{{ k.sub }}</div>
@@ -51,7 +51,7 @@
     <el-row :gutter="16" class="page-card">
       <el-col :span="16">
         <el-card shadow="never">
-          <template #header><b>近 30 天 GMV / 订单趋势</b><span class="head-tip">按店铺站点时区切日（PRD §5.5）</span></template>
+          <template #header><b>近 30 天 带货 GMV / 贡献毛利 / 订单趋势</b><span class="head-tip">按店铺站点时区切日（PRD §5.5）；贡献毛利 = 应收返点 − 物流 − 达人佣金</span></template>
           <div ref="trendEl" class="chart-box" />
         </el-card>
       </el-col>
@@ -68,27 +68,27 @@
     <el-row :gutter="16" class="page-card">
       <el-col :span="12">
         <el-card shadow="never">
-          <template #header><b>店铺 GMV Top 榜</b><el-button link type="primary" style="float: right" @click="goto('/orders')">看订单</el-button></template>
+          <template #header><b>店铺带货 GMV Top 榜</b><span class="head-tip">返点按 SKU 的返点率算，榜单只比带货规模</span><el-button link type="primary" style="float: right" @click="goto('/orders')">看订单</el-button></template>
           <div ref="shopEl" class="chart-box" />
           <el-empty v-if="!(summary?.shop_rank?.length)" :image-size="60" description="没有店铺汇总数据" />
         </el-card>
       </el-col>
       <el-col :span="12">
         <el-card shadow="never">
-          <template #header><b>达人带货 Top 榜</b><el-button link type="primary" style="float: right" @click="goto('/creators/roi')">达人 ROI</el-button></template>
+          <template #header><b>达人带货 Top 榜</b><span class="head-tip">排名按带货 GMV（品牌的生意）；我们赚不赚钱看「投产比」列</span><el-button link type="primary" style="float: right" @click="goto('/creators/roi')">达人 ROI</el-button></template>
           <el-table :data="summary?.creator_rank ?? []" size="small" border stripe :max-height="300" empty-text="暂无归因到达人的成交">
             <el-table-column type="index" label="#" width="46" />
             <el-table-column prop="handle" label="达人" min-width="120" show-overflow-tooltip>
               <template #default="{ row }">@{{ row.handle }}</template>
             </el-table-column>
-            <el-table-column prop="gmv" label="带货 GMV" width="120" align="right">
+            <el-table-column prop="gmv" label="带货 GMV(参考)" width="130" align="right">
               <template #default="{ row }">{{ money(row.gmv) }}</template>
             </el-table-column>
             <el-table-column prop="orders" label="订单" width="80" align="right" />
-            <el-table-column v-if="canSeeCost" prop="cost" label="投入" width="110" align="right">
+            <el-table-column v-if="canSeeCost" prop="cost" label="我方投入" width="110" align="right">
               <template #default="{ row }">{{ mask(row.cost) }}</template>
             </el-table-column>
-            <el-table-column label="ROI" width="150">
+            <el-table-column label="投产比(返点÷投入)" width="170">
               <template #default="{ row }">
                 <span v-if="row.roi === null || row.roi === undefined" class="mask">—</span>
                 <el-progress
@@ -177,11 +177,18 @@ const kpiCards = computed(() => {
   const s = summary.value;
   const roi = canSeeCost.value && s ? (s.ad_roi ?? adRoi(num(s.ad_spend), num(s.ad_gmv))) : null;
   return [
-    { label: 'GMV（净）', value: money(s?.gmv), sub: `退款率 ${pctText(s?.refund_rate)}，退款 ${money(s?.refund_amount)}`, class: '', masked: false },
+    { label: '带货 GMV（净）', value: money(s?.gmv), sub: `退款率 ${pctText(s?.refund_rate)}，退款 ${money(s?.refund_amount)}｜GMV 是品牌的生意`, class: '', masked: false },
     { label: '订单数', value: int(s?.orders), sub: '非取消、非样品单', class: '', masked: false },
-    { label: '预估毛利', value: mask(s?.est_gross_profit), sub: `毛利率 ${canSeeCost.value ? pctText(s?.est_profit_rate) : MASK} · 预估成本 ${mask(s?.est_cost)}`, class: 'profit', masked: !canSeeCost.value },
-    { label: '实际到账', value: mask(s?.settled_amount), sub: '已打款结算流水折算', class: 'profit', masked: !canSeeCost.value },
-    { label: '广告', value: canSeeCost.value ? (roi === null ? '—' : roi.toFixed(2)) : MASK, sub: `消耗 ${mask(s?.ad_spend)} / GMV ${money(s?.ad_gmv)}`, class: '', masked: !canSeeCost.value },
+    { label: '应收返点（我们的收入）', value: mask(s?.est_rebate), sub: '实收 GMV × 品牌返点率；不含货款，货款是品牌垫的', class: 'profit', masked: !canSeeCost.value },
+    {
+      label: '预估贡献毛利',
+      value: mask(s?.est_gross_profit),
+      sub: `贡献毛利率 ${canSeeCost.value ? pctText(s?.est_profit_rate) : MASK} = 返点 − 物流 − 达人佣金；物流支出 ${mask(s?.est_logistics)}`,
+      class: 'profit',
+      masked: !canSeeCost.value,
+    },
+    { label: '实际到账', value: mask(s?.settled_amount), sub: '平台打款结算流水折算（带货口径，不等于我们的收入）', class: 'profit', masked: !canSeeCost.value },
+    { label: '广告', value: canSeeCost.value ? (roi === null ? '—' : roi.toFixed(2)) : MASK, sub: `消耗 ${mask(s?.ad_spend)} / 带货 GMV ${money(s?.ad_gmv)}｜打平线看贡献毛利率`, class: '', masked: !canSeeCost.value },
     { label: '今日直播', value: int(s?.live_today), sub: '今日「已排班」场次数', class: '', masked: false },
   ];
 });
@@ -198,7 +205,7 @@ const todoCards = computed(() => {
     level: TodoLevel,
   ) => ({ label, count: int(count), desc, path, query, level });
   return [
-    item('待映射 SKU', num(s?.unmapped_listings), '未绑定内部 SKU 的商品行不计成本，利润会虚高', '/products/unmapped', { map_status: '2' }, num(s?.unmapped_listings) > 0 ? 'danger' : 'info'),
+    item('未配返点率的店铺商品', num(s?.unmapped_listings), '这些行没配到品牌返点率 → 整体不参与利润（不是 0 利润），看板数字会缺一大块收入', '/products/unmapped', { map_status: '2' }, num(s?.unmapped_listings) > 0 ? 'danger' : 'info'),
     item('待跟进达人', num(s?.creators_to_follow), '到 next_follow_at 或保护期 7 天内到期', '/creators/outreach', { todo: 'to_follow' }, num(s?.creators_to_follow) > 0 ? 'warning' : 'info'),
     item('超期未出内容', num(s?.samples_overdue), '寄样签收后超 7 天未产出内容', '/creators/sample', { status: String(SAMPLE_STATUS.OVERDUE) }, num(s?.samples_overdue) > 0 ? 'danger' : 'info'),
     item('授权即将过期', num(s?.auth_expiring), 'auth_status=即将过期/已过期，同步会跳过', '/shops', { auth_status: '2' }, num(s?.auth_expiring) > 0 ? 'danger' : 'info'),
@@ -226,7 +233,7 @@ function renderCharts(): void {
   trendChart?.setOption(
     {
       tooltip: { trigger: 'axis' },
-      legend: { data: showProfit ? ['GMV', '订单数', '预估毛利'] : ['GMV', '订单数'] },
+      legend: { data: showProfit ? ['带货GMV', '订单数', '预估贡献毛利'] : ['带货GMV', '订单数'] },
       grid: { left: 60, right: 60, top: 40, bottom: 30 },
       xAxis: { type: 'category', data: dates, boundaryGap: false },
       yAxis: [
@@ -235,7 +242,7 @@ function renderCharts(): void {
       ],
       series: [
         {
-          name: 'GMV',
+          name: '带货GMV',
           type: 'line',
           smooth: true,
           showSymbol: false,
@@ -243,7 +250,7 @@ function renderCharts(): void {
           data: trend.map((t) => round2(num(t.gmv))),
         },
         {
-          name: '预估毛利',
+          name: '预估贡献毛利',
           type: 'line',
           smooth: true,
           showSymbol: false,

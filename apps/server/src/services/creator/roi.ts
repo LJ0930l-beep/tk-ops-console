@@ -5,7 +5,9 @@ import { fallbackRateSql } from '../rates.js';
 /**
  * 达人 / 合作单 / BD 投产比（方案 6.1 收尾）
  *
- *   合作投产比 = 带货净 GMV ÷（样品成本 + 寄样运费 + 坑位费 + 达人佣金）
+ *   合作投产比 = 应收返点 ÷（物流 + 寄样运费 + 坑位费 + 达人佣金）
+ *   分子是**我们赚到的返点**，不是带货 GMV —— 那是品牌的生意（旧口径用净 GMV 做分子，
+ *   会让一个"GMV 很大但返点很薄"的达人排到榜首，而他对我们其实是亏钱的）。
  *
  * 口径说明（方案「要点 3」：时间统一 UTC，金额统一人民币）：
  *   - 净 GMV = 归因到该达人 / 该合作单的 tk_order_item.item_amount − 对应行退款，
@@ -13,7 +15,7 @@ import { fallbackRateSql } from '../rates.js';
  *   - 订单金额、退款、预估佣金按订单币种折 CNY，取价顺序与 JS 侧 getRate() 逐条一致：
  *     当日 → 更早最近一条 → 更晚最近一条 → FALLBACK_RATE_TO_CNY 常量；
  *     以前缺价时乘的是 COALESCE(rate, 1)，等于把 1 USD 当 1 CNY，达人 ROI 会整体失真；
- *   - sample_cost / shipping_cost / expense.amount_cny 本身已是 CNY，不再乘汇率。
+ *   - rebate_cny / logistics_cny 是成交时冻结的人民币，shipping_cost 与 expense.amount_cny 落库即 CNY，都不再乘汇率。
  *
  * 归因两条路径（tk_order_item 上没有 collab_id，达人可来自明细也来自视频）：
  *   1) tk_order_item.content_id = video.tk_video_id → video.creator_id / video.collab_id
@@ -129,16 +131,22 @@ function attrSql(key: AttrKey): string {
   return `${byColumn} UNION ${byContent}`;
 }
 
-/** 按归因对象聚合的净收入 / 佣金（人民币） */
+/** 按归因对象聚合的净收入 / 应收返点 / 物流 / 佣金（人民币） */
 function incomeSql(key: AttrKey, period: PeriodRange): string {
   const where: string[] = [];
   if (period.from) where.push(`substr(o.order_time, 1, 10) >= ${lit(period.from)}`);
   if (period.to) where.push(`substr(o.order_time, 1, 10) <= ${lit(period.to)}`);
+  // 未配返点率的行整行剔除：分子没有它的返点，分母也不能有它的佣金与物流 ——
+  // 只剔一边的话 ROI 会被系统性压低（与 profit.ts 的 buildCells、analytics.ts 同一口径）。
+  // 拿 0 参与除法、或猜一个比率，两种都错，所以整行不进统计。
+  const M = 'i.rebate_matched = 1';
   return `SELECT k.key_id AS key_id,
                  SUM(${AMOUNT_CNY}) AS gmv_cny,
                  SUM(${REFUND_CNY}) AS refund_cny,
-                 SUM(${COMMISSION_CNY}) AS commission_cny,
-                 COUNT(DISTINCT CASE WHEN i.item_amount > 0 THEN o.id END) AS orders
+                 SUM(CASE WHEN ${M} THEN i.rebate_cny ELSE 0 END) AS rebate_cny,
+                 SUM(CASE WHEN ${M} THEN i.logistics_cny ELSE 0 END) AS logistics_cny,
+                 SUM(CASE WHEN ${M} THEN ${COMMISSION_CNY} ELSE 0 END) AS commission_cny,
+                 COUNT(DISTINCT CASE WHEN ${M} AND i.item_amount > 0 THEN o.id END) AS orders
             FROM (${attrSql(key)}) k
             JOIN tk_order_item i ON i.id = k.item_id
             JOIN tk_order o ON o.id = i.order_id
@@ -149,10 +157,10 @@ function incomeSql(key: AttrKey, period: PeriodRange): string {
 }
 
 /**
- * 寄样成本（人民币）：sample_cost 登记时即按「单件成本 × 数量」冻结为总额（prd 3.5），
- * 因此汇总时不再乘 quantity。按合作单归集。
+ * 寄样支出（人民币）：只有运费是我们掏的钱 —— 样品货值是品牌出的，
+ * `sample_shipment.sample_cost` 这一列已随采购口径一起删掉，别再想把它加回来。
  */
-const SAMPLE_COST_BY_COLLAB = `SELECT s.collab_id AS collab_id, SUM(s.sample_cost) AS sample_cost,
+const SAMPLE_COST_BY_COLLAB = `SELECT s.collab_id AS collab_id,
                                        SUM(s.shipping_cost) AS shipping_cost
                                   FROM sample_shipment s WHERE s.is_deleted = 0 AND s.collab_id IS NOT NULL
                                  GROUP BY s.collab_id`;
@@ -184,10 +192,14 @@ export interface RoiRow {
   gmv_cny: number;
   refund_cny: number;
   net_gmv_cny: number;
-  sample_cost: number;
+  /** 应收返点（人民币）：这一档生意里我们真正赚到的钱 */
+  rebate_cny: number;
+  /** 明细物流支出（人民币，冻结值之和） */
+  logistics_cny: number;
   sample_shipping: number;
   fixed_fee_cny: number;
   commission_cny: number;
+  /** 我们的全部投入 = 物流 + 寄样运费 + 坑位费 + 达人佣金 */
   cost: number;
   roi: number | null;
 }
@@ -206,28 +218,35 @@ export function roiByCreator(opts: { period: PeriodRange; scopeSql?: string; sco
            COALESCE(inc.orders, 0) AS orders,
            COALESCE(inc.gmv_cny, 0) AS gmv_cny,
            COALESCE(inc.refund_cny, 0) AS refund_cny,
-           COALESCE(sc.sample_cost, 0) AS sample_cost,
+           COALESCE(inc.rebate_cny, 0) AS rebate_cny,
+           COALESCE(inc.logistics_cny, 0) AS logistics_cny,
            COALESCE(sc.shipping_cost, 0) AS sample_shipping,
            COALESCE(fee.fixed_fee_cny, 0) AS fixed_fee_cny,
            COALESCE(inc.commission_cny, 0) AS commission_cny
       FROM creator c
       LEFT JOIN sys_user u ON u.id = c.owner_id
       LEFT JOIN (${incomeSql('creator', opts.period)}) inc ON inc.key_id = c.id
-      LEFT JOIN (SELECT s.creator_id AS creator_id, SUM(s.sample_cost) AS sample_cost,
+      LEFT JOIN (SELECT s.creator_id AS creator_id,
                         SUM(s.shipping_cost) AS shipping_cost
                    FROM sample_shipment s WHERE s.is_deleted = 0 GROUP BY s.creator_id) sc ON sc.creator_id = c.id
       LEFT JOIN (SELECT l.creator_id AS creator_id, SUM(${COLLAB_FEE_CNY}) AS fixed_fee_cny
                    FROM collaboration l WHERE l.is_deleted = 0
                     ${periodWhere('l.created_at', opts.period, '')} GROUP BY l.creator_id) fee ON fee.creator_id = c.id
      WHERE c.is_deleted = 0 ${scope ? `AND ${scope}` : ''}
-     ORDER BY gmv_cny DESC, c.id ASC
+     ORDER BY rebate_cny DESC, c.id ASC
      LIMIT ${Math.min(500, Math.max(1, opts.limit ?? 100))}`;
   const rows = all<Record<string, unknown>>(sql, ...(opts.scopeParams ?? []));
-  return rows.map((r) => finishRoi(r));
+  // 先按"我们赚到的返点"取前 N（SQL 里排不了 JS 才算得出的 ROI），再按 ROI 从高到低排名；
+  // 名字叫 ROI 排行就得真按 ROI 排，否则榜单第一行永远是大 GMV 的薄利达人。
+  return rows.map((r) => finishRoi(r)).sort(byRoi);
 }
 
+/** 投产比降序；算不出 ROI（没有投入可除）的排最后 */
+const byRoi = (a: { roi: number | null }, b: { roi: number | null }): number => (b.roi ?? -1) - (a.roi ?? -1);
+
 function finishRoi(r: Record<string, unknown>): RoiRow {
-  const sample_cost = round2(num(r.sample_cost));
+  const rebate_cny = round2(num(r.rebate_cny));
+  const logistics_cny = round2(num(r.logistics_cny));
   const sample_shipping = round2(num(r.sample_shipping));
   const fixed_fee_cny = round2(num(r.fixed_fee_cny));
   const commission_cny = round2(num(r.commission_cny));
@@ -245,12 +264,13 @@ function finishRoi(r: Record<string, unknown>): RoiRow {
     gmv_cny: round2(num(r.gmv_cny)),
     refund_cny: round2(num(r.refund_cny)),
     net_gmv_cny,
-    sample_cost,
+    rebate_cny,
+    logistics_cny,
     sample_shipping,
     fixed_fee_cny,
     commission_cny,
-    cost: round2(sample_cost + sample_shipping + fixed_fee_cny + commission_cny),
-    roi: collabRoi({ net_gmv_cny, sample_cost, sample_shipping, fixed_fee_cny, commission_cny }),
+    cost: round2(logistics_cny + sample_shipping + fixed_fee_cny + commission_cny),
+    roi: collabRoi({ rebate_cny, sample_shipping, fixed_fee_cny, commission_cny, logistics_cny }),
   };
 }
 
@@ -271,7 +291,8 @@ export function roiByCollab(collabId: number, period: PeriodRange = { from: '', 
            COALESCE(inc.orders, 0) AS orders,
            COALESCE(inc.gmv_cny, 0) AS gmv_cny,
            COALESCE(inc.refund_cny, 0) AS refund_cny,
-           COALESCE(sc.sample_cost, 0) AS sample_cost,
+           COALESCE(inc.rebate_cny, 0) AS rebate_cny,
+           COALESCE(inc.logistics_cny, 0) AS logistics_cny,
            COALESCE(sc.shipping_cost, 0) AS sample_shipping,
            COALESCE(${COLLAB_FEE_CNY}, 0) AS fixed_fee_cny,
            COALESCE(inc.commission_cny, 0) AS commission_cny
@@ -301,7 +322,8 @@ export function roiByCollabRank(opts: { period: PeriodRange; scopeSql?: string; 
            COALESCE(inc.orders, 0) AS orders,
            COALESCE(inc.gmv_cny, 0) AS gmv_cny,
            COALESCE(inc.refund_cny, 0) AS refund_cny,
-           COALESCE(sc.sample_cost, 0) AS sample_cost,
+           COALESCE(inc.rebate_cny, 0) AS rebate_cny,
+           COALESCE(inc.logistics_cny, 0) AS logistics_cny,
            COALESCE(sc.shipping_cost, 0) AS sample_shipping,
            COALESCE(${COLLAB_FEE_CNY}, 0) AS fixed_fee_cny,
            COALESCE(inc.commission_cny, 0) AS commission_cny
@@ -311,7 +333,7 @@ export function roiByCollabRank(opts: { period: PeriodRange; scopeSql?: string; 
       LEFT JOIN (${incomeSql('collab', opts.period)}) inc ON inc.key_id = l.id
       LEFT JOIN (${SAMPLE_COST_BY_COLLAB}) sc ON sc.collab_id = l.id
      WHERE l.is_deleted = 0 ${scope ? `AND ${scope}` : ''}
-     ORDER BY gmv_cny DESC, l.id ASC
+     ORDER BY rebate_cny DESC, l.id ASC
      LIMIT ${Math.min(500, Math.max(1, opts.limit ?? 100))}`;
   return all<Record<string, unknown>>(sql, ...(opts.scopeParams ?? [])).map((r) => ({
     ...finishRoi(r),
@@ -319,7 +341,7 @@ export function roiByCollabRank(opts: { period: PeriodRange; scopeSql?: string; 
     collab_no: String(r.collab_no),
     status: Number(r.status),
     coop_type: Number(r.coop_type),
-  }));
+  })).sort(byRoi);
 }
 
 export interface BdRow {
@@ -333,6 +355,8 @@ export interface BdRow {
   collab_cnt: number;
   creator_cnt: number;
   net_gmv_cny: number;
+  /** 这个 BD 名下达人带来的应收返点（我们真正赚到的钱） */
+  rebate_cny: number;
   cost_cny: number;
   roi: number | null;
 }
@@ -354,14 +378,18 @@ export function bdPerformance(opts: { period: PeriodRange; scopeSql?: string; sc
            (SELECT COUNT(*) FROM collaboration l WHERE l.owner_id = u.id AND l.is_deleted = 0) AS collab_cnt,
            (SELECT COUNT(DISTINCT l.creator_id) FROM collaboration l WHERE l.owner_id = u.id AND l.is_deleted = 0) AS creator_cnt,
            COALESCE(inc.net_gmv_cny, 0) AS net_gmv_cny,
-           COALESCE(sc.sample_cost, 0) + COALESCE(sc.shipping_cost, 0) + COALESCE(fee.fixed_fee_cny, 0)
-             + COALESCE(inc.commission_cny, 0) AS cost_cny
+           COALESCE(inc.rebate_cny, 0) AS rebate_cny,
+           COALESCE(inc.logistics_cny, 0) AS logistics_cny,
+           COALESCE(sc.shipping_cost, 0) AS sample_shipping,
+           COALESCE(fee.fixed_fee_cny, 0) AS fixed_fee_cny,
+           COALESCE(inc.commission_cny, 0) AS commission_cny
       FROM sys_user u
       LEFT JOIN (SELECT c.owner_id AS owner_id, SUM(x.gmv_cny - x.refund_cny) AS net_gmv_cny,
+                        SUM(x.rebate_cny) AS rebate_cny, SUM(x.logistics_cny) AS logistics_cny,
                         SUM(x.commission_cny) AS commission_cny
                    FROM creator c JOIN (${incomeSql('creator', p)}) x ON x.key_id = c.id
                   WHERE c.is_deleted = 0 AND c.owner_id IS NOT NULL GROUP BY c.owner_id) inc ON inc.owner_id = u.id
-      LEFT JOIN (SELECT c2.owner_id AS owner_id, SUM(s.sample_cost) AS sample_cost,
+      LEFT JOIN (SELECT c2.owner_id AS owner_id,
                         SUM(s.shipping_cost) AS shipping_cost
                    FROM sample_shipment s JOIN creator c2 ON c2.id = s.creator_id
                   WHERE s.is_deleted = 0 AND c2.is_deleted = 0 AND c2.owner_id IS NOT NULL GROUP BY c2.owner_id) sc ON sc.owner_id = u.id
@@ -378,7 +406,12 @@ export function bdPerformance(opts: { period: PeriodRange; scopeSql?: string; sc
   return all<Record<string, unknown>>(sql, ...(opts.scopeParams ?? [])).map((r) => {
     const outreach = Number(r.outreach_cnt ?? 0);
     const replied = Number(r.replied_cnt ?? 0);
-    const cost_cny = round2(num(r.cost_cny));
+    const logistics_cny = round2(num(r.logistics_cny));
+    const sample_shipping = round2(num(r.sample_shipping));
+    const fixed_fee_cny = round2(num(r.fixed_fee_cny));
+    const commission_cny = round2(num(r.commission_cny));
+    const rebate_cny = round2(num(r.rebate_cny));
+    const cost_cny = round2(logistics_cny + sample_shipping + fixed_fee_cny + commission_cny);
     const net_gmv_cny = round2(num(r.net_gmv_cny));
     return {
       user_id: Number(r.user_id),
@@ -391,8 +424,10 @@ export function bdPerformance(opts: { period: PeriodRange; scopeSql?: string; sc
       collab_cnt: Number(r.collab_cnt ?? 0),
       creator_cnt: Number(r.creator_cnt ?? 0),
       net_gmv_cny,
+      rebate_cny,
       cost_cny,
-      roi: collabRoi({ net_gmv_cny, sample_cost: 0, sample_shipping: 0, fixed_fee_cny: cost_cny, commission_cny: 0 }),
+      // BD 的投产比同样看"我们赚回的返点 ÷ 我们花出去的钱"，不是带货 GMV ÷ 投入
+      roi: collabRoi({ rebate_cny, sample_shipping, fixed_fee_cny, commission_cny, logistics_cny }),
     };
   });
 }

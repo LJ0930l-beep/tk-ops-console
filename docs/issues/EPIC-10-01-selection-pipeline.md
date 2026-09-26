@@ -18,7 +18,7 @@ status: 已交付（2026-09-25）
 
 ## 具体任务
 
-1. 数据层：`selection_flow`（一个候选品一行，含阶段/停留/结论/快照/清单）与 `selection_log`（阶段流转日志），
+1. 数据层：`selection_flow`（一个候选品一行，含阶段/停留/结论/快照/清单 + 品牌方/建议售价/计划折扣/返点率/佣金率/物流费率）与 `selection_log`（阶段流转日志），
    两份方言 DDL 同步维护，公共字段约定不缺（`tests/schema-drift.spec.ts` 校验）。
 2. 后端 `apps/server/src/modules/selection.routes.ts`：列表/看板/漏斗/详情/日志/导出 + 登记、编辑、
    流转、提交结论、结论落地、清单六个写接口。三道闸门全部在服务端：状态机边表、结论必须带 7 个指标、
@@ -29,6 +29,10 @@ status: 已交付（2026-09-25）
 4. 前端 `views/selection/SelectionBoard.vue`：五列看板（卡片左边框＝后端算好的超时档位）+ 顶部四步漏斗 +
    候选品列表 + 淘汰池三个页签；流转目标阶段由详情接口的 `next_stages` 驱动，前端不抄第二份状态机。
 5. 演示数据：14 个候选品铺满六个阶段，每阶段刻意做出 绿/黄/红 三档停留时长，含 2 个写了原因的淘汰。
+
+**2026-09-25 口径跟手改**：全站从「自采自卖」换成「品牌服务方」之后，登记的经济账不再是
+供应商 / 采购价 / 起订量 / 交货周期，而是 品牌方 / 建议售价 / 计划折扣 / 品牌返点率 / 计划达人佣金率 / 计划物流费率；
+`est_margin` 与 `breakeven_roas` 改成后端推导值（`返点率 − 佣金率 − 物流费率`、`1 / 该值`），界面只读、手填不认。
 
 ## 涉及文件
 
@@ -44,6 +48,7 @@ status: 已交付（2026-09-25）
 | --- | --- | --- |
 | `POST /api/selection/:id/stage` `to_stage=4`（当前在阶段 1） | `400 不允许从「商品选品登记」直接到「销售前准备」` | 状态机边表外一律拒 |
 | `POST /api/selection/:id/stage` `to_stage=3` | `400 测试结论请走「提交测试结论」接口，需要携带数据快照` | 且 `next_stages` 不报这条边，前端不给按钮 |
+| `POST /api/selection` `rebate_rate=60` | `400 品牌返点率要用小数填写：0.18 = 18%` | 三个费率任一变化都重算 `est_margin` 与 `breakeven_roas`，手填这两个值不认 |
 | `POST /api/selection/:id/conclusion`（快照缺 `impressions/cvr`） | `400 测试数据快照缺少指标：impressions / cvr` | 「没有数据支撑的结论应拒绝提交」 |
 | `POST /api/selection/:id/stage` `to_stage=5`（清单差 3 项） | `400 销售前准备清单未完成，不能转正常销售。未完成：库存确认、财务确认、合规确认` | 点名缺哪几项 |
 | `PUT /api/selection/:id` 带 `stage` / `conclusion` | `200`，但两字段被剔除 | 状态只能走流转接口，否则日志会缺一条 |

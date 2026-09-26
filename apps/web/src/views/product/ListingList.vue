@@ -18,7 +18,7 @@
           <el-button v-if="canWrite" :icon="MagicStick" :loading="matching" @click="openMatch">按 seller_sku 自动匹配</el-button>
           <ImportDialog v-if="canWrite" table="shop_listing" button-text="导入店铺商品" @done="rp?.reload()" />
           <router-link to="/products/unmapped"><el-button :icon="Warning" plain type="danger" size="small">待映射清单</el-button></router-link>
-          <span class="tip">本页待映射 {{ unmappedInPage }} 条；待映射行整行黄底，不参与成本与利润。</span>
+          <span class="tip">本页待映射 {{ unmappedInPage }} 条；待映射行整行黄底，不计返点、不进利润（不是 0 利润）。</span>
         </div>
       </template>
 
@@ -67,7 +67,7 @@
           </el-select>
         </el-form-item>
       </el-form>
-      <span class="tip">绑定后该行才计入成本与利润；解绑请清空 SKU 后保存。</span>
+      <span class="tip">绑定 SKU 后这一行才带得出品牌返点率，才会进利润；解绑请清空 SKU 后保存。</span>
       <template #footer>
         <el-button @click="bindVisible = false">取消</el-button>
         <el-button type="primary" :loading="binding" @click="doBind">保存绑定</el-button>

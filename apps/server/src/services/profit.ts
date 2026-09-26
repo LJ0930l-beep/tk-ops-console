@@ -2,14 +2,17 @@
  * 利润引擎 —— 全系统唯一利润口径来源（方案 6.2「订单到利润」+ 设计要点 1 / 要点 3）
  *
  * 口径定义（要改口径只改这个文件，路由与别的 SQL 里不允许另起一套）：
- *  1. 预估口径：明细实收 item_amount（店铺币种）× 报表自然日汇率 − cost_snapshot（本身已是人民币）
- *     − est_commission（店铺币种折人民币）。预估毛利逐行调 shared/estItemProfitCny()，与前端同一算法。
+ *  1. 我们是**品牌服务方**：货是品牌的，我们不出货款。唯一收入是品牌给的返点 ——
+ *     明细实收 item_amount（店铺币种）× 报表自然日汇率 × 成交时冻结的 rebate_rate = rebate_cny（人民币）。
+ *     我们的支出是 logistics_cny（头程/海外仓，若品牌承担则为 0）+ est_commission（达人佣金，折人民币）。
+ *     预估毛利 = 返点 − 物流 − 达人佣金，逐行调 shared/estItemProfitCny()，与前端同一算法。
  *  2. 实际口径：settlement_txn 才是平台真正打的钱。同一订单全部流水类型求和（订单收入 − 平台佣金 − 达人佣金
  *     − 运费 + 补贴 + 退款 + 调整）× 结算日汇率 = 结算实收。有结算流水的订单走结算口径，没有的走预估口径
  *     并标 is_estimated=1；两套并存互不覆盖，可逐单对账（reconcileByOrder）。
- *  3. 成本只读 tk_order_item.cost_snapshot，绝不回查 product_sku 当前成本（改成本价不改历史利润）。
- *  4. cost_matched=0（未映射 SKU）的订单行不进利润统计（连 GMV 一起剔），只出 warn 计数 ——
- *     按 0 成本混进来会让利润虚高（要点 1）。
+ *  3. 返点与物流只读 tk_order_item 的冻结列（rebate_rate/rebate_cny/logistics_cny），
+ *     绝不回查 product_sku 的当前返点率 —— 事后改协议不许改写历史利润。
+ *  4. rebate_matched=0（这一行没配到品牌返点率）的订单行不进利润统计（连 GMV 一起剔），只出 warn 计数 ——
+ *     拿 0 混进来会把有收入的生意算成亏本，反过来猜一个比率更是无中生有（要点 1）。
  *  5. 达人免费样品单 is_sample_order=1 不计 GMV；取消单 CANCELLED 不计 GMV 也不计成本。
  *  6. 切日：order_time 存 UTC，报表按**店铺已保存的 IANA 时区**归自然日（shared statDateInZone，含夏令时）；
  *     时区不可用时才退回 REGION_TZ_OFFSET 固定偏移。
@@ -168,9 +171,15 @@ interface ItemFact {
   quantity: number;
   amount_src: number;
   amount_cny: number;
-  cost_cny: number;
+  /** 冻结的返点率（原样带出去给前端/导出看，别用金额反除——精度会丢） */
+  rebate_rate: number;
+  /** 冻结的应收返点（人民币） */
+  rebate_cny: number;
+  /** 冻结的物流支出（人民币） */
+  logistics_cny: number;
   commission_src: number;
   commission_cny: number;
+  /** 贡献毛利 = 返点 − 物流 − 达人佣金（未扣广告与期间费用） */
   gross_cny: number;
   matched: boolean;
 }
@@ -192,10 +201,11 @@ interface OrderFact {
   total_paid_src: number;
   total_paid_cny: number;
   items: ItemFact[];
-  /** 参与统计的明细（cost_matched=1）合计，人民币 */
+  /** 参与统计的明细（rebate_matched=1）合计，人民币 */
   gmv_src: number;
   gmv_cny: number;
-  cost_cny: number;
+  rebate_cny: number;
+  logistics_cny: number;
   commission_src: number;
   commission_cny: number;
   gross_cny: number;
@@ -232,6 +242,12 @@ export interface ProfitWarn {
   unsettled_orders: number;
   rate_missing: boolean;
   rate_missing_currencies: string[];
+  /**
+   * 物流可能被记了两次：SKU 上的单件物流成本（已逐行冻结进 `logistics_cny`）与费用表里的
+   * 「头程物流 / 海外仓费」常常是同一笔钱。两边同时有数时不猜、不自动抵扣，只把重叠金额报出来，
+   * 让运营自己选边（要么 SKU 填成本、费用不再重复记；要么 SKU 填 0、物流走期间费用）。
+   */
+  logistics_overlap_cny: number;
 }
 
 export interface ProfitFacts {
@@ -263,7 +279,8 @@ const newOrderFact = (
   items: [],
   gmv_src: 0,
   gmv_cny: 0,
-  cost_cny: 0,
+  rebate_cny: 0,
+  logistics_cny: 0,
   commission_src: 0,
   commission_cny: 0,
   gross_cny: 0,
@@ -298,7 +315,7 @@ export function loadFacts(f: ProfitFilter = {}): ProfitFacts {
   const rows = all<Record<string, number | string | null>>(
     `SELECT o.id AS order_id, o.tk_order_id, o.shop_id, s.shop_name, s.region, s.timezone, o.currency, o.order_status,
             o.is_sample_order, o.order_time, o.total_paid, o.shipping_fee,
-            i.id AS item_id, i.sku_id, i.quantity, i.item_amount, i.cost_snapshot, i.cost_matched,
+            i.id AS item_id, i.sku_id, i.quantity, i.item_amount, i.rebate_rate, i.rebate_cny, i.logistics_cny, i.rebate_matched,
             i.creator_id, i.content_type, i.est_commission,
             sk.spu_id, sk.sku_code, sk.spec, sp.name_cn AS spu_name, sp.spu_code
        FROM tk_order o
@@ -331,9 +348,9 @@ export function loadFacts(f: ProfitFilter = {}): ProfitFacts {
     o.total_paid_cny = round2(o.total_paid_src * info.rate);
     if (info.missing) o.rate_missing = true;
 
-    const matched = Number(r.cost_matched) === 1;
+    const matched = Number(r.rebate_matched) === 1;
     const amountSrc = num(r.item_amount);
-    const costSrc = num(r.cost_snapshot);
+    const rebateRate = num(r.rebate_rate);
     const commissionSrc = num(r.est_commission);
     const item: ItemFact = {
       item_id: Number(r.item_id),
@@ -346,18 +363,23 @@ export function loadFacts(f: ProfitFilter = {}): ProfitFacts {
       quantity: num(r.quantity),
       amount_src: amountSrc,
       amount_cny: round2(amountSrc * info.rate),
-      cost_cny: round2(costSrc),
+      rebate_rate: rebateRate,
+      rebate_cny: round2(num(r.rebate_cny)),
+      logistics_cny: round2(num(r.logistics_cny)),
       commission_src: commissionSrc,
       commission_cny: round2(commissionSrc * info.rate),
       gross_cny: 0,
       matched,
     };
-    // 预估毛利只调 shared 的那一个函数（前后端同一算法）
+    // 预估毛利只调 shared 的那一个函数（前后端同一算法）。
+    // 用成交时冻结的 rebate_rate 现算，与快照 rebate_cny 相等 —— 两边取的都是"业务发生当日"汇率；
+    // 若某天汇率被改，报表毛利与快照会差一个汇率差，那是数据事件，不该由利润公式悄悄抹平。
     item.gross_cny = matched
       ? estItemProfitCny({
           item_amount: amountSrc,
           currency: o.currency,
-          cost_snapshot: costSrc,
+          rebate_rate: rebateRate,
+          logistics_cny: item.logistics_cny,
           est_commission: commissionSrc,
           commission_currency: o.currency,
           rate_to_cny: info.rate,
@@ -372,7 +394,8 @@ export function loadFacts(f: ProfitFilter = {}): ProfitFacts {
     }
     o.gmv_src = round2(o.gmv_src + amountSrc);
     o.gmv_cny = round2(o.gmv_cny + item.amount_cny);
-    o.cost_cny = round2(o.cost_cny + item.cost_cny);
+    o.rebate_cny = round2(o.rebate_cny + item.rebate_cny);
+    o.logistics_cny = round2(o.logistics_cny + item.logistics_cny);
     o.commission_src = round2(o.commission_src + commissionSrc);
     o.commission_cny = round2(o.commission_cny + item.commission_cny);
     o.gross_cny = round2(o.gross_cny + item.gross_cny);
@@ -400,6 +423,7 @@ export function loadFacts(f: ProfitFilter = {}): ProfitFacts {
     unsettled_orders: 0,
     rate_missing: false,
     rate_missing_currencies: [],
+    logistics_overlap_cny: 0,
   };
   const orders: OrderFact[] = [];
   const excluded: OrderFact[] = [];
@@ -425,6 +449,19 @@ export function loadFacts(f: ProfitFilter = {}): ProfitFacts {
   excluded.sort((a, b) => (a.day === b.day ? a.order_id - b.order_id : a.day < b.day ? -1 : 1));
   warn.rate_missing_currencies = conv.missingCurrencies();
   warn.rate_missing = warn.rate_missing_currencies.length > 0;
+  // 物流双记守卫：SKU 上的单件物流成本（已逐行冻结进 logistics_cny）与费用表里的
+  // 「头程物流 / 海外仓费」经常是同一笔钱的两种记法。引擎不猜哪边是对的，
+  // 两边都有数时把重叠额报出来，由报表顶部说清楚、运营自己选边 —— 静默扣两次或静默漏一笔都更糟。
+  const skuLogisticsCny = round2(orders.reduce((a, o) => a + o.logistics_cny, 0));
+  if (skuLogisticsCny > 0) {
+    const period = get<{ c: number | string }>(
+      `SELECT ROUND(COALESCE(SUM(e.amount_cny), 0), 2) AS c FROM expense e
+        WHERE e.is_deleted = 0 AND e.expense_type IN (2, 3) AND e.expense_date BETWEEN ? AND ?`,
+      range.start,
+      range.end,
+    );
+    warn.logistics_overlap_cny = round2(Math.min(skuLogisticsCny, num(period?.c)));
+  }
   return { orders, excluded, range, warn };
 }
 
@@ -493,7 +530,10 @@ function attachSettlements(map: Map<number, OrderFact>, scope: { sql: string; pa
 interface Side {
   gmv: number;
   refund: number;
-  cost: number;
+  /** 应收返点（人民币，冻结快照之和）—— 我们唯一收入 */
+  rebate: number;
+  /** 物流支出（人民币，头程/海外仓） */
+  logistics: number;
   commission: number;
   gross: number;
   income: number;
@@ -519,7 +559,7 @@ interface Cell {
   rateMissing: boolean;
 }
 
-const side = (): Side => ({ gmv: 0, refund: 0, cost: 0, commission: 0, gross: 0, income: 0, paid: 0, pending: 0, orders: new Set<string>() });
+const side = (): Side => ({ gmv: 0, refund: 0, rebate: 0, logistics: 0, commission: 0, gross: 0, income: 0, paid: 0, pending: 0, orders: new Set<string>() });
 
 const newCell = (key: string, name: string): Cell => ({
   key,
@@ -602,7 +642,8 @@ function buildCells(dim: ProfitDim, facts: ProfitFacts, names: NameBook): Cell[]
       c.rateMissing = c.rateMissing || o.rate_missing;
       const s = settled ? c.set : c.est;
       s.gmv += i.amount_cny;
-      s.cost += i.cost_cny;
+      s.rebate += i.rebate_cny;
+      s.logistics += i.logistics_cny;
       s.gross += i.gross_cny;
       s.commission += settled ? 0 : i.commission_cny;
       s.orders.add(o.tk_order_id);
@@ -762,10 +803,14 @@ function rowOf(c: Cell): ProfitCellRow {
   const gmv = c.est.gmv + c.set.gmv;
   const refund = c.est.refund + c.set.refund;
   const net_gmv = gmv - refund;
-  const cost = c.est.cost + c.set.cost;
+  const rebate = c.est.rebate + c.set.rebate;
+  const logistics = c.est.logistics + c.set.logistics;
   const commission = c.est.commission + c.set.commission;
   const settled = c.set.income;
-  const profit = c.est.gmv - c.est.refund - c.est.commission + settled - cost - c.ad - c.expense;
+  // 我们的利润 = 应收返点 − 物流 − 达人佣金 − 广告 − 期间费用。
+  // 平台结算实收 settled 是打到品牌店里的钱，不再当收入加进我们的利润，只单独出列供对账；
+  // 预估/实际两套的差异因此只体现在"支出侧准不准"，而不是"收入算谁的"。
+  const profit = rebate - logistics - commission - c.ad - c.expense;
   const orders = c.est.orders.size + c.set.orders.size;
   return {
     dim_key: c.key,
@@ -774,7 +819,8 @@ function rowOf(c: Cell): ProfitCellRow {
     gmv: round2(gmv),
     refund: round2(refund),
     net_gmv: round2(net_gmv),
-    cost: round2(cost),
+    rebate: round2(rebate),
+    logistics: round2(logistics),
     commission: round2(commission),
     ad_spend: round2(c.ad),
     expense: round2(c.expense),
@@ -787,7 +833,7 @@ function rowOf(c: Cell): ProfitCellRow {
     settled_pending: round2(c.set.pending),
     ad_gmv: round2(c.adGmv),
     gross_profit: round2(c.est.gross + c.set.gross),
-    gross_after_ad: round2(net_gmv - cost - commission - c.ad),
+    gross_after_ad: round2(rebate - logistics - commission - c.ad),
     settled_orders: c.set.orders.size,
     estimated_orders: c.est.orders.size,
     unmapped_items: c.unmappedItems,
@@ -805,7 +851,8 @@ function sumCells(cells: Cell[]): Cell {
     for (const s of ['est', 'set'] as const) {
       acc[s].gmv += c[s].gmv;
       acc[s].refund += c[s].refund;
-      acc[s].cost += c[s].cost;
+      acc[s].rebate += c[s].rebate;
+      acc[s].logistics += c[s].logistics;
       acc[s].commission += c[s].commission;
       acc[s].gross += c[s].gross;
       acc[s].income += c[s].income;
@@ -903,7 +950,10 @@ export interface OrderProfitBreakdown {
   refund_src: number;
   refund_cny: number;
   net_gmv_cny: number;
-  cost_cny: number;
+  /** 应收返点合计（人民币，逐行冻结值之和） */
+  rebate_cny: number;
+  /** 物流支出合计（人民币） */
+  logistics_cny: number;
   commission_src: number;
   commission_cny: number;
   gross_profit_cny: number;
@@ -931,11 +981,14 @@ export interface OrderProfitBreakdown {
     quantity: number;
     item_amount_src: number;
     item_amount_cny: number;
-    cost_cny: number;
+    rebate_rate: number;
+    rebate_cny: number;
+    logistics_cny: number;
     commission_src: number;
     commission_cny: number;
     gross_profit_cny: number;
-    cost_matched: 0 | 1;
+    /** 0 = 这一行没配到品牌返点率：不计入任何利润口径（counted 恒为 0） */
+    rebate_matched: 0 | 1;
     counted: 0 | 1;
   }[];
 }
@@ -979,9 +1032,11 @@ export function computeOrderProfit(orderId: number): OrderProfitBreakdown {
   const ad_spend_cny = charge(adPool);
   const expense_cny = charge(expensePool);
 
-  const profit = o.has_settlement
-    ? o.settled_cny - o.cost_cny - ad_spend_cny - expense_cny
-    : o.net_gmv_cny - o.commission_cny - o.cost_cny - ad_spend_cny - expense_cny;
+  // 我们的利润 = 应收返点 − 物流 − 达人佣金 − 广告 − 期间费用。
+  // 有结算流水时支出侧改用平台实际扣掉的达人佣金，收入侧仍用成交时冻结的返点：
+  // 结算实收是打进品牌店的钱，不能算成我们的收入（那是自采口径的算法，会把同一笔钱记两遍）。
+  const commissionPaid = o.has_settlement ? o.settled_commission_cny : o.commission_cny;
+  const profit = o.rebate_cny - o.logistics_cny - commissionPaid - ad_spend_cny - expense_cny;
 
   return {
     order_id: o.order_id,
@@ -1005,7 +1060,8 @@ export function computeOrderProfit(orderId: number): OrderProfitBreakdown {
     refund_src: o.refund_src,
     refund_cny: o.refund_cny,
     net_gmv_cny: o.net_gmv_cny,
-    cost_cny: o.cost_cny,
+    rebate_cny: o.rebate_cny,
+    logistics_cny: o.logistics_cny,
     commission_src: o.commission_src,
     commission_cny: o.commission_cny,
     gross_profit_cny: o.gross_cny,
@@ -1038,11 +1094,13 @@ export function computeOrderProfit(orderId: number): OrderProfitBreakdown {
       quantity: i.quantity,
       item_amount_src: i.amount_src,
       item_amount_cny: i.amount_cny,
-      cost_cny: i.cost_cny,
+      rebate_rate: i.rebate_rate,
+      rebate_cny: i.rebate_cny,
+      logistics_cny: i.logistics_cny,
       commission_src: i.commission_src,
       commission_cny: i.commission_cny,
       gross_profit_cny: i.gross_cny,
-      cost_matched: i.matched ? 1 : 0,
+      rebate_matched: i.matched ? 1 : 0,
       counted: i.matched ? 1 : 0,
     })),
   };
@@ -1069,7 +1127,8 @@ export interface ReconcileRow {
   est_income_cny: number;
   est_commission_src: number;
   est_commission_cny: number;
-  cost_cny: number;
+  rebate_cny: number;
+  logistics_cny: number;
   refund_cny: number;
   settled_src: number;
   settled_cny: number;
@@ -1136,7 +1195,7 @@ export function reconcileByOrder(f: ProfitFilter = {}): ReconcileResult {
   const list: ReconcileRow[] = allOrders.map((o) => {
     const t = (type: number): number => o.settle_by_type[type] ?? 0;
     const diff = round2(o.settled_cny - o.total_paid_cny);
-    const estProfit = round2(o.net_gmv_cny - o.commission_cny - o.cost_cny);
+    const estProfit = round2(o.rebate_cny - o.logistics_cny - o.commission_cny);
     const row: ReconcileRow = {
       order_id: o.order_id,
       tk_order_id: o.tk_order_id,
@@ -1156,7 +1215,8 @@ export function reconcileByOrder(f: ProfitFilter = {}): ReconcileResult {
       est_income_cny: o.gmv_cny,
       est_commission_src: o.commission_src,
       est_commission_cny: o.commission_cny,
-      cost_cny: o.cost_cny,
+      rebate_cny: o.rebate_cny,
+      logistics_cny: o.logistics_cny,
       refund_cny: o.refund_cny,
       settled_src: o.settled_src,
       settled_cny: o.settled_cny,
@@ -1173,7 +1233,9 @@ export function reconcileByOrder(f: ProfitFilter = {}): ReconcileResult {
       adjust_cny: round2(t(7) + t(8)),
       explain_residual_cny: 0,
       est_profit_cny: estProfit,
-      settled_profit_cny: round2(o.settled_cny - o.cost_cny),
+      // 结算侧利润：收入侧仍是冻结返点，支出侧换成平台实际扣掉的达人佣金 ——
+      // 两套的差就是"佣金扣得比预估多/少"，而不是"结算款算谁的"（那是品牌店的钱）。
+      settled_profit_cny: round2(o.rebate_cny - o.logistics_cny - o.settled_commission_cny),
       unmapped_items: o.unmapped_items,
       rate_missing: o.rate_missing,
     };
@@ -1409,7 +1471,7 @@ export function adMetrics(f: ProfitFilter & { group_by?: AdGroupDim } = {}): { l
 /** 待办判定条件（口径只写一次，计数与明细共用） */
 const TODO_WHERE = {
   unmapped_listing: `l.is_deleted = 0 AND l.map_status = 2`,
-  unmapped_item: `i.is_deleted = 0 AND i.cost_matched = 0 AND o.is_deleted = 0`,
+  unmapped_item: `i.is_deleted = 0 AND i.rebate_matched = 0 AND o.is_deleted = 0`,
   creator_follow: `o.is_deleted = 0 AND o.next_follow_at IS NOT NULL AND date(o.next_follow_at) <= date('now')`,
   sample_overdue: `s.is_deleted = 0 AND s.status IN (3, 5) AND s.sign_time IS NOT NULL
                      AND date(s.sign_time, ?) <= date('now')`,
@@ -1517,7 +1579,7 @@ export function todoDetails(user: CurrentUser, limit = 20): TodoGroup[] {
         id: `item-${String(r.id)}`,
         title: `订单 ${String(r.tk_order_id)} 的未映射明细`,
         subtitle: `${String(r.shop_name ?? '')} · ${String(r.item_amount ?? '0')} ${String(r.currency ?? '')}`,
-        hint: '未计成本，已从利润统计中剔除（要点 1）',
+        hint: '未配品牌返点率，已从返点与利润统计中剔除（不是 0 利润，要点 1）',
         link: '/products/unmapped?tab=items',
       })),
     ],
@@ -1633,9 +1695,10 @@ export function todoDetails(user: CurrentUser, limit = 20): TodoGroup[] {
   return groups;
 }
 
-/** 工作台看板：严格返回 DashboardSummary 全字段；无成本权限时利润/成本类为 null */
-export type DashboardPayload = Omit<DashboardSummary, 'est_cost' | 'est_gross_profit' | 'est_profit_rate' | 'settled_amount' | 'ad_spend' | 'ad_roi'> & {
-  est_cost: number | null;
+/** 工作台看板：严格返回 DashboardSummary 全字段；无金额权限时返点/物流/利润类为 null */
+export type DashboardPayload = Omit<DashboardSummary, 'est_rebate' | 'est_logistics' | 'est_gross_profit' | 'est_profit_rate' | 'settled_amount' | 'ad_spend' | 'ad_roi'> & {
+  est_rebate: number | null;
+  est_logistics: number | null;
   est_gross_profit: number | null;
   est_profit_rate: number | null;
   settled_amount: number | null;
@@ -1676,9 +1739,12 @@ export function dashboardMetrics(user: CurrentUser, range: { start?: string; end
     orders: overall.orders,
     refund_amount: overall.refund,
     refund_rate: profitRate(overall.refund, overall.gmv),
-    est_cost: canCost ? overall.cost : null,
+    est_rebate: canCost ? overall.rebate : null,
+    est_logistics: canCost ? overall.logistics : null,
     est_gross_profit: canCost ? overall.gross_profit : null,
-    est_profit_rate: canCost ? profitRate(overall.gross_profit, overall.net_gmv || overall.gmv) : null,
+    // 毛利率的分母是**我们自己的收入（应收返点）**，不是品牌 GMV ——
+    // 用 GMV 当分母会得到一个看着像 3% 的"毛利率"，而我们对这单的真实留存其实是 20% 上下。
+    est_profit_rate: canCost ? profitRate(overall.gross_profit, overall.rebate) : null,
     settled_amount: canCost ? overall.settled_paid : null,
     ad_spend: canCost ? overall.ad_spend : null,
     ad_gmv: overall.ad_gmv,
@@ -1705,8 +1771,12 @@ export function dashboardMetrics(user: CurrentUser, range: { start?: string; end
         handle: r.dim_name,
         gmv: r.gmv,
         orders: r.orders,
-        cost: canCost ? r.cost : (null as unknown as number),
-        roi: canCost ? adRoi(r.cost + r.commission + r.ad_spend + r.expense, r.net_gmv) : (null as unknown as number),
+        // 达人投产比：我们应得的返点 ÷ 我们掏的全部钱（物流 + 佣金 + 广告 + 费用）。
+        // 分子不用带货 GMV —— 那是品牌的生意；拿 GMV 做分子会让一个亏钱的达人排到榜首。
+        rebate: canCost ? r.rebate : (null as unknown as number),
+        roi: canCost
+          ? adRoi(r.logistics + r.commission + r.ad_spend + r.expense, r.rebate)
+          : (null as unknown as number),
       })),
     content_type_split: Object.entries(CONTENT_TYPE_LABEL).map(([t, label]) => {
       const r = contentRows.get(`T${t}`);

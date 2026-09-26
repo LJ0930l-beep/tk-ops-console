@@ -192,8 +192,8 @@ CREATE TABLE IF NOT EXISTS product_sku (
   spu_id          INTEGER NOT NULL REFERENCES product_spu(id),
   sku_code        TEXT    NOT NULL UNIQUE,
   spec            TEXT,
-  purchase_cost   REAL    NOT NULL DEFAULT 0,        -- 采购成本（人民币/件）
-  first_leg_cost  REAL    NOT NULL DEFAULT 0,        -- 头程成本（人民币/件）
+  rebate_rate     REAL    NOT NULL DEFAULT 0,        -- 品牌给的返点率（0.18 = 实收 GMV 的 18% 归我们）；0 = 未配
+  logistics_cost  REAL    NOT NULL DEFAULT 0,        -- 单件物流成本（头程+海外仓，人民币/件）；品牌承担填 0
   weight_g        INTEGER,
   package_size    TEXT,
   status          INTEGER NOT NULL DEFAULT 1,        -- 1在售 0停售
@@ -264,8 +264,10 @@ CREATE TABLE IF NOT EXISTS tk_order_item (
   unit_price     REAL    NOT NULL DEFAULT 0,
   discount       REAL    NOT NULL DEFAULT 0,
   item_amount    REAL    NOT NULL DEFAULT 0,
-  cost_snapshot  REAL    NOT NULL DEFAULT 0,           -- 下单时冻结的（采购+头程）×数量，人民币
-  cost_matched   INTEGER NOT NULL DEFAULT 0,           -- 1=成本快照有效
+  rebate_rate     REAL   NOT NULL DEFAULT 0,           -- 成交时冻结的品牌返点率（事后改 SKU 不影响历史单）
+  rebate_cny      REAL   NOT NULL DEFAULT 0,           -- 冻结的应收返点（人民币）= 实收折 CNY × rebate_rate
+  logistics_cny   REAL   NOT NULL DEFAULT 0,           -- 冻结的物流支出（人民币）= 单件物流成本 × 数量
+  rebate_matched  INTEGER NOT NULL DEFAULT 0,          -- 1=返点率已配且快照有效；0 不参与利润，也不许当 0 收入
   creator_id     INTEGER REFERENCES creator(id),       -- 带货达人，自然流量为空
   content_type   INTEGER,                               -- 1达人视频 2达人直播 3自营视频 4自营直播 5商品卡
   content_id     TEXT,                                  -- 视频 ID / 直播场次 ID
@@ -375,8 +377,7 @@ CREATE TABLE IF NOT EXISTS sample_shipment (
   creator_id    INTEGER NOT NULL REFERENCES creator(id),
   sku_id        INTEGER REFERENCES product_sku(id),
   quantity      INTEGER NOT NULL DEFAULT 1,
-  sample_cost   REAL    NOT NULL DEFAULT 0,             -- SKU 成本快照（人民币）
-  shipping_cost REAL    NOT NULL DEFAULT 0,             -- 寄样运费（人民币）
+  shipping_cost REAL    NOT NULL DEFAULT 0,             -- 寄样运费（人民币，我们掏的钱；样品货值由品牌承担）
   ship_method   INTEGER NOT NULL DEFAULT 2,             -- 1平台免费样品 2线下自寄 3海外仓代发
   tk_order_id   TEXT,
   tracking_no   TEXT,
@@ -553,7 +554,7 @@ CREATE TABLE IF NOT EXISTS stock_ledger (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   warehouse_id INTEGER NOT NULL REFERENCES warehouse(id),
   sku_id       INTEGER NOT NULL REFERENCES product_sku(id),
-  change_type  INTEGER NOT NULL DEFAULT 1,               -- 1采购入库 2头程发货 3调拨 4销售出库 5样品出库 6退货入库 7盘点调整
+  change_type  INTEGER NOT NULL DEFAULT 1,               -- 1品牌入仓 2头程调拨 3调拨 4销售出库 5样品出库 6退货入库 7盘点调整
   quantity     INTEGER NOT NULL DEFAULT 0,               -- 入库为正 出库为负
   ref_no       TEXT,
   op_time      TEXT    NOT NULL,
@@ -620,7 +621,8 @@ CREATE TABLE IF NOT EXISTS analytics_creator_daily (
   gmv          REAL    NOT NULL DEFAULT 0,
   refund       REAL    NOT NULL DEFAULT 0,
   net_gmv      REAL    NOT NULL DEFAULT 0,
-  sample_cost  REAL    NOT NULL DEFAULT 0,              -- 当日寄样成本（采购+运费，人民币）
+  rebate       REAL    NOT NULL DEFAULT 0,              -- 当日实收 GMV 应得的返点（人民币，我们的收入）
+  sample_shipping REAL NOT NULL DEFAULT 0,              -- 当日寄样运费（人民币，我们的支出）
   commission   REAL    NOT NULL DEFAULT 0,
   source       TEXT    NOT NULL DEFAULT 'fact',
   created_by   INTEGER,
@@ -773,12 +775,14 @@ CREATE TABLE IF NOT EXISTS selection_flow (
   name             TEXT    NOT NULL,
   image_url        TEXT,
   category         TEXT,
-  supplier         TEXT,                                  -- 货源：供应商
-  purchase_price   REAL    NOT NULL DEFAULT 0,            -- 采购价
-  moq              INTEGER NOT NULL DEFAULT 0,            -- 起订量
-  lead_days        INTEGER NOT NULL DEFAULT 0,            -- 交货周期（天）
-  est_margin       REAL    NOT NULL DEFAULT 0,            -- 预估毛利率 0-1
-  breakeven_roas   REAL    NOT NULL DEFAULT 0,            -- 预估盈亏平衡 ROAS = 1 / 广告前贡献毛利率
+  brand_name       TEXT,                                  -- 品牌方（货是品牌的，我们不背货款）
+  list_price       REAL    NOT NULL DEFAULT 0,            -- 建议售价（店铺币种）
+  planned_discount REAL    NOT NULL DEFAULT 0,            -- 计划折扣率 0-1（只作档案与复盘，不参与利润回算）
+  rebate_rate      REAL    NOT NULL DEFAULT 0,            -- 品牌给的返点率 0-1（我们唯一收入的比例）
+  commission_rate  REAL    NOT NULL DEFAULT 0,            -- 计划达人佣金率 0-1
+  logistics_rate   REAL    NOT NULL DEFAULT 0,            -- 计划物流费率 0-1（占实收；品牌承担填 0）
+  est_margin       REAL    NOT NULL DEFAULT 0,            -- 预估贡献毛利率 = 返点率 − 佣金率 − 物流费率（服务端算）
+  breakeven_roas   REAL    NOT NULL DEFAULT 0,            -- 预估盈亏平衡 ROAS = 1 / est_margin
   source           TEXT,                                  -- 市场调研/竞品对标/达人推荐/供应链推荐
   shop_id          INTEGER,                               -- 上架测试的店铺
   spu_id           INTEGER,                               -- 正式上架后回填的商品 SPU

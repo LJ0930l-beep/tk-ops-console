@@ -4,7 +4,7 @@
     <el-card class="page-card" shadow="never">
       <el-form inline @submit.prevent="reloadAll">
         <el-form-item label="关键词">
-          <el-input v-model="filters.keyword" clearable placeholder="品名 / 候选品 ID / 供应商 / 类目" style="width: 210px" @keyup.enter="reloadAll" />
+          <el-input v-model="filters.keyword" clearable placeholder="品名 / 候选品 ID / 品牌方 / 类目" style="width: 210px" @keyup.enter="reloadAll" />
         </el-form-item>
         <el-form-item label="负责人">
           <el-select v-model="filters.owner_id" clearable filterable placeholder="全部" style="width: 140px">
@@ -184,26 +184,48 @@
             <el-form-item label="类目" prop="category"><el-input v-model="baseForm.category" maxlength="64" placeholder="如 家居收纳" /></el-form-item>
           </el-col>
           <el-col :span="12">
-            <el-form-item label="供应商" prop="supplier"><el-input v-model="baseForm.supplier" maxlength="128" /></el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="采购价" prop="purchase_price">
-              <el-input-number v-model="baseForm.purchase_price" :min="0" :precision="2" :step="1" controls-position="right" style="width: 100%" />
+            <el-form-item label="品牌方" prop="brand_name">
+              <el-input v-model="baseForm.brand_name" maxlength="128" placeholder="货主：我们不背货款，只拿它给的返点" />
             </el-form-item>
           </el-col>
           <el-col :span="12">
-            <el-form-item label="预估毛利率" prop="est_margin">
-              <el-input-number v-model="baseForm.est_margin" :min="0" :max="1" :step="0.01" :precision="4" controls-position="right" style="width: 100%" />
+            <el-form-item label="建议售价" prop="list_price">
+              <el-input-number v-model="baseForm.list_price" :min="0" :precision="2" :step="1" controls-position="right" style="width: 100%" />
+              <span class="unit-tip">店铺币种（不是人民币）</span>
             </el-form-item>
           </el-col>
           <el-col :span="12">
-            <el-form-item label="起订量" prop="moq">
-              <el-input-number v-model="baseForm.moq" :min="0" :precision="0" :step="10" controls-position="right" style="width: 100%" />
+            <el-form-item label="计划折扣率" prop="planned_discount">
+              <el-input-number v-model="baseForm.planned_discount" :min="0" :max="1" :step="0.01" :precision="4" controls-position="right" style="width: 100%" />
+              <span class="unit-tip">档案字段：0.2 = 打算让 20%，不参与利润回算</span>
             </el-form-item>
           </el-col>
           <el-col :span="12">
-            <el-form-item label="交货周期(天)" prop="lead_days">
-              <el-input-number v-model="baseForm.lead_days" :min="0" :precision="0" :step="1" controls-position="right" style="width: 100%" />
+            <el-form-item label="品牌返点率" prop="rebate_rate">
+              <el-input-number v-model="baseForm.rebate_rate" :min="0" :max="1" :step="0.01" :precision="4" controls-position="right" style="width: 100%" />
+              <span class="unit-tip">我们唯一收入的比例：0.18 = 实收的 18% 归我们</span>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="计划达人佣金率" prop="commission_rate">
+              <el-input-number v-model="baseForm.commission_rate" :min="0" :max="1" :step="0.01" :precision="4" controls-position="right" style="width: 100%" />
+              <span class="unit-tip">我们掏才算；品牌代付填 0，不许和返点两边各记一次</span>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="计划物流费率" prop="logistics_rate">
+              <el-input-number v-model="baseForm.logistics_rate" :min="0" :max="1" :step="0.01" :precision="4" controls-position="right" style="width: 100%" />
+              <span class="unit-tip">占实收比例；品牌承担物流填 0</span>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="预估贡献毛利率">
+              <span class="ro">{{ baseMarginText }}</span>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="盈亏平衡 ROAS">
+              <span class="ro">{{ baseBreakevenText }}</span>
             </el-form-item>
           </el-col>
           <el-col :span="12">
@@ -227,7 +249,11 @@
             <el-form-item label="备注"><el-input v-model="baseForm.remark" type="textarea" :rows="2" maxlength="512" show-word-limit /></el-form-item>
           </el-col>
         </el-row>
-        <div class="tip">毛利率按小数填（0.35 = 35%）；盈亏平衡 ROAS 由后端按毛利率算好回传{{ baseBreakeven === null ? '' : `，当前为 ${baseBreakeven}` }}。</div>
+        <div class="tip">
+          三个率都按小数填（0.18 = 18%）。「预估贡献毛利率 = 品牌返点率 − 计划达人佣金率 − 计划物流费率」「盈亏平衡 ROAS = 1 ÷ 贡献毛利率」都由服务端算好回传：
+          页面只读展示，既不手填也不提交（提交里出现 <code>est_margin</code> / <code>breakeven_roas</code> 会被后端拒）。
+          计划折扣率只是档案，不参与任何利润回算。
+        </div>
       </el-form>
       <template #footer>
         <el-button @click="baseVisible = false">取消</el-button>
@@ -650,10 +676,13 @@ function snapshotOf(raw: unknown): Partial<SelectionSnapshot> {
   return parseObj<Partial<SelectionSnapshot>>(raw);
 }
 
-/** 卡片只展示方案点名的三项：CTR / 转化率 / 净利率，且只在有快照时显示 */
+/** 卡片上先说我们这门生意的三条率，再带方案点名的三项测试指标：CTR / 转化率 / 净利率 */
 function cardMetrics(c: RowLike): { label: string; text: string }[] {
-  const s = snapshotOf((c as Card).test_snapshot);
+  const card = c as Card;
+  const s = snapshotOf(card.test_snapshot);
   const out: { label: string; text: string }[] = [];
+  if (typeof card.rebate_rate === 'number') out.push({ label: '品牌返点率', text: pctOf(card.rebate_rate) });
+  if (typeof card.est_margin === 'number') out.push({ label: '贡献毛利率', text: pctOf(card.est_margin) });
   if (s.ctr !== undefined && s.ctr !== null) out.push({ label: 'CTR', text: pctOf(s.ctr) });
   if (s.cvr !== undefined && s.cvr !== null) out.push({ label: '转化率', text: pctOf(s.cvr) });
   if (s.net_margin !== undefined && s.net_margin !== null) out.push({ label: '净利率', text: pctOf(s.net_margin) });
@@ -698,15 +727,21 @@ function runAct(a: Act, raw: RowLike): void {
 }
 
 /* ---------- 登记 / 编辑 ---------- */
+/**
+ * 品牌服务方口径：登记只问「品牌给多少返点、我们掏多少佣金和物流」，
+ * 不问供应商 / 采购价 / 起订量 / 交货周期——货是品牌的，我们不背货款。
+ * est_margin 与 breakeven_roas 都不在这里：它们由服务端算，表单不许带、也不提交。
+ */
 interface BaseForm {
   name: string;
   source?: string;
   category?: string;
-  supplier?: string;
-  purchase_price?: number;
-  est_margin?: number;
-  moq?: number;
-  lead_days?: number;
+  brand_name?: string;
+  list_price?: number;
+  planned_discount?: number;
+  rebate_rate?: number;
+  commission_rate?: number;
+  logistics_rate?: number;
   shop_id?: number;
   owner_id?: number;
   image_url?: string;
@@ -718,8 +753,17 @@ const baseSaving = ref(false);
 const baseRef = ref<FormInstance>();
 const baseId = ref(0);
 const baseName = ref('');
+/** 服务端下发的两个只读值（新登记时还没有，就明说「登记后由后端算」，不在前端自己推一遍） */
 const baseBreakeven = ref<number | null>(null);
+const baseMargin = ref<number | null>(null);
 const baseForm = reactive<BaseForm>({ name: '' });
+
+const baseMarginText = computed(() => (baseMargin.value === null ? '—（登记/保存后由后端算）' : pctOf(baseMargin.value)));
+const baseBreakevenText = computed(() => {
+  if (baseId.value === 0) return '—（登记后由后端算）';
+  if (baseBreakeven.value === null) return '—（贡献毛利率 ≤ 0：这单没有正的分成空间，不存在盈亏平衡点）';
+  return String(baseBreakeven.value);
+});
 
 const rangeRule = (min: number, max: number, label: string) => ({
   validator: (_r: unknown, v: unknown, cb: (e?: Error) => void) => {
@@ -735,10 +779,13 @@ const baseRules = computed<FormRules>(() => ({
     { max: 200, message: '品名不超过 200 字', trigger: 'blur' },
   ],
   source: [{ required: true, message: '请选择选品来源（复盘要看哪条路产出好品）', trigger: 'change' }],
-  purchase_price: [{ required: true, message: '请填写采购价', trigger: 'blur' }, rangeRule(0, 99_999_999, '采购价')],
-  est_margin: [{ required: true, message: '请填写预估毛利率（小数，0.35 = 35%）', trigger: 'blur' }, rangeRule(0, 1, '预估毛利率')],
-  moq: [{ required: true, message: '请填写起订量（0 = 无起订量限制）', trigger: 'blur' }, rangeRule(0, 999_999, '起订量')],
-  lead_days: [{ required: true, message: '请填写交货周期，补货节奏要用它', trigger: 'blur' }, rangeRule(0, 3650, '交货周期')],
+  brand_name: [{ required: true, message: '请填写品牌方（货主）：我们是代运营，返点找谁要必须写清', trigger: 'blur' }],
+  list_price: [{ required: true, message: '请填写建议售价（店铺币种）', trigger: 'blur' }, rangeRule(0, 99_999_999, '建议售价')],
+  // 返点率 0 = 还没谈到数：允许登记，但结论前必须补，否则这个品根本没有收入
+  rebate_rate: [{ required: true, message: '请填写品牌返点率（小数，0.18 = 18%；没谈到先填 0 并在备注写明）', trigger: 'blur' }, rangeRule(0, 1, '品牌返点率')],
+  commission_rate: [{ required: true, message: '请填写计划达人佣金率（品牌代付就填 0）', trigger: 'blur' }, rangeRule(0, 1, '计划达人佣金率')],
+  logistics_rate: [{ required: true, message: '请填写计划物流费率（品牌承担物流就填 0）', trigger: 'blur' }, rangeRule(0, 1, '计划物流费率')],
+  planned_discount: [rangeRule(0, 1, '计划折扣率')],
   image_url: [
     {
       validator: (_r: unknown, v: unknown, cb: (e?: Error) => void) => {
@@ -754,6 +801,7 @@ function openRegister(): void {
   baseId.value = 0;
   baseName.value = '';
   baseBreakeven.value = null;
+  baseMargin.value = null;
   for (const k of Object.keys(baseForm) as (keyof BaseForm)[]) delete baseForm[k];
   Object.assign(baseForm, { name: '' });
   baseVisible.value = true;
@@ -763,17 +811,19 @@ function openRegister(): void {
 function openBase(card: Card): void {
   baseId.value = Number(card.id);
   baseName.value = String(card.name ?? '');
-  baseBreakeven.value = Number.isFinite(Number(card.breakeven_roas)) ? Number(card.breakeven_roas) : null;
+  baseBreakeven.value = Number.isFinite(Number(card.breakeven_roas)) && Number(card.breakeven_roas) > 0 ? Number(card.breakeven_roas) : null;
+  baseMargin.value = Number.isFinite(Number(card.est_margin)) ? Number(card.est_margin) : null;
   for (const k of Object.keys(baseForm) as (keyof BaseForm)[]) delete baseForm[k];
   Object.assign(baseForm, {
     name: baseName.value,
     source: card.source ?? undefined,
     category: card.category ?? undefined,
-    supplier: card.supplier ?? undefined,
-    purchase_price: num(card.purchase_price),
-    est_margin: num(card.est_margin),
-    moq: num(card.moq),
-    lead_days: num(card.lead_days),
+    brand_name: card.brand_name ?? undefined,
+    list_price: num(card.list_price),
+    planned_discount: num(card.planned_discount),
+    rebate_rate: num(card.rebate_rate),
+    commission_rate: num(card.commission_rate),
+    logistics_rate: num(card.logistics_rate),
     shop_id: card.shop_id ?? undefined,
     owner_id: card.owner_id ?? undefined,
     image_url: card.image_url ?? undefined,
@@ -1084,11 +1134,19 @@ function checklistProgress(raw: unknown): string {
 /** 只加展示字段，不改后端原字段（编辑表单直接吃原值，改了就串单位） */
 function decorate(row: Record<string, unknown>): Record<string, unknown> {
   const s = snapshotOf(row.test_snapshot);
+  /** 率一律按小数存，列表用 percent 列（它按「已是百分数」渲染），所以另加 *_pct 键 */
+  const pct = (v: unknown) => (v === null || v === undefined ? null : round2(num(v) * 100));
   return {
     ...row,
     dwell_text: `${num(row.dwell_days)} 天${row.due_days === null || row.due_days === undefined ? '（无超时口径）' : ` / ${num(row.due_days)}`}`,
     overdue_label: LEVEL_LABEL[levelOf(row.overdue_level)],
-    est_margin_pct: num(row.est_margin) * 100,
+    rebate_rate_pct: pct(row.rebate_rate),
+    commission_rate_pct: pct(row.commission_rate),
+    logistics_rate_pct: pct(row.logistics_rate),
+    planned_discount_pct: pct(row.planned_discount),
+    est_margin_pct: pct(row.est_margin),
+    // 盈亏平衡 ROAS = 1 / 贡献毛利率：毛利率 ≤ 0 时这个数根本不存在，不能显示成 0
+    breakeven_text: num(row.breakeven_roas) > 0 ? String(round2(num(row.breakeven_roas))) : '毛利率≤0·无平衡点',
     ctr_pct: s.ctr === undefined || s.ctr === null ? null : num(s.ctr) * 100,
     cart_rate_pct: s.cart_rate === undefined || s.cart_rate === null ? null : num(s.cart_rate) * 100,
     cvr_pct: s.cvr === undefined || s.cvr === null ? null : num(s.cvr) * 100,
@@ -1109,6 +1167,17 @@ const testMetricCols: ColumnDef[] = [
   { prop: 'net_margin_pct', label: '净利率', type: 'percent', width: 92 },
 ];
 
+/** 我们的钱怎么算：返点率 − 佣金率 − 物流费率 = 贡献毛利率，全部是率（百分比），谁也不能被加成钱 */
+const economicsCols: ColumnDef[] = [
+  { prop: 'brand_name', label: '品牌方(货主)', minWidth: 130 },
+  { prop: 'list_price', label: '建议售价(店铺币种)', type: 'money', width: 140 },
+  { prop: 'rebate_rate_pct', label: '品牌返点率', type: 'percent', width: 106 },
+  { prop: 'commission_rate_pct', label: '计划佣金率', type: 'percent', width: 104 },
+  { prop: 'logistics_rate_pct', label: '计划物流费率', type: 'percent', width: 112 },
+  { prop: 'est_margin_pct', label: '预估贡献毛利率', type: 'percent', width: 130 },
+  { prop: 'breakeven_text', label: '盈亏平衡 ROAS', width: 160 },
+];
+
 const listColumns = computed<ColumnDef[]>(() => [
   { prop: 'code', label: '候选品 ID', width: 130, fixed: 'left' },
   { prop: 'name', label: '品名', minWidth: 170 },
@@ -1120,11 +1189,10 @@ const listColumns = computed<ColumnDef[]>(() => [
   { prop: 'registered_name', label: '登记者', width: 100 },
   { prop: 'shop_name', label: '测试店铺', width: 140 },
   { prop: 'source', label: '来源', width: 106 },
-  { prop: 'supplier', label: '供应商', minWidth: 130 },
   { prop: 'category', label: '类目', width: 120 },
-  { prop: 'purchase_price', label: '采购价', type: 'money', width: 104 },
-  { prop: 'est_margin_pct', label: '预估毛利率', type: 'percent', width: 110 },
-  { prop: 'breakeven_roas', label: '盈亏平衡 ROAS', width: 132 },
+  ...economicsCols,
+  // 只作档案与复盘：故意排在率之后、并且带「仅档案」字样，别让人以为它参与利润
+  { prop: 'planned_discount_pct', label: '计划折扣率(仅档案)', type: 'percent', width: 130 },
   { prop: 'conclusion', label: '测试结论', type: 'tag', options: CONCLUSION_OPTIONS, width: 120 },
   ...testMetricCols,
   { prop: 'gmv_text', label: '测试 GMV', width: 116, align: 'right' },
@@ -1139,10 +1207,9 @@ const deadColumns = computed<ColumnDef[]>(() => [
   { prop: 'reject_text', label: '淘汰原因', minWidth: 240 },
   { prop: 'conclusion', label: '最后结论', type: 'tag', options: CONCLUSION_OPTIONS, width: 130 },
   { prop: 'source', label: '来源', width: 106 },
-  { prop: 'supplier', label: '供应商', minWidth: 130 },
   { prop: 'owner_text', label: '最后负责人', width: 110 },
   { prop: 'registered_name', label: '登记者', width: 100 },
-  { prop: 'purchase_price', label: '采购价', type: 'money', width: 104 },
+  ...economicsCols,
   ...testMetricCols,
   { prop: 'gmv_text', label: '测试 GMV', width: 116, align: 'right' },
   { prop: 'stage_entered_at', label: '进池时间', type: 'datetime', width: 150 },
@@ -1189,6 +1256,23 @@ onMounted(async () => {
   color: #909399;
   font-size: 12px;
   line-height: 1.6;
+}
+/* 只读的服务端结论（贡献毛利率 / 盈亏平衡 ROAS）：做成「不可编辑」的样子，别和输入框混在一起 */
+.ro {
+  font-weight: 600;
+  color: #303133;
+  background: #f5f7fa;
+  border: 1px dashed #dcdfe6;
+  border-radius: 4px;
+  padding: 2px 8px;
+  display: inline-block;
+  line-height: 20px;
+}
+.unit-tip {
+  color: #909399;
+  font-size: 12px;
+  line-height: 18px;
+  width: 100%;
 }
 .summary {
   font-size: 13px;

@@ -23,6 +23,8 @@ import {
   SELECTION_SOURCES,
   SELECTION_STAGE,
   SELECTION_STAGE_LABELS,
+  breakevenRoas,
+  num,
   round2,
   type CurrentUser,
   type SelectionBoardCard,
@@ -167,7 +169,7 @@ function selectionQ(req: Request): Q {
   const conclusion = qv(req, 'conclusion');
   if (conclusion !== '' && conclusion !== undefined && !Number.isNaN(Number(conclusion))) q.and('t.conclusion = ?', Number(conclusion));
   const keyword = qv(req, 'keyword');
-  if (keyword) q.and('(t.name LIKE ? OR t.code LIKE ? OR t.supplier LIKE ? OR t.category LIKE ?)', `%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`);
+  if (keyword) q.and('(t.name LIKE ? OR t.code LIKE ? OR t.brand_name LIKE ? OR t.category LIKE ?)', `%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`);
   const overdueOnly = qv(req, 'overdue');
   if (overdueOnly === '1' || overdueOnly === 'true') {
     // 「只看超时」必须与看板卡片同口径（停留日历天 > 阈值）。时间边界在 JS 里算成 'YYYY-MM-DD HH:MM:SS'，
@@ -307,8 +309,9 @@ selectionRouter.get(
       q: selectionQ(req),
       orderBy: 't.stage ASC, t.stage_entered_at ASC',
       columns: [
-        'code', 'name', 'category', 'supplier', 'source', 'stage_label', 'dwell_days', 'due_days', 'overdue_level',
-        'shop_name', 'owner_name', 'registered_name', 'purchase_price', 'moq', 'lead_days', 'est_margin', 'breakeven_roas',
+        'code', 'name', 'category', 'brand_name', 'source', 'stage_label', 'dwell_days', 'due_days', 'overdue_level',
+        'shop_name', 'owner_name', 'registered_name', 'list_price', 'planned_discount', 'rebate_rate', 'commission_rate',
+        'logistics_rate', 'est_margin', 'breakeven_roas',
         'conclusion_label', 'reject_reason', 'test_ctr', 'test_cvr', 'test_gmv', 'test_net_margin', 'checklist_done', 'code_spu',
       ],
       decorate: (r) => {
@@ -369,15 +372,32 @@ selectionRouter.get(
 
 /* ---------------- 写入 ---------------- */
 
+/** 比率一律 0-1 小数：报错要说清"0.18 = 18%"，否则一定有人填 18 */
+const rateField = (label: string) => z.number().min(0, `${label}不能为负`).max(1, `${label}要用小数填写：0.18 = 18%`).default(0);
+
+/**
+ * 预估贡献毛利率 = 返点率 − 达人佣金率 − 物流费率（都按占实收的比例）。
+ * 我们不出货款，所以这里没有「采购价」的位置。返点与佣金若是同一笔钱的两种说法，
+ * 只能记一次（把佣金率填 0，或把返点率填成净分成）—— 双记会凭空造出一块成本。
+ */
+function marginOf(v: {
+  rebate_rate?: number | null;
+  commission_rate?: number | null;
+  logistics_rate?: number | null;
+}): number {
+  return Math.round((num(v.rebate_rate) - num(v.commission_rate) - num(v.logistics_rate)) * 10000) / 10000;
+}
+
 const registerBody = z.object({
   name: z.string().min(1, '商品名称必填').max(200),
   image_url: z.string().max(512).optional().nullable(),
   category: z.string().max(64).optional().nullable(),
-  supplier: z.string().max(128).optional().nullable(),
-  purchase_price: z.number().min(0).default(0),
-  moq: z.number().int().min(0).default(0),
-  lead_days: z.number().int().min(0).default(0),
-  est_margin: z.number().min(0).max(1).default(0),
+  brand_name: z.string().max(128).optional().nullable(),
+  list_price: z.number().min(0, '建议售价不能为负').default(0),
+  planned_discount: rateField('计划折扣率'),
+  rebate_rate: rateField('品牌返点率'),
+  commission_rate: rateField('计划达人佣金率'),
+  logistics_rate: rateField('计划物流费率'),
   source: z.enum([...SELECTION_SOURCES]).optional().nullable(),
   shop_id: z.number().int().positive().optional().nullable(),
   owner_id: z.number().int().positive().optional().nullable(),
@@ -393,19 +413,21 @@ selectionRouter.post(
     const user = current(req);
     if (body.shop_id) assertShopVisible(req, body.shop_id);
     const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
-    const margin = Number(body.est_margin ?? 0);
-    // 广告前贡献毛利率≈预估毛利率时，Break-even ROAS = 1 / 毛利率；毛利率为 0 时留 0 表示「未估」
-    const breakeven = margin > 0 ? round2(1 / margin) : 0;
+    const margin = marginOf(body);
+    // 盈亏平衡 ROAS = 1 / 贡献毛利率；毛利率 ≤ 0 时不存在平衡点，留 0 让界面明说「无平衡点」
+    const breakeven = breakevenRoas(margin) ?? 0;
     const cols = {
       code: nextCode(),
       name: body.name,
       image_url: body.image_url ?? null,
       category: body.category ?? null,
-      supplier: body.supplier ?? null,
-      purchase_price: body.purchase_price,
-      moq: body.moq,
-      lead_days: body.lead_days,
-      est_margin: body.est_margin,
+      brand_name: body.brand_name ?? null,
+      list_price: body.list_price,
+      planned_discount: body.planned_discount,
+      rebate_rate: body.rebate_rate,
+      commission_rate: body.commission_rate,
+      logistics_rate: body.logistics_rate,
+      est_margin: margin,
       breakeven_roas: breakeven,
       source: body.source ?? null,
       shop_id: body.shop_id ?? null,
@@ -464,10 +486,18 @@ selectionRouter.put(
     const patch: Record<string, unknown> = { ...body, updated_at: new Date().toISOString().replace('T', ' ').slice(0, 19) };
     delete (patch as { stage?: unknown }).stage;
     delete (patch as { conclusion?: unknown }).conclusion;
+    // 毛利率与盈亏平衡 ROAS 是推出来的，不接受手填（跟 stage 一样，只能经公式变）
+    delete (patch as { est_margin?: unknown }).est_margin;
+    delete (patch as { breakeven_roas?: unknown }).breakeven_roas;
     if (body.shop_id) assertShopVisible(req, body.shop_id);
-    if (body.est_margin !== undefined || body.purchase_price !== undefined) {
-      const margin = body.est_margin !== undefined ? body.est_margin : Number(found.est_margin ?? 0);
-      patch.breakeven_roas = margin > 0 ? round2(1 / margin) : 0;
+    if (body.rebate_rate !== undefined || body.commission_rate !== undefined || body.logistics_rate !== undefined) {
+      const margin = marginOf({
+        rebate_rate: body.rebate_rate ?? num(found.rebate_rate),
+        commission_rate: body.commission_rate ?? num(found.commission_rate),
+        logistics_rate: body.logistics_rate ?? num(found.logistics_rate),
+      });
+      patch.est_margin = margin;
+      patch.breakeven_roas = breakevenRoas(margin) ?? 0;
     }
     update('selection_flow', Number(found.id), patch as never);
     writeOpLog({ user_id: current(req).id, module: MODULE, action: 'update', target_table: 'selection_flow', target_id: Number(found.id), before: found, after: patch, ip: req.ip });

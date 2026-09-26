@@ -5,7 +5,7 @@
       type="info"
       show-icon
       :closable="false"
-      title="状态流：已谈妥 → 待寄样 → 样品在途 → 待发布 → 已发布 → 已完结；超期未出内容由夜间作业置为「超期未履约」，任意状态可取消（需主管/老板）。坑位费>0 时点「生成费用」建待付款费用（幂等，重复点击不重复建）。"
+      title="状态流：已谈妥 → 待寄样 → 样品在途 → 待发布 → 已发布 → 已完结；超期未出内容由夜间作业置为「超期未履约」，任意状态可取消（需主管/老板）。坑位费>0 时点「生成费用」建待付款费用（幂等，重复点击不重复建）。合作单只记我们掏出去的钱（佣金 / 坑位费 / 寄样运费）：品牌给的返点率在 SKU 上维护，佣金若由品牌代付就把佣金率填 0，同一笔钱不许两边各记一次。"
     />
     <ResourcePage
       ref="rp"
@@ -137,7 +137,7 @@ const formFields = computed<FormFieldDef[]>(() => [
   { key: 'shop_id', label: '店铺', type: 'select', required: true, options: () => shopOpts.value, span: 8, disabledOnEdit: true },
   { key: 'spu_id', label: '商品(SPU)', type: 'select', options: () => spuOpts.value, span: 8, placeholder: '可空（多品合作）' },
   { key: 'coop_type', label: '合作方式', type: 'select', required: true, options: coopOptions, default: 1, span: 8 },
-  { key: 'commission_rate', label: '佣金率(%)', type: 'number', min: 0, max: 100, precision: 2, default: 0, span: 8 },
+  { key: 'commission_rate', label: '佣金率(%)', type: 'number', min: 0, max: 100, precision: 2, default: 0, span: 8, placeholder: '填百分数：18 = 18%；品牌代付达人佣金时填 0' },
   { key: 'fixed_fee', label: '坑位费金额🔒', type: 'number', min: 0, precision: 2, default: 0, span: 8, placeholder: '坑位费>0 才可生成费用' },
   { key: 'fee_currency', label: '坑位费币种', span: 8, placeholder: '如 USD（3 位）', default: 'USD' },
   { key: 'promised_videos', label: '承诺视频数', type: 'number', min: 0, precision: 0, default: 1, span: 8 },
@@ -224,14 +224,15 @@ async function showRoi(row: Row) {
     const d = await apiGet<Row>(`/creators/collab/${String(row.id)}`);
     const r = (d?.roi ?? d ?? {}) as Row;
     const text = [
-      `净 GMV(CNY)：${moneyText(r.net_gmv_cny)}`,
-      `样品成本：${moneyText(r.sample_cost)}　寄样运费：${moneyText(r.sample_shipping)}`,
-      `坑位费(CNY)：${moneyText(r.fixed_fee_cny)}　佣金(CNY)：${moneyText(r.commission_cny)}`,
-      `投入合计：${moneyText(r.cost)}　ROI：${roiText(r.roi)}`,
+      `应收返点(CNY)：${moneyText(r.rebate_cny)}　←我们的收入`,
+      `寄样运费(CNY)：${moneyText(r.sample_shipping)}　坑位费(CNY)：${moneyText(r.fixed_fee_cny)}　达人佣金(CNY)：${moneyText(r.commission_cny)}`,
+      `投入合计(CNY)：${moneyText(r.cost)}　投产比(返点÷投入)：${roiText(r.roi)}`,
+      `带货净 GMV(CNY，品牌的生意规模，只作参考)：${moneyText(r.net_gmv_cny)}`,
       `出单数：${String(r.orders ?? '—')}　已发布视频：${String(d?.video_count ?? '—')} / 承诺 ${String(d?.promised_videos ?? '—')}`,
+      '说明：投产比的分子是品牌给我们的返点，不是带货 GMV；样品货值由品牌承担，不计在我们投入里。',
     ].join('\n');
     try {
-      await ElMessageBox.alert(h('div', { style: 'white-space: pre-line' }, text), `合作单 ${String(row.collab_no ?? '')} 投产比`, { confirmButtonText: '关闭' });
+      await ElMessageBox.alert(h('div', { style: 'white-space: pre-line' }, text), `合作单 ${String(row.collab_no ?? '')} 投产比（返点 ÷ 投入）`, { confirmButtonText: '关闭' });
     } catch {
       /* 用户直接关闭 */
     }

@@ -3,7 +3,7 @@
     <div v-if="rp && !rp.rows.length" class="page-tip">
       <el-alert type="info" :closable="false" show-icon title="还没有商品（SPU）">
         <template #default>
-          可先手工新增，或用 CSV 导入 / 商品同步把店铺商品拉进来；SPU 建好后才能维护 SKU 与成本，成本缺失会导致利润算不准。
+          可先手工新增，或用 CSV 导入 / 商品同步把店铺商品拉进来；SPU 建好后才能维护 SKU 与品牌返点率，返点率没配的行不计利润。
         </template>
       </el-alert>
     </div>

@@ -2747,7 +2747,7 @@
           "creators"
         ],
         "operationId": "get_creators_id",
-        "description": "BD 工作量与漏斗：联系次数 / 回复率 / 有意向数 / 谈妥数 / 私海达人数 / 平均首响时长 */\ncreatorRouter.get(\n'/bd-performance',\nwrap((req, res) => {\nconst user = current(req);\nconst group = qv(req, 'group') === 'true' || qv(req, 'group') === '1';\nconst period = safePeriod(resolvePeriod(qv(req, 'period')));\nconst list = bdRows(user, period, group).map((r) => (user.can_see_cost ? r : maskFields(r, ['gmv_cny', 'net_gmv_cny', 'cost_cny', 'cost', 'roi'], false)));\nlist.sort((a, b) => num(b.outreach_cnt) - num(a.outreach_cnt) || num(b.net_gmv_cny) - num(a.net_gmv_cny));\nok(res, { period, dimension: group ? (user.data_scope === DATA_SCOPE.ALL ? 'all' : 'dept') : 'self', total: list.length, list });\n}),\n);\n/* ---------------- 达人档案（动态 :id 路由统一放在静态路由之后） ----------------",
+        "description": "BD 工作量与漏斗：联系次数 / 回复率 / 有意向数 / 谈妥数 / 私海达人数 / 平均首响时长 */\ncreatorRouter.get(\n'/bd-performance',\nwrap((req, res) => {\nconst user = current(req);\nconst group = qv(req, 'group') === 'true' || qv(req, 'group') === '1';\nconst period = safePeriod(resolvePeriod(qv(req, 'period')));\nconst list = bdRows(user, period, group).map((r) => (user.can_see_cost ? r : maskFields(r, BD_COST_FIELDS, false)));\nlist.sort((a, b) => num(b.outreach_cnt) - num(a.outreach_cnt) || num(b.net_gmv_cny) - num(a.net_gmv_cny));\nok(res, { period, dimension: group ? (user.data_scope === DATA_SCOPE.ALL ? 'all' : 'dept') : 'self', total: list.length, list });\n}),\n);\n/* ---------------- 达人档案（动态 :id 路由统一放在静态路由之后） ----------------",
         "parameters": [
           {
             "name": "id",
@@ -3524,7 +3524,7 @@
           "creators"
         ],
         "operationId": "get_creators_collab_id_roi",
-        "description": "单个合作投产比 + 发布达标（净 GMV ÷（样品 + 运费 + 坑位费 + 佣金））",
+        "description": "单个合作投产比 + 发布达标（应收返点 ÷（寄样运费 + 坑位费 + 达人佣金），全部人民币）",
         "parameters": [
           {
             "name": "id",
@@ -4451,7 +4451,7 @@
           "creators"
         ],
         "operationId": "post_creators_sample",
-        "description": "新增寄样：自动取 SKU 成本快照（unitCostCny × 数量，人民币），发货信息齐了自动置在途",
+        "description": "新增寄样：只登记我们掏的寄样运费（样品货值是品牌的，不再有样品成本快照）；发货信息齐了自动置在途",
         "parameters": [],
         "security": [
           {
@@ -6797,7 +6797,7 @@
           "orders"
         ],
         "operationId": "get_orders",
-        "description": "范围内可见的一张订单头（聚合列齐备） */\nfunction loadOrder(req: Request, id: number): Record<string, unknown> {\nconst scope = scopeOf(req, 'o.shop_id');\nconst row = get<Record<string, unknown>>(\n`SELECT ${ORDER_SELECT} FROM ${ORDER_FROM} WHERE o.id = ? AND o.is_deleted = 0 ${scope.sql}`,\nid,\n...scope.params,\n);\nif (!row) throw notFound('订单不存在或不在你的数据范围内');\nreturn row;\n}\n/* ==================== 路由 ==================== */\nexport const orderRouter = Router();\norderRouter.use(requireMenu('order'));\n/* -------------------- 列表 / 汇总 / 未匹配 / 导出：静态路径必须排在 /:id 之前 --------------------",
+        "description": "范围内可见的一张订单头（聚合列齐备） */\nfunction loadOrder(req: Request, id: number): Record<string, unknown> {\nconst scope = scopeOf(req, 'o.shop_id');\nconst row = get<Record<string, unknown>>(\n`SELECT ${ORDER_SELECT} FROM ${ORDER_FROM} WHERE o.id = ? AND o.is_deleted = 0 ${scope.sql}`,\nid,\n...scope.params,\n);\nif (!row) throw notFound('订单不存在或不在你的数据范围内');\nreturn row;\n}\n/* ==================== 路由 ==================== */\nexport const orderRouter = Router();\norderRouter.use(requireMenu('order'));\n/* -------------------- 列表 / 汇总 / 未配返点行 / 导出：静态路径必须排在 /:id 之前 --------------------",
         "parameters": [],
         "security": [
           {
@@ -6880,7 +6880,7 @@
           "orders"
         ],
         "operationId": "get_orders_id_profit",
-        "description": "单订单利润分解（方案 6.2）：收入 → 成本快照 → 达人佣金 → 退款冲减 → 广告分摊 → 其他费用分摊 → 利润/利润率。\n广告与费用按「同店同站点自然日内已匹配金额占比」分摊，口径写在各自 basis 字段里。\n没有结算流水 → is_estimated=1。",
+        "description": "单订单利润分解（方案 6.2）：已计返点实收 → 应收返点 / 物流支出 → 达人佣金 → 退款冲减（只冲返点）\n→ 广告分摊 → 其他费用分摊 → 贡献毛利 / 利润 / 利润率。\n广告与费用按「同店同站点自然日内已计返点金额占比」分摊，口径写在各自 basis 字段里。\n没有结算流水 → is_estimated=1。",
         "parameters": [
           {
             "name": "id",
@@ -7266,7 +7266,7 @@
           "orders"
         ],
         "operationId": "get_orders_returns_impact",
-        "description": "售后对经营的影响：退款额、退款率、回仓率、未回仓损失，按店铺拆分",
+        "description": "售后对经营的影响：退款额、退款率、回仓率、未回仓损失，按店铺拆分。\n「未回仓损失」在新口径下只剩**我们已经掏出去的物流**（logistics_cny 冻结值）：\n 货款是品牌的、退回去的是品牌的货，返点只是「没赚到」，那份冲减已经在 refund_cny 里体现，\n 这里再扣一次就是把同一笔钱算两遍。未配返点率的行同样排除（不按 0 计入）。",
         "parameters": [],
         "security": [
           {
@@ -7359,7 +7359,7 @@
           "orders"
         ],
         "operationId": "get_orders_unmatched",
-        "description": "无成本快照的订单行：只读清单，永不参与成本/利润计算",
+        "description": "没有返点率的订单行（SKU 没映射上 → 品牌不会给我们返点）：只读清单，永不参与收入/成本/利润计算。\n行内的返点/物流金额一律出 null 而不是 0：0 的语义是「品牌确实给我们 0 返点」，\n而这里是「还没配」——写成 0 会让这张补配清单失去依据，也会让汇总把数据缺口当成不赚钱的生意。",
         "parameters": [
           {
             "name": "days",
@@ -7437,7 +7437,7 @@
           "products"
         ],
         "operationId": "get_products_categories",
-        "description": "该店铺是否落在当前用户的数据范围内（写接口与显式 shop_id 筛选用） */\nfunction assertShopInScope(user: CurrentUser, shopId: number | null | undefined): void {\nif (shopId === null || shopId === undefined) return;\nif (user.data_scope === DATA_SCOPE.ALL) return;\nconst scope = shopScope(user, 's.id');\nif (!scope.sql) return;\nconst hit = get<{ hit: number }>(`SELECT 1 AS hit FROM tk_shop s WHERE s.id = ? ${scope.sql}`, shopId, ...scope.params);\nif (!hit) throw forbidden(`店铺 #${shopId} 不在你的数据范围内`);\n}\n/* ==================== 入参校验 ==================== */\nconst spuBody = z.object({\nspu_code: z.string().min(1).max(64),\nname_cn: z.string().min(1).max(200),\nname_en: z.string().max(300).nullish(),\ncategory: z.string().max(100).nullish(),\nmain_image: z.string().max(500).nullish(),\nowner_id: z.number().int().nullish(),\nstatus: z.number().int().min(1).max(3).default(1),\n});\nconst skuBody = z.object({\nspu_id: z.number().int().positive(),\nsku_code: z.string().min(1).max(64),\nspec: z.string().max(200).nullish(),\npurchase_cost: z.number().min(0).default(0),\nfirst_leg_cost: z.number().min(0).default(0),\nweight_g: z.number().int().min(0).nullish(),\npackage_size: z.string().max(50).nullish(),\nstatus: z.number().int().min(0).max(1).default(1),\n});\nconst listingBody = z.object({\nshop_id: z.number().int().positive(),\n// 0 = 清空绑定（前端「解绑」按钮传法），落库归一为 null 并回落 map_status=2\nsku_id: z.number().int().min(0).nullish(),\ntk_product_id: z.string().max(64).nullish(),\ntk_sku_id: z.string().max(64).nullish(),\nseller_sku: z.string().max(100).nullish(),\nproduct_name: z.string().max(300).nullish(),\nsale_price: z.number().min(0).default(0),\nlisting_status: z.number().int().min(1).max(5).default(1),\n});\nexport const productRouter = Router();\n/* ==================== 只读字典：登录即可（其他模块建单也要选类目） ====================",
+        "description": "品牌返点率：0-1 的比例（0.18 = 实收 GMV 的 18% 归我们），0 = 未配置。\n上限必须是 1 —— 有人会把「18%」填成 18，那是金额不是比率，会让返点直接放大 100 倍。\n/\nconst rebateRate = z.number().min(0, '品牌返点率不能为负数').max(1, '品牌返点率是比例（0.18 = 实收 GMV 的 18% 归我们），请填 0~1 的小数，不要填成金额');\nconst skuBody = z.object({\nspu_id: z.number().int().positive(),\nsku_code: z.string().min(1).max(64),\nspec: z.string().max(200).nullish(),\nrebate_rate: rebateRate.default(0),\nlogistics_cost: z.number().min(0, '单件物流成本不能为负数').default(0),\nweight_g: z.number().int().min(0).nullish(),\npackage_size: z.string().max(50).nullish(),\nstatus: z.number().int().min(0).max(1).default(1),\n});\nconst listingBody = z.object({\nshop_id: z.number().int().positive(),\n// 0 = 清空绑定（前端「解绑」按钮传法），落库归一为 null 并回落 map_status=2\nsku_id: z.number().int().min(0).nullish(),\ntk_product_id: z.string().max(64).nullish(),\ntk_sku_id: z.string().max(64).nullish(),\nseller_sku: z.string().max(100).nullish(),\nproduct_name: z.string().max(300).nullish(),\nsale_price: z.number().min(0).default(0),\nlisting_status: z.number().int().min(1).max(5).default(1),\n});\nexport const productRouter = Router();\n/* ==================== 只读字典：登录即可（其他模块建单也要选类目） ====================",
         "parameters": [
           {
             "name": "category",
@@ -8132,7 +8132,7 @@
           "products"
         ],
         "operationId": "put_products_sku_id",
-        "description": "改成本：只影响之后同步的订单。\n这里只做两件事 —— 落库 + 写 before/after 操作日志（成本口径要能在成本时间线里追溯）；\n历史 tk_order_item.cost_snapshot 一律不回写。",
+        "description": "改返点率 / 物流成本：只影响之后同步的订单。\n这里只做两件事 —— 落库 + 写 before/after 操作日志（商务口径要能在成本时间线里追溯）；\n历史 tk_order_item.rebate_cny / logistics_cny 一律不回写。",
         "parameters": [
           {
             "name": "id",
@@ -8231,7 +8231,7 @@
           "products"
         ],
         "operationId": "get_products_sku_id_cost_history",
-        "description": "成本变更时间线：数据源就是 sys_op_log（操作日志没有更新入口，天然当审计账本用）。\n无成本权限的人不返回该清单（requireMenu 已挡住 product 菜单，这里再加一道成本判断）。",
+        "description": "返点率 / 物流成本变更时间线：数据源就是 sys_op_log（操作日志没有更新入口，天然当审计账本用）。\n无成本权限的人不返回该清单（requireMenu 已挡住 product 菜单，这里再加一道成本判断）。",
         "parameters": [
           {
             "name": "id",
@@ -8572,6 +8572,14 @@
             }
           },
           {
+            "name": "rebate_missing",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "shop_id",
             "in": "query",
             "required": false,
@@ -8746,7 +8754,7 @@
           "products"
         ],
         "operationId": "get_products_unmapped",
-        "description": "待映射清单 = map_status=2 的 listing + 其未匹配订单行数与影响金额；\nrows 里额外给出所有「没有成本快照」的订单行，供运营定位到底是哪几笔单算不出利润。",
+        "description": "待映射清单 = map_status=2 的 listing + 其算不出返点的订单行数与影响金额；\nrows 里额外给出所有「没有返点快照（rebate_matched=0）」的订单行，供运营定位到底是哪几笔单进不了利润。\n清单里的行有两类，处理动作不一样，所以把 sku_id 一并给出：NULL=补映射，非 NULL=去 SKU 上配返点率。",
         "parameters": [],
         "security": [
           {

@@ -213,7 +213,7 @@ export function createTwinShop(tag: string): number {
     owner_id: ownerId(),
   });
   const skus = all<{ id: number; sku_code: string }>(
-    `SELECT id, sku_code FROM product_sku WHERE is_deleted = 0 AND status = 1 AND purchase_cost > 0 ORDER BY id ASC LIMIT 2`,
+    `SELECT id, sku_code FROM product_sku WHERE is_deleted = 0 AND status = 1 AND rebate_rate > 0 ORDER BY id ASC LIMIT 2`,
   );
   if (skus.length !== TWIN_LISTINGS.length) throw new Error(`演示库的内部 SKU 不足 ${TWIN_LISTINGS.length} 条，对拍前提不成立`);
   TWIN_LISTINGS.forEach((l, i) => {
@@ -312,7 +312,8 @@ export const ORDER_COLUMNS = [
 ] as const;
 
 export const ITEM_COLUMNS = [
-  'sku_id', 'quantity', 'unit_price', 'discount', 'item_amount', 'cost_snapshot', 'cost_matched', 'seller_sku',
+  'sku_id', 'quantity', 'unit_price', 'discount', 'item_amount',
+  'rebate_rate', 'rebate_cny', 'logistics_cny', 'rebate_matched', 'seller_sku',
 ] as const;
 
 export const LISTING_COLUMNS = [
@@ -330,7 +331,8 @@ export function orderSnapshot(tkOrderId: string): Record<string, unknown> {
   const head = get<Record<string, unknown>>(`SELECT * FROM tk_order WHERE tk_order_id = ?`, tkOrderId);
   if (!head) throw new Error(`库里没有订单 ${tkOrderId}：这一列对拍无从谈起`);
   const items = all<Record<string, unknown>>(
-    `SELECT i.quantity, i.unit_price, i.discount, i.item_amount, i.cost_snapshot, i.cost_matched, i.sku_id,
+    `SELECT i.quantity, i.unit_price, i.discount, i.item_amount,
+            i.rebate_rate, i.rebate_cny, i.logistics_cny, i.rebate_matched, i.sku_id,
             IFNULL(l.seller_sku, '') AS seller_sku, (i.listing_id IS NOT NULL) AS has_listing,
             IFNULL(l.map_status, 0) AS map_status
        FROM tk_order_item i LEFT JOIN shop_listing l ON l.id = i.listing_id

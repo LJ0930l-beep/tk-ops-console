@@ -1,13 +1,18 @@
 /**
  * 订单中心（方案表 6 tk_order / 表 7 tk_order_item / 表 8 tk_return）
  *
+ * 口径：品牌服务方（代运营/服务商），货是品牌的，我们不背货款。
  * 三条口径（方案 5.3 要点，本模块逐条落地）：
- *  1. 成本一律读 tk_order_item.cost_snapshot（订单落库时冻结的人民币快照），本文件**只读不写**快照，
- *     改 SKU 成本不回溯历史（改价入口在商品中心）；
- *  2. cost_matched=0 的行没有成本，所有收入/成本/佣金/利润口径整体排除它们（绝不按 0 成本参与计算），
- *     响应里给 warn 与被排除的行数和金额；要补历史行请用「数据同步 → 派生汇总刷新」；
- *  3. is_sample_order=1 是达人免费样品单，不计 GMV 也不计利润（与利润引擎 includeSample=false 同口径）。
+ *  1. 收入一律读 tk_order_item.rebate_cny（成交时冻结的人民币应收返点），支出读同表的 logistics_cny，
+ *     本文件**只读不写**这两个快照，改 SKU 返点率不回溯历史单（改返点入口在商品中心）；
+ *  2. rebate_matched=0 的行没有返点率（SKU 没映射上 → 品牌不会给我们钱），所有收入/成本/佣金/利润口径
+ *     整体排除它们。为什么是排除而不是按 0 收入计：0 表示「这单我们确实一分钱返点都没有」，
+ *     排除表示「这一行还没配」——两个数混成一个，运营就分不清是数据缺还是生意差，
+ *     补上去的默认值还会一路传染到告警与达人榜（COALESCE(rate,1) 那一类缺陷就是这么发生的）；
+ *     响应里给 warn 与被排除的行数和金额，要补历史行请用「数据同步 → 派生汇总刷新」；
+ *  3. is_sample_order=1 是达人免费样品单，不计 GMV 也不计利润（寄样运费走达人/费用口径）。
  *
+ * 预估毛利 = 应收返点 − 我们承担的物流 − 达人佣金（贡献毛益，**不含广告与期间费用**，全口径看利润报表）。
  * 人民币折算：按订单日期取 exchange_rate → 取不到用该币种最近一天 → 再取不到用 1，并回 rate_missing。
  * 金额与状态人工不可改（方案表 6）；唯一允许人工写的订单字段是 is_sample_order，且必须留痕。
  */
@@ -72,12 +77,17 @@ const SETTLE_TXN_LABEL: Record<number, string> = {
 const contentLabel = (v: unknown): string | null => (v === null || v === undefined ? null : CONTENT_TYPE_LABEL[num(v)] ?? `类型${String(v)}`);
 const responsibilityLabel = (v: unknown): string => RESPONSIBILITY_LABEL[num(v)] ?? '未归类';
 
-const SAMPLE_TIP = '样品单不计 GMV，也不计利润（其成本走寄样/达人费用口径）';
-const UNMAPPED_TIP = '存在成本未匹配的订单行：这些行已从收入、成本、佣金与利润中整体排除，绝不按 0 成本参与计算，请尽快在商品中心完成映射';
+const SAMPLE_TIP = '样品单不计 GMV，也不计利润（寄样运费走达人/费用口径）';
+const UNMAPPED_TIP =
+  '存在未配返点率的订单行（SKU 没映射上 → 品牌不会给我们返点）：这些行已从收入、成本、佣金与利润中整体排除，' +
+  '绝不按 0 收入计入（0 是「这单确实没返点」，排除是「还没配」），请尽快在商品中心完成映射并核对返点率';
 
-/** 无 can_see_cost 时掩码的字段集合（按接口分别取用） */
-const LIST_COST_FIELDS = ['cost_cny', 'commission_cny', 'est_profit_cny', 'est_profit_rate'];
-const ITEM_COST_FIELDS = ['cost_snapshot', 'unit_cost_cny', 'est_commission', 'est_commission_cny', 'commission_cny', 'profit_cny'];
+/**
+ * 无 can_see_cost 时掩码的字段集合（按接口分别取用）。
+ * 返点率与返点额是我们的收入、也是和品牌的商务条款，佣金/物流是我们掏的钱 —— 四类都算钱，一律要掩。
+ */
+const LIST_COST_FIELDS = ['rebate_cny', 'logistics_cny', 'commission_cny', 'est_profit_cny', 'est_profit_rate'];
+const ITEM_COST_FIELDS = ['rebate_rate', 'rebate_cny', 'logistics_cny', 'unit_logistics_cny', 'est_commission', 'est_commission_cny', 'commission_cny', 'profit_cny'];
 
 /* ==================== SQL 片段 ==================== */
 
@@ -92,11 +102,18 @@ const RATE = RATE_RAW;
 /** 售后维度（别名必须是 r）：申请时间优先，缺失退回完成时间 */
 const RATE_RETURN = rateToCnyExpr('r.currency', 'COALESCE(substr(r.apply_time, 1, 10), substr(r.finish_time, 1, 10))');
 
-/** 以下聚合子查询全部挂在别名 o 上；只有 cost_matched=1 的明细进入金额口径 */
-const SUM_MATCHED_AMOUNT = `(SELECT COALESCE(SUM(i.item_amount), 0) FROM tk_order_item i WHERE i.order_id = o.id AND i.is_deleted = 0 AND i.cost_matched = 1)`;
-const SUM_UNMAPPED_AMOUNT = `(SELECT COALESCE(SUM(i.item_amount), 0) FROM tk_order_item i WHERE i.order_id = o.id AND i.is_deleted = 0 AND i.cost_matched = 0)`;
-const SUM_COMMISSION = `(SELECT COALESCE(SUM(i.est_commission), 0) FROM tk_order_item i WHERE i.order_id = o.id AND i.is_deleted = 0 AND i.cost_matched = 1)`;
-const SUM_COST = `(SELECT COALESCE(SUM(i.cost_snapshot), 0) FROM tk_order_item i WHERE i.order_id = o.id AND i.is_deleted = 0 AND i.cost_matched = 1)`;
+/**
+ * 以下聚合子查询全部挂在别名 o 上；只有 rebate_matched=1 的明细进入金额口径
+ * （未配返点率的行整体排除，理由见文件头第 2 条）。
+ * rebate_cny / logistics_cny 是成交时冻结的人民币，SQL 里**不再乘汇率**（乘了就是双折算）。
+ */
+const SUM_MATCHED_AMOUNT = `(SELECT COALESCE(SUM(i.item_amount), 0) FROM tk_order_item i WHERE i.order_id = o.id AND i.is_deleted = 0 AND i.rebate_matched = 1)`;
+const SUM_UNMAPPED_AMOUNT = `(SELECT COALESCE(SUM(i.item_amount), 0) FROM tk_order_item i WHERE i.order_id = o.id AND i.is_deleted = 0 AND i.rebate_matched = 0)`;
+const SUM_COMMISSION = `(SELECT COALESCE(SUM(i.est_commission), 0) FROM tk_order_item i WHERE i.order_id = o.id AND i.is_deleted = 0 AND i.rebate_matched = 1)`;
+/** 应收返点（人民币，我们的唯一收入） */
+const SUM_REBATE = `(SELECT COALESCE(SUM(i.rebate_cny), 0) FROM tk_order_item i WHERE i.order_id = o.id AND i.is_deleted = 0 AND i.rebate_matched = 1)`;
+/** 我们承担的物流支出（人民币） */
+const SUM_LOGISTICS = `(SELECT COALESCE(SUM(i.logistics_cny), 0) FROM tk_order_item i WHERE i.order_id = o.id AND i.is_deleted = 0 AND i.rebate_matched = 1)`;
 /**
  * 只累计「已完成」退款（PRD 4.2 场景 D / 方案 5.3 净 GMV 口径）。
  * 以前没有状态过滤：PROCESSING / REJECTED 的售后也进退款，净 GMV 与利润被一起压低，
@@ -105,7 +122,8 @@ const SUM_COST = `(SELECT COALESCE(SUM(i.cost_snapshot), 0) FROM tk_order_item i
 const REFUND_DONE = `r.order_id = o.id AND r.is_deleted = 0 AND r.status = 'COMPLETED'`;
 const SUM_REFUND = `(SELECT COALESCE(SUM(r.refund_amount), 0) FROM tk_return r WHERE ${REFUND_DONE})`;
 const COUNT_ITEMS = `(SELECT COUNT(*) FROM tk_order_item i WHERE i.order_id = o.id AND i.is_deleted = 0)`;
-const COUNT_UNMAPPED = `(SELECT COUNT(*) FROM tk_order_item i WHERE i.order_id = o.id AND i.is_deleted = 0 AND i.cost_matched = 0)`;
+/** 未配返点率的行数：告警与「仅含待映射行」筛选用它，这些行不参与任何钱口径 */
+const COUNT_UNMAPPED = `(SELECT COUNT(*) FROM tk_order_item i WHERE i.order_id = o.id AND i.is_deleted = 0 AND i.rebate_matched = 0)`;
 const COUNT_SETTLED = `(SELECT COUNT(*) FROM settlement_txn t WHERE t.tk_order_id = o.tk_order_id AND t.is_deleted = 0)`;
 
 /** 计 GMV / 计利润的条件：非样品单且非取消 */
@@ -119,12 +137,17 @@ const ORDER_SELECT = `o.*, s.shop_name, s.region, s.timezone,
         ${SUM_MATCHED_AMOUNT} AS matched_amount,
         ${SUM_UNMAPPED_AMOUNT} AS unmapped_amount,
         ${SUM_COMMISSION} AS commission_local,
-        ${SUM_COST} AS cost_cny,
+        ${SUM_REBATE} AS rebate_cny,
+        ${SUM_LOGISTICS} AS logistics_cny,
         ${SUM_REFUND} AS refund_local,
         ${COUNT_SETTLED} AS settled_count,
         ${RATE_RAW} AS rate_to_cny`;
 
-/** 聚合口径：外层 FROM 必须是 ORDER_FROM（别名 o / s） */
+/**
+ * 聚合口径：外层 FROM 必须是 ORDER_FROM（别名 o / s）。
+ * est_profit_cny = 应收返点 − 我们承担的物流 − 达人佣金（贡献毛益，不含广告与期间费用）；
+ * GMV / 净 GMV 仍按整单实收算 —— 带货额是品牌的生意，只有进到「钱」的列才排未配返点行。
+ */
 const AGGREGATE_SELECT = `
         COUNT(*) AS orders,
         SUM(CASE WHEN o.order_status = 'CANCELLED' THEN 1 ELSE 0 END) AS cancelled_orders,
@@ -133,9 +156,10 @@ const AGGREGATE_SELECT = `
         ROUND(SUM(CASE WHEN ${COUNTABLE} THEN o.total_paid * ${RATE} ELSE 0 END), 2) AS gmv_cny,
         ROUND(SUM(${SUM_REFUND} * ${RATE}), 2) AS refund_cny,
         ROUND(SUM(CASE WHEN ${COUNTABLE} THEN (o.total_paid - ${SUM_REFUND}) * ${RATE} ELSE 0 END), 2) AS net_gmv_cny,
-        ROUND(SUM(${SUM_COST}), 2) AS cost_cny,
+        ROUND(SUM(${SUM_REBATE}), 2) AS rebate_cny,
+        ROUND(SUM(${SUM_LOGISTICS}), 2) AS logistics_cny,
         ROUND(SUM(${SUM_COMMISSION} * ${RATE}), 2) AS commission_cny,
-        ROUND(SUM(CASE WHEN ${COUNTABLE} THEN (${SUM_MATCHED_AMOUNT} - ${SUM_COMMISSION}) * ${RATE} - ${SUM_COST} ELSE 0 END), 2) AS est_profit_cny`;
+        ROUND(SUM(CASE WHEN ${COUNTABLE} THEN ${SUM_REBATE} - ${SUM_LOGISTICS} - ${SUM_COMMISSION} * ${RATE} ELSE 0 END), 2) AS est_profit_cny`;
 
 /** 按店铺 IANA 时区切自然日（含夏令时，tz_day 由 core/db.ts 注册，第三参是站点兜底偏移） */
 const tzDayExpr = (timeCol: string, tzCol: string, regionCol: string): string => `tz_day(${timeCol}, ${tzCol}, ${regionCol})`;
@@ -201,7 +225,7 @@ function orderQ(req: Request): Q {
   q.between('o.paid_time', qv(req, 'paid_time_from'), qv(req, 'paid_time_to'));
   const days = qv(req, 'days');
   if (days) q.and(`o.order_time >= datetime('now', ?)`, `-${Math.max(1, Number(days) || 30)} days`);
-  if (qv(req, 'only_unmapped') === '1') q.and(`EXISTS (SELECT 1 FROM tk_order_item i2 WHERE i2.order_id = o.id AND i2.is_deleted = 0 AND i2.cost_matched = 0)`);
+  if (qv(req, 'only_unmapped') === '1') q.and(`EXISTS (SELECT 1 FROM tk_order_item i2 WHERE i2.order_id = o.id AND i2.is_deleted = 0 AND i2.rebate_matched = 0)`);
   if (qv(req, 'has_return') === '1') q.and(`EXISTS (SELECT 1 FROM tk_return r2 WHERE r2.order_id = o.id AND r2.is_deleted = 0)`);
   const settled = qv(req, 'settled');
   if (settled === '0') q.and(`NOT EXISTS (SELECT 1 FROM settlement_txn t2 WHERE t2.tk_order_id = o.tk_order_id AND t2.is_deleted = 0)`);
@@ -224,10 +248,12 @@ function orderView(user: CurrentUser) {
     const counted = !sample && !cancelled;
     const matched = num(row.matched_amount);
     const commission = num(row.commission_local);
-    const cost = num(row.cost_cny);
+    // 冻结列本身就是人民币：返点是收入，物流与佣金是支出
+    const rebate = num(row.rebate_cny);
+    const logistics = num(row.logistics_cny);
     const refund = num(row.refund_local);
     const incomeCny = round2(matched * rate);
-    const profit = counted ? round2((matched - commission) * rate - cost) : 0;
+    const profit = counted ? round2(rebate - logistics - commission * rate) : 0;
     return maskFields(
       {
         ...row,
@@ -239,10 +265,12 @@ function orderView(user: CurrentUser) {
         gmv_cny: counted ? round2(num(row.total_paid) * rate) : 0,
         refund_cny: round2(refund * rate),
         net_gmv_cny: counted ? round2((num(row.total_paid) - refund) * rate) : 0,
-        cost_cny: round2(cost),
+        rebate_cny: round2(rebate),
+        logistics_cny: round2(logistics),
         commission_cny: round2(commission * rate),
         unmapped_amount_cny: round2(num(row.unmapped_amount) * rate),
         est_profit_cny: profit,
+        /** 分母是「已配返点率那部分行的实收金额」：整单实收里掺着没配返点的行，用它算利润率会把数据缺口读成低毛利 */
         est_profit_rate: profitRate(profit, incomeCny),
         is_settled: num(row.settled_count) > 0,
         is_estimated: num(row.settled_count) > 0 ? 0 : 1,
@@ -271,7 +299,7 @@ function loadOrder(req: Request, id: number): Record<string, unknown> {
 export const orderRouter = Router();
 orderRouter.use(requireMenu('order'));
 
-/* -------------------- 列表 / 汇总 / 未匹配 / 导出：静态路径必须排在 /:id 之前 -------------------- */
+/* -------------------- 列表 / 汇总 / 未配返点行 / 导出：静态路径必须排在 /:id 之前 -------------------- */
 
 orderRouter.get(
   '/',
@@ -284,7 +312,7 @@ orderRouter.get(
       ...page,
       list: page.list.map(orderView(user)),
       stats: { ...stats, refund_rate: profitRate(num(stats.refund_cny), num(stats.gmv_cny)) },
-      tip: '样品单与已取消订单不计 GMV；est_profit 仅含冻结成本快照与达人佣金，不含广告与费用分摊',
+      tip: '样品单与已取消订单不计 GMV；est_profit = 冻结应收返点 − 物流 − 达人佣金（贡献毛益，不含广告与期间费用），未配返点率的行整体排除',
     });
   }),
 );
@@ -315,16 +343,20 @@ orderRouter.get(
       totals: withRate(totals),
       by_shop: byShop.map(withRate),
       by_day: byDay.map(withRate),
-      note: '按日切分用站点时区自然日（与 ad_daily.stat_date 同口径）；GMV 与利润均已排除样品单、已取消订单与待映射明细行',
+      note: '按日切分用站点时区自然日（与 ad_daily.stat_date 同口径）；GMV 已排除样品单与已取消订单但含未配返点率的行（带货额是品牌的生意），rebate_cny / logistics_cny / est_profit_cny 只算 rebate_matched=1 的行',
     });
   }),
 );
 
-/** 无成本快照的订单行：只读清单，永不参与成本/利润计算 */
+/**
+ * 没有返点率的订单行（SKU 没映射上 → 品牌不会给我们返点）：只读清单，永不参与收入/成本/利润计算。
+ * 行内的返点/物流金额一律出 null 而不是 0：0 的语义是「品牌确实给我们 0 返点」，
+ * 而这里是「还没配」——写成 0 会让这张补配清单失去依据，也会让汇总把数据缺口当成不赚钱的生意。
+ */
 orderRouter.get(
   '/unmatched',
   wrap((req, res) => {
-    const q = applyScope(new Q('i.is_deleted = 0 AND i.cost_matched = 0'), scopeOf(req, 'o.shop_id'));
+    const q = applyScope(new Q('i.is_deleted = 0 AND i.rebate_matched = 0'), scopeOf(req, 'o.shop_id'));
     q.eq('o.shop_id', qv(req, 'shop_id'))
       .eq('l.map_status', qv(req, 'map_status'))
       .like('o.tk_order_id LIKE ? OR l.tk_sku_id LIKE ? OR l.seller_sku LIKE ? OR l.product_name LIKE ?', qv(req, 'keyword'));
@@ -358,11 +390,15 @@ orderRouter.get(
       list: page.list.map((row) => ({
         ...row,
         unmapped: true,
-        cost_snapshot: null,
+        // 表里存的是默认值 0，出参必须清空：0 = 「品牌给 0 返点」，null = 「还没配」
+        rebate_rate: null,
+        rebate_cny: null,
+        logistics_cny: null,
+        est_profit_cny: null,
         order_status_label: ORDER_STATUS_LABEL[String(row.order_status ?? '')] ?? String(row.order_status ?? ''),
-        cost_note: '无成本快照，未参与任何利润计算',
+        rebate_note: '未配返点率（SKU 未映射），整行不计收入也不计支出，未参与任何利润计算',
       })),
-      totals: totals ?? {},
+      totals: { ...(totals ?? {}), note: '这些行的金额只是被排除的规模参考，不进任何利润口径' },
       warn: UNMAPPED_TIP,
     });
   }),
@@ -387,7 +423,8 @@ const EXPORT_COLUMNS = [
   'net_gmv_cny',
   'item_count',
   'unmapped_item_count',
-  'cost_cny',
+  'rebate_cny',
+  'logistics_cny',
   'commission_cny',
   'est_profit_cny',
   'fulfillment_type',
@@ -450,7 +487,7 @@ const RETURN_FROM = `tk_return r
 
 const RETURN_SELECT = `r.*, s.shop_name, s.region,
        o.tk_order_id, o.order_time, o.order_status, o.currency AS order_currency,
-       i.id AS item_id, i.quantity, i.item_amount, i.cost_matched, i.sku_id, i.content_type, i.content_id,
+       i.id AS item_id, i.quantity, i.item_amount, i.rebate_matched, i.sku_id, i.content_type, i.content_id,
        l.tk_sku_id, l.seller_sku, l.product_name, k.sku_code, c.handle AS creator_handle,
        ${RATE_RETURN} AS rate_to_cny,
        ROUND(r.refund_amount * ${RATE_RETURN}, 2) AS refund_amount_cny`;
@@ -542,7 +579,12 @@ orderRouter.get(
   }),
 );
 
-/** 售后对经营的影响：退款额、退款率、回仓率、未回仓损失，按店铺拆分 */
+/**
+ * 售后对经营的影响：退款额、退款率、回仓率、未回仓损失，按店铺拆分。
+ * 「未回仓损失」在新口径下只剩**我们已经掏出去的物流**（logistics_cny 冻结值）：
+ *  货款是品牌的、退回去的是品牌的货，返点只是「没赚到」，那份冲减已经在 refund_cny 里体现，
+ *  这里再扣一次就是把同一笔钱算两遍。未配返点率的行同样排除（不按 0 计入）。
+ */
 orderRouter.get(
   '/returns/impact',
   wrap((req, res) => {
@@ -550,20 +592,21 @@ orderRouter.get(
     const q = returnQ(req);
     const where = q.whereSql;
     const params = q.params;
+    const LOST_LOGISTICS = `CASE WHEN r.is_restocked = 0 AND i.rebate_matched = 1 THEN i.logistics_cny ELSE 0 END`;
     const totals = get<Record<string, unknown>>(
       `SELECT COUNT(*) AS returns,
               COUNT(DISTINCT r.order_id) AS refund_orders,
               ROUND(COALESCE(SUM(r.refund_amount * ${RATE_RETURN}), 0), 2) AS refund_cny,
               COALESCE(SUM(CASE WHEN r.is_restocked = 1 THEN 1 ELSE 0 END), 0) AS restocked,
               COALESCE(SUM(CASE WHEN r.status = 'COMPLETED' THEN 1 ELSE 0 END), 0) AS completed,
-              ROUND(COALESCE(SUM(CASE WHEN r.is_restocked = 0 THEN i.cost_snapshot ELSE 0 END), 0), 2) AS lost_cost_cny
+              ROUND(COALESCE(SUM(${LOST_LOGISTICS}), 0), 2) AS lost_logistics_cny
          FROM ${RETURN_FROM}${where}`,
       ...params,
     );
     const byShop = all<Record<string, unknown>>(
       `SELECT r.shop_id AS shop_id, s.shop_name AS shop_name, COUNT(*) AS returns,
               ROUND(COALESCE(SUM(r.refund_amount * ${RATE_RETURN}), 0), 2) AS refund_cny,
-              ROUND(COALESCE(SUM(CASE WHEN r.is_restocked = 0 THEN i.cost_snapshot ELSE 0 END), 0), 2) AS lost_cost_cny
+              ROUND(COALESCE(SUM(${LOST_LOGISTICS}), 0), 2) AS lost_logistics_cny
          FROM ${RETURN_FROM}${where}
         GROUP BY r.shop_id, s.shop_name ORDER BY refund_cny DESC LIMIT 100`,
       ...params,
@@ -583,8 +626,8 @@ orderRouter.get(
         refund_rate: profitRate(num(totals?.refund_cny), gmv),
         restock_rate: returns > 0 ? round2((num(totals?.restocked) / returns) * 100) : 0,
       },
-      by_shop: byShop.map((r) => maskFields(r, ['lost_cost_cny'], user.can_see_cost)),
-      note: 'lost_cost_cny = 未回仓订单行已冻结成本的损失口径（无成本快照的行按排除处理，不按 0 计入）',
+      by_shop: byShop.map((r) => maskFields(r, ['lost_logistics_cny'], user.can_see_cost)),
+      note: 'lost_logistics_cny = 未回仓订单行我们已经掏出去的物流支出（未配返点率的行按排除处理，不按 0 计入；返点损失已在 refund_cny 的收入冲减里体现，不重复扣）',
     });
   }),
 );
@@ -677,10 +720,14 @@ orderRouter.get(
       id,
     );
     const itemView = (row: Record<string, unknown>): Record<string, unknown> => {
-      const matched = num(row.cost_matched) === 1;
+      const matched = num(row.rebate_matched) === 1;
       const qty = Math.max(1, num(row.quantity));
       const itemAmount = num(row.item_amount);
-      const cost = num(row.cost_snapshot);
+      // 只用成交时冻结的 rebate_cny / logistics_cny，不按 rebate_rate 现算：
+      // 聚合 SQL 读的就是这两列，行内一旦重算（汇率取的时点还未必一样）就会出现「明细加起来 ≠ 订单头」。
+      // shared 的 estItemProfitCny 是给成交**前**估算用的（选品/商品页），成交后以冻结列为准。
+      const rebate = num(row.rebate_cny);
+      const logistics = num(row.logistics_cny);
       const commissionCny = round2(num(row.est_commission) * rate);
       return maskFields(
         {
@@ -688,12 +735,16 @@ orderRouter.get(
           unmapped: !matched,
           unit_price_cny: round2(num(row.unit_price) * rate),
           item_amount_cny: round2(itemAmount * rate),
-          unit_cost_cny: matched ? round2(cost / qty) : null,
+          rebate_rate: matched ? num(row.rebate_rate) : null,
+          rebate_cny: matched ? round2(rebate) : null,
+          logistics_cny: matched ? round2(logistics) : null,
+          unit_logistics_cny: matched ? round2(logistics / qty) : null,
           est_commission_cny: commissionCny,
           commission_cny: commissionCny,
-          profit_cny: matched ? round2((itemAmount - num(row.est_commission)) * rate - cost) : null,
+          // 行级贡献毛益：应收返点 − 我们承担的物流 − 达人佣金（不含广告与期间费用）
+          profit_cny: matched ? round2(rebate - logistics - commissionCny) : null,
           content_type_label: contentLabel(row.content_type),
-          cost_note: matched ? null : '成本未匹配，未参与利润计算',
+          rebate_note: matched ? null : '未配返点率（SKU 未映射），整行不计收入也不计支出，未参与任何利润计算',
         },
         ITEM_COST_FIELDS,
         user.can_see_cost,
@@ -737,8 +788,9 @@ orderRouter.get(
 );
 
 /**
- * 单订单利润分解（方案 6.2）：收入 → 成本快照 → 达人佣金 → 退款冲减 → 广告分摊 → 其他费用分摊 → 利润/利润率。
- * 广告与费用按「同店同站点自然日内已匹配金额占比」分摊，口径写在各自 basis 字段里。
+ * 单订单利润分解（方案 6.2）：已计返点实收 → 应收返点 / 物流支出 → 达人佣金 → 退款冲减（只冲返点）
+ * → 广告分摊 → 其他费用分摊 → 贡献毛利 / 利润 / 利润率。
+ * 广告与费用按「同店同站点自然日内已计返点金额占比」分摊，口径写在各自 basis 字段里。
  * 没有结算流水 → is_estimated=1。
  */
 orderRouter.get(
@@ -764,10 +816,12 @@ orderRouter.get(
         WHERE i.order_id = ? AND i.is_deleted = 0 ORDER BY i.id ASC`,
       id,
     );
-    const matchedItems = items.filter((it) => num(it.cost_matched) === 1);
-    const unmappedItems = items.filter((it) => num(it.cost_matched) !== 1);
+    const matchedItems = items.filter((it) => num(it.rebate_matched) === 1);
+    const unmappedItems = items.filter((it) => num(it.rebate_matched) !== 1);
     const incomeLocal = round2(matchedItems.reduce((s, it) => s + num(it.item_amount), 0));
-    const costCny = round2(matchedItems.reduce((s, it) => s + num(it.cost_snapshot), 0));
+    // 冻结的人民币列直接求和，不按 rebate_rate 现算（与列表/汇总 SQL 同一份数，明细加起来才等于订单头）
+    const rebateCny = round2(matchedItems.reduce((s, it) => s + num(it.rebate_cny), 0));
+    const logisticsCny = round2(matchedItems.reduce((s, it) => s + num(it.logistics_cny), 0));
     const commissionLocal = round2(matchedItems.reduce((s, it) => s + num(it.est_commission), 0));
     const commissionCny = round2(commissionLocal * rate);
     const incomeCny = round2(incomeLocal * rate);
@@ -778,6 +832,13 @@ orderRouter.get(
       id,
     );
     const refundCny = round2(returnRows.reduce((s, r) => s + num(r.refund_amount) * (String(r.currency) === 'CNY' ? 1 : rate), 0));
+    /**
+     * 退款掉的是**返点**，不是整笔退款额：退给买家的是品牌的货款，我们从来没垫过这笔本金，
+     * 掉的只是那部分实收对应的品牌返点。按退款占已计返点实收的比例冲减（不超过 1）。
+     * 旧口径直接 `收入 − 成本 − 佣金 − 退款额`，在返点口径下会把一单全额退货算成 −80% 毛利。
+     */
+    const refundRatio = incomeCny > 0 ? Math.min(1, refundCny / incomeCny) : 0;
+    const rebateClawbackCny = round2(rebateCny * refundRatio);
 
     const day = siteDayOf(head.order_time, timezone, region);
     const win = dayWindowUtc(day, timezone, region);
@@ -806,7 +867,7 @@ orderRouter.get(
             scalar<SqlParam>(
               `SELECT COALESCE(SUM(i.item_amount * ${RATE}), 0)
                  FROM tk_order_item i JOIN tk_order o ON o.id = i.order_id AND o.is_deleted = 0
-                WHERE i.is_deleted = 0 AND i.cost_matched = 1 AND o.shop_id = ?
+                WHERE i.is_deleted = 0 AND i.rebate_matched = 1 AND o.shop_id = ?
                   AND ${COUNTABLE} AND o.order_time >= ? AND o.order_time < ?`,
               shopId,
               win.from,
@@ -831,9 +892,11 @@ orderRouter.get(
       ),
     );
 
-    const grossProfit = counted ? round2(incomeCny - costCny - commissionCny) : 0;
-    const profit = counted ? round2(grossProfit - refundCny - allocAd - allocExpense) : 0;
-    const basis = `同店 ${day || '-'} 站点自然日消耗 × 本单已匹配金额 ÷ 当日全店已匹配金额（占比 ${round2(share * 100)}%）`;
+    // 贡献毛利（新口径的定义式）= 应收返点 − 我们承担的物流 − 达人佣金；广告与期间费用另列
+    const contribution = counted ? round2(rebateCny - logisticsCny - commissionCny) : 0;
+    const grossProfit = counted ? round2(contribution - rebateClawbackCny) : 0;
+    const profit = counted ? round2(grossProfit - allocAd - allocExpense) : 0;
+    const basis = `同店 ${day || '-'} 站点自然日消耗 × 本单已计返点金额 ÷ 当日全店已计返点金额（占比 ${round2(share * 100)}%）`;
 
     ok(
       res,
@@ -867,17 +930,19 @@ orderRouter.get(
             excluded_unmapped_items: unmappedItems.length,
             excluded_unmapped_amount: round2(unmappedItems.reduce((s, it) => s + num(it.item_amount), 0)),
             excluded_unmapped_amount_cny: round2(unmappedItems.reduce((s, it) => s + num(it.item_amount) * rate, 0)),
-            note: '收入只统计已匹配成本的明细行；未匹配行整体排除（不按 0 成本参与计算）',
+            note: '实收只统计已配返点率的明细行；未配返点率的行整体排除（不按 0 返点参与计算，那是数据缺口不是生意差）',
           },
-          cost: maskFields(
+          rebate: maskFields(
             {
-              cost_cny: costCny,
+              rebate_cny: rebateCny,
+              logistics_cny: logisticsCny,
               matched_items: matchedItems.length,
               unmatched_items: unmappedItems.length,
-              basis: 'tk_order_item.cost_snapshot 冻结快照（（采购+头程）×数量，人民币），不回写',
+              basis:
+                'tk_order_item.rebate_cny / logistics_cny 冻结快照（应收返点 = 实收折 CNY × 成交时返点率；物流 = 单件物流成本 × 数量），人民币，不回写、不按当前 SKU 返点率重算',
               note: sample ? SAMPLE_TIP : undefined,
             },
-            ['cost_cny'],
+            ['rebate_cny', 'logistics_cny'],
             user.can_see_cost,
           ),
           commission: maskFields(
@@ -907,12 +972,19 @@ orderRouter.get(
             ['commission_local', 'commission_total_cny'],
             user.can_see_cost,
           ),
-          refund: {
-            refund_cny: refundCny,
-            count: returnRows.length,
-            returns: returnRows.map((r) => ({ ...r, responsibility_label: responsibilityLabel(r.responsibility) })),
-            note: '退款按本单汇率折算人民币，作为收入的冲减项',
-          },
+          refund: maskFields(
+            {
+              refund_cny: refundCny,
+              rebate_clawback_cny: rebateClawbackCny,
+              clawback_ratio: round2(refundRatio * 100) / 100,
+              count: returnRows.length,
+              returns: returnRows.map((r) => ({ ...r, responsibility_label: responsibilityLabel(r.responsibility) })),
+              note: '退款退的是品牌的货款（我们不背本金），利润里只扣掉这部分实收对应的返点；退款额本身只作为 GMV 冲减展示',
+            },
+            // 冲掉的返点能反推我们的返点率，跟返点额一样掩
+            ['rebate_clawback_cny'],
+            user.can_see_cost,
+          ),
           ad_spend: maskFields(
             {
               shop_day_spend_cny: spendCny,
@@ -934,8 +1006,10 @@ orderRouter.get(
             ['shop_day_expense_cny', 'allocated_cny'],
             user.can_see_cost,
           ),
+          contribution_cny: contribution,
           gross_profit_cny: grossProfit,
           profit_cny: profit,
+          /** 分母是已计返点那部分实收（不是整单 GMV）：掺进没配返点的行会把数据缺口算成低毛利 */
           profit_rate: profitRate(profit, incomeCny),
           settled: { has_settlement: settledCount > 0, rows: settledCount, settled_income_cny: settledIncomeCny },
           is_estimated: settledCount > 0 ? 0 : 1,
@@ -949,7 +1023,7 @@ orderRouter.get(
             .filter(Boolean)
             .join('；'),
         },
-        ['gross_profit_cny', 'profit_cny', 'profit_rate'],
+        ['contribution_cny', 'gross_profit_cny', 'profit_cny', 'profit_rate'],
         user.can_see_cost,
       ),
     );

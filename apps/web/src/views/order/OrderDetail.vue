@@ -8,7 +8,7 @@
           <h3>{{ order?.shop_name ?? '订单' }} · {{ order?.tk_order_id ?? orderId }}</h3>
           <el-tag v-if="order" :type="statusTagType" size="small">{{ (ORDER_STATUS_LABEL[status] ?? status) || '—' }}</el-tag>
           <el-tag v-if="isSample" type="info" size="small" effect="dark">样品单 · 不计 GMV</el-tag>
-          <el-tag v-if="unmappedRows > 0" type="warning" size="small" effect="dark">{{ unmappedRows }} 行待映射 · 未计成本</el-tag>
+          <el-tag v-if="excludedRows > 0" type="warning" size="small" effect="dark">{{ excludedRows }} 行未配返点率 · 不计利润</el-tag>
         </div>
         <el-button :icon="Refresh" size="small" @click="loadAll">刷新</el-button>
       </div>
@@ -34,17 +34,19 @@
         <el-descriptions-item label="承运/运单">{{ [order?.carrier, order?.tracking_no].filter(Boolean).join(' / ') || '-' }}</el-descriptions-item>
         <el-descriptions-item label="明细行数">{{ text(order?.item_count ?? items.length) }}</el-descriptions-item>
         <el-descriptions-item label="商品金额合计">{{ money(itemsAmount) }}</el-descriptions-item>
-        <el-descriptions-item :label="costLabel('预估成本(CNY)')">{{ maskedOr(order?.est_cost ?? order?.cost_cny, () => itemsCostSum) }}</el-descriptions-item>
-        <el-descriptions-item :label="costLabel('预估毛利(CNY)')">{{ maskedOr(order?.est_profit, () => itemsProfitSum) }}</el-descriptions-item>
+        <el-descriptions-item :label="secLabel('应收返点(CNY)')">{{ maskedOr(order?.rebate_cny, () => itemsRebateSum) }}</el-descriptions-item>
+        <el-descriptions-item :label="secLabel('物流支出(CNY)')">{{ maskedOr(order?.logistics_cny, () => itemsLogisticsSum) }}</el-descriptions-item>
+        <el-descriptions-item :label="secLabel('预估贡献毛利(CNY)')">{{ maskedOr(order?.est_profit_cny ?? order?.est_profit, () => itemsProfitSum) }}</el-descriptions-item>
+        <el-descriptions-item label="不计利润的行">{{ excludedRows }} / {{ items.length }}</el-descriptions-item>
       </el-descriptions>
       <div v-if="!auth.canSeeCost" class="mask-tip">
-        <el-icon><Lock /></el-icon> 成本与利润字段需「成本权限」，当前账号由后端返回 ***（列不隐藏，便于对账）。
+        <el-icon><Lock /></el-icon> 返点与利润字段需「金额权限」（原可见成本），当前账号由后端返回 ***（列不隐藏，便于对账）。
       </div>
     </el-card>
 
     <!-- 明细表格 -->
     <el-card shadow="never" class="page-card">
-      <template #header><b>订单明细</b><span class="sub">待映射行不按 0 成本计入利润（PRD §5.6）</span></template>
+      <template #header><b>订单明细</b><span class="sub">没配到品牌返点率的行整体排除：不按 0 返点、也不按 0 收入计利润（PRD §5.6）</span></template>
       <el-table :data="items" border stripe size="small" :row-class-name="itemRowClass" style="width: 100%" v-loading="itemsLoading">
         <el-table-column type="index" label="#" width="46" />
         <el-table-column prop="sku_code" label="内部 SKU" width="140">
@@ -69,22 +71,28 @@
         <el-table-column prop="item_amount_cny" label="折算(CNY)" width="110" align="right">
           <template #default="{ row }">{{ money(row.item_amount_cny ?? row.item_amount_cny_est) }}</template>
         </el-table-column>
-        <el-table-column prop="cost_snapshot" :label="costLabel('成本快照(CNY)')" width="130" align="right">
-          <template #default="{ row }">{{ money(row.cost_snapshot) }}</template>
+        <el-table-column prop="rebate_rate" :label="secLabel('返点率')" width="90" align="right">
+          <template #default="{ row }">{{ fracPct(row.rebate_rate) }}</template>
         </el-table-column>
-        <el-table-column label="成本状态" width="150">
+        <el-table-column prop="rebate_cny" :label="secLabel('应收返点(CNY)')" width="130" align="right">
+          <template #default="{ row }">{{ excludedRow(row) ? notCounted(row.rebate_cny) : money(row.rebate_cny) }}</template>
+        </el-table-column>
+        <el-table-column prop="logistics_cny" :label="secLabel('物流支出(CNY)')" width="125" align="right">
+          <template #default="{ row }">{{ excludedRow(row) ? notCounted(row.logistics_cny) : money(row.logistics_cny) }}</template>
+        </el-table-column>
+        <el-table-column label="返点状态" width="170">
           <template #default="{ row }">
-            <el-tag v-if="unmappedRow(row)" type="danger" size="small">待映射，未计成本</el-tag>
-            <el-tag v-else type="success" size="small">已计成本</el-tag>
+            <el-tag v-if="excludedRow(row)" type="danger" size="small">未配返点率 · 不计利润</el-tag>
+            <el-tag v-else type="success" size="small">已按冻结返点计入</el-tag>
           </template>
         </el-table-column>
         <el-table-column prop="commission_rate" label="佣金率" width="90" align="right">
-          <template #default="{ row }">{{ row.commission_rate == null ? '-' : `${Number(row.commission_rate).toFixed(1)}%` }}</template>
+          <template #default="{ row }">{{ pointsPct(row.commission_rate) }}</template>
         </el-table-column>
-        <el-table-column prop="est_commission" :label="costLabel('预估佣金')" width="110" align="right">
+        <el-table-column prop="est_commission" :label="secLabel('预估佣金')" width="110" align="right">
           <template #default="{ row }">{{ money(row.est_commission) }}</template>
         </el-table-column>
-        <el-table-column :label="costLabel('预估利润(CNY)')" width="130" align="right">
+        <el-table-column :label="secLabel('预估贡献毛利(CNY)')" width="150" align="right">
           <template #default="{ row }">{{ itemProfit(row) }}</template>
         </el-table-column>
         <el-table-column prop="creator_handle" label="带货达人" width="140">
@@ -97,8 +105,8 @@
           <template #default="{ row }">{{ row.content_id ?? '-' }}</template>
         </el-table-column>
         <template #empty>
-          <el-empty description="没有订单明细，检查订单同步或商品映射">
-            <el-button type="primary" @click="router.push('/products/unmapped')">去处理待映射</el-button>
+          <el-empty description="没有订单明细：订单同步没带回明细，或店铺商品还没映射到内部 SKU">
+            <el-button type="primary" @click="router.push('/products/unmapped')">去处理未配返点的行</el-button>
           </el-empty>
         </template>
       </el-table>
@@ -206,7 +214,7 @@ function contentTypeLabel(v: unknown): string {
   if (v === null || v === undefined || v === '') return '未归因';
   return CONTENT_TYPE_LABEL[String(v)] ?? `类型${String(v)}`;
 }
-const costLabel = (label: string) => (auth.canSeeCost ? label : `${label} 🔒`);
+const secLabel = (label: string) => (auth.canSeeCost ? label : `${label} 🔒`);
 /** 头部汇总：后端有值用后端，无值且无成本权限时不给数字 */
 function maskedOr(v: unknown, fallback: () => number | string): string {
   if (isMask(v)) return MASK;
@@ -216,18 +224,41 @@ function maskedOr(v: unknown, fallback: () => number | string): string {
   return typeof f === 'string' ? f : money(f);
 }
 
-function unmappedRow(row: Row): boolean {
-  return !row.sku_id || Number(row.cost_matched ?? 0) !== 1;
+/* ---- 率与钱分得很清楚：rebate_rate 是率（小数），一律不进合计；
+       rebate_cny / logistics_cny 是钱（人民币），才能相加 ---- */
+/** 小数率（0.18 → 18.0%） */
+function fracPct(v: unknown): string {
+  if (isMask(v)) return MASK;
+  if (v === null || v === undefined || v === '') return '-';
+  return `${round2(num(v) * 100)}%`;
 }
-const unmappedRows = computed(() => items.value.filter(unmappedRow).length);
+/** 已是百分数的率（佣金率存 18 = 18%） */
+function pointsPct(v: unknown): string {
+  if (isMask(v)) return MASK;
+  if (v === null || v === undefined || v === '') return '-';
+  return `${num(v).toFixed(1)}%`;
+}
+/** 被排除的行不给 0：0 会被读成「这单没赚钱」，实际是这一行不参与计算 */
+function notCounted(v: unknown): string {
+  return isMask(v) ? MASK : '不计';
+}
+
+function excludedRow(row: Row): boolean {
+  return !row.sku_id || Number(row.rebate_matched ?? 0) !== 1;
+}
+const excludedRows = computed(() => items.value.filter(excludedRow).length);
 
 const itemsAmount = computed(() => round2(items.value.reduce((s, r) => s + (isMask(r.item_amount) ? 0 : num(r.item_amount)), 0)));
-const itemsCostSum = computed(() =>
-  auth.canSeeCost ? round2(items.value.filter((r) => !unmappedRow(r)).reduce((s, r) => s + num(r.cost_snapshot), 0)) : MASK,
+/** 只加冻结下来的钱（rebate_cny / logistics_cny），排除行整行不算 */
+const itemsRebateSum = computed(() =>
+  auth.canSeeCost ? round2(items.value.filter((r) => !excludedRow(r)).reduce((s, r) => s + num(r.rebate_cny), 0)) : MASK,
+);
+const itemsLogisticsSum = computed(() =>
+  auth.canSeeCost ? round2(items.value.filter((r) => !excludedRow(r)).reduce((s, r) => s + num(r.logistics_cny), 0)) : MASK,
 );
 const itemsProfitSum = computed(() => {
   if (!auth.canSeeCost) return MASK;
-  const sum = items.value.filter((r) => !unmappedRow(r)).reduce<number>((s, r) => {
+  const sum = items.value.filter((r) => !excludedRow(r)).reduce<number>((s, r) => {
     const p = profitOf(r);
     return typeof p === 'number' ? round2(s + p) : s;
   }, 0);
@@ -247,10 +278,12 @@ function profitOf(row: Row): number | string {
   const currency = String(row.currency ?? order.value?.currency ?? 'CNY');
   const rate = rateOf();
   if (currency !== 'CNY' && !(rate > 0)) return 'NO_RATE';
+  // 贡献毛利 = 应收返点 − 物流 − 达人佣金（人民币），公式与后端共用 @tk/shared 的 estItemProfitCny
   return estItemProfitCny({
     item_amount: num(row.item_amount),
     currency,
-    cost_snapshot: num(row.cost_snapshot),
+    rebate_rate: num(row.rebate_rate),
+    logistics_cny: num(row.logistics_cny),
     est_commission: num(row.est_commission),
     rate_to_cny: rate || 1,
   });
@@ -259,12 +292,12 @@ function itemProfit(row: Row): string {
   const p = profitOf(row);
   if (p === MASK) return MASK;
   if (p === 'NO_RATE') return '缺汇率';
-  if (unmappedRow(row)) return '不计利润';
+  if (excludedRow(row)) return '不计利润';
   return typeof p === 'number' ? money(p) : '-';
 }
 
 function itemRowClass({ row }: { row: Row }): string {
-  return unmappedRow(row) ? 'unmapped-row' : '';
+  return excludedRow(row) ? 'unmapped-row' : '';
 }
 function returnRowClass({ row }: { row: Row }): string {
   return Number(row.responsibility ?? 0) === 0 ? 'warning-row' : '';

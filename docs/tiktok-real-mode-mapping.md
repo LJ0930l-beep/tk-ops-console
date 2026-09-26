@@ -54,7 +54,7 @@ npx vitest run tests/real-mode.spec.ts -t 真实店铺联调   # 缺 TT_APP_KEY/
 | `items[].quantity` | `max(1, Number ?? 1)` | `quantity` | 1–2 |
 | `items[].seller_discount`，缺失时退 `item_discount` | `money()` | `discount` / `item_amount = 单价×数量−优惠` | 裸数字 |
 | `items[].id` | 不落库（只对账日志用） | — | `${order_id}${序号}` |
-| 成本 | `cost_matched=1` 时冻结 `(采购+头程)×数量` | `cost_snapshot` / `cost_matched` | 同一套 `snapshotCost` |
+| 返点与物流 | `rebate_matched=1` 时冻结 `实收折CNY × 品牌返点率` 与 `单件物流成本 × 数量` | `rebate_rate` / `rebate_cny` / `logistics_cny` / `rebate_matched` | 同一套 `snapshotRebate` |
 
 ### 1.2 平台商品（listing）`POST /product/202309/products/search`
 
@@ -190,7 +190,7 @@ npx vitest run tests/real-mode.spec.ts -t 真实店铺联调   # 缺 TT_APP_KEY/
    # 界面：数据同步 → 选这家店 → 依次跑「商品 → 订单 → 售后 → 联盟」
    ```
    核对：`sync_log` 的 fetched/inserted/updated/failed、`tk_order` 金额与卖家中心一致、
-   `tk_order_item.cost_matched=0` 的行是否只是没建档。
+   `tk_order_item.rebate_matched=0` 的行是否只是没建档或没配品牌返点率。
 4. 把真实响应**换进对拍台**（这一步才是本次任务的正题）：
    - 抓一次真报文（只留必要字段、把凭证与买家信息删掉、金额时间保持原样）替换 `tests/fixtures/tiktok-real/*.json`；
    - 相应更新 `manifest.json` 里的 mock↔real 单号配对（或直接 `TT_RECORD_FIXTURES=1 npx vitest run tests/real-mode.spec.ts -t 重新录制` 重录一份 mock 侧基线，再把真报文并进来）；

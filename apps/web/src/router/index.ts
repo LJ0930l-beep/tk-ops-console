@@ -20,7 +20,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'accounts', name: 'accounts', component: () => import('@/views/shop/AccountList.vue'), meta: { title: 'TikTok 账号', menu: 'shop' } },
 
       { path: 'products/spu', name: 'spu', component: () => import('@/views/product/SpuList.vue'), meta: { title: '商品(SPU)', menu: 'product' } },
-      { path: 'products/sku', name: 'sku', component: () => import('@/views/product/SkuList.vue'), meta: { title: 'SKU 与成本', menu: 'product' } },
+      { path: 'products/sku', name: 'sku', component: () => import('@/views/product/SkuList.vue'), meta: { title: 'SKU 与返点', menu: 'product' } },
       { path: 'products/listing', name: 'listing', component: () => import('@/views/product/ListingList.vue'), meta: { title: '店铺商品映射', menu: 'product' } },
       { path: 'products/unmapped', name: 'unmapped', component: () => import('@/views/product/UnmappedList.vue'), meta: { title: '待映射清单', menu: 'product' } },
       { path: 'products/abc', name: 'product-abc', component: () => import('@/views/product/ProductAbc.vue'), meta: { title: 'ABC 分层与渠道', menu: 'product' } },

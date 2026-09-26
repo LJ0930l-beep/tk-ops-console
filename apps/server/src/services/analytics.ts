@@ -8,7 +8,11 @@
  *  - **折人民币**：一律 `toCnySql()`（当日 → 更早 → 更晚 → `FALLBACK_RATE_TO_CNY` 常量），
  *    与 JS 侧 `getRate()` 同一套规则。以前直接乘 `rateSqlExpr()`，缺汇率时表达式变 NULL，
  *    `SUM(金额 * NULL)` 会**静默少算**这一行的金额——数字看着对，实际漏了。
- *  - CANCELLED 订单与样品单（is_sample_order=1）不计 GMV；待映射行计 GMV 不计利润（宽表只有 GMV 口径）。
+ *  - CANCELLED 订单与样品单（is_sample_order=1）不计 GMV。宽表的 gmv/net_gmv 是**品牌侧生意规模**，
+ *    仍含未配返点率的行（ABC 分层与渠道结构靠它，档位口径不许动）；
+ *    但凡走进钱口径的列（rebate / commission）一律只算 `rebate_matched = 1` 的行 ——
+ *    rebate_matched=0 是「SKU 没映射上 → 品牌没给我们返点率」，计成 0 收入会把数据缺口谎报成亏本生意，
+ *    留着它的佣金又没有对应收入，达人 ROI 会被单向压低（同 COALESCE(rate,1) 那一类静默兜底缺陷）。
  *  - 广告 `ad_daily.stat_date` 已是平台侧自然日，不再二次切日（与 ads.routes.ts 同一口径）。
  *  - 事实表没有的字段（visitors/impression/click/add_cart、直播分钟数据）本服务不造数，
  *    由导入或演示 seed 回填（source 列 fact/import/mock 区分）；重建只更新事实可推导列，
@@ -19,7 +23,7 @@
 import { all, get, insert, run, update } from '../core/db.js';
 import { sendAlert } from '../core/oplog.js';
 import { rateMissingExpr, todayUtc, toCnySql } from './rates.js';
-import { ABC_DEFAULTS, channelOfContentType } from '@tk/shared';
+import { ABC_DEFAULTS, channelOfContentType, collabRoi } from '@tk/shared';
 
 type Num = number | string | bigint | null;
 const n = (v: Num | undefined): number => Number(v ?? 0);
@@ -47,6 +51,13 @@ const RATE_MISSED = (currency: string, day: string): string => rateMissingExpr(c
 const SHOP_JOIN = (col: string, as = 's'): string => `JOIN tk_shop ${as} ON ${as}.id = ${col} AND ${as}.is_deleted = 0`;
 
 const ORDER_WHERE = `i.is_deleted = 0 AND o.order_status <> 'CANCELLED' AND o.is_sample_order = 0`;
+/**
+ * 进入「钱口径」的订单行：只有配到品牌返点率的行才算。
+ * rebate_matched=0 是「SKU 还没映射 → 没有返点率」，不是「这单返点 0 元」，
+ * 所以只能排除、不能补 0 计入（补 0 会把数据缺失误读成生意亏损，且再也查不出来）。
+ * GMV / net_gmv 不受此限 —— 带货额是品牌的生意，档位与 ABC 都按它算。
+ */
+const REBATE_OK = `i.rebate_matched = 1`;
 const RETURN_DONE = `r.is_deleted = 0 AND r.status = 'COMPLETED'`;
 /** 退款归日到申请时间（缺失时退回完成时间），与退款人民币口径同一天 */
 const RETURN_DAY = (s = 's'): string => DAY(`COALESCE(r.apply_time, r.finish_time)`, s);
@@ -214,18 +225,21 @@ export function rebuildProductChannelDaily(start: string, end: string, userId: n
 /* ==================== 达人 × 日 ==================== */
 
 export function rebuildCreatorDaily(start: string, end: string, userId: number | null): number {
-  const merged = new Map<string, { shop_id: number | null; orders: number; gmv: number; refund: number; commission: number; sample_cost: number }>();
+  const merged = new Map<string, { shop_id: number | null; orders: number; gmv: number; refund: number; rebate: number; commission: number; sample_shipping: number }>();
   const touch = (k: string) => {
     let v = merged.get(k);
-    if (!v) merged.set(k, (v = { shop_id: null, orders: 0, gmv: 0, refund: 0, commission: 0, sample_cost: 0 }));
+    if (!v) merged.set(k, (v = { shop_id: null, orders: 0, gmv: 0, refund: 0, rebate: 0, commission: 0, sample_shipping: 0 }));
     return v;
   };
 
   const dayO = DAY('o.order_time');
-  const orderRows = all<{ d: string; creator_id: number; shop_id: number; orders: Num; gmv: Num; commission: Num }>(
+  // rebate / commission 只累计 rebate_matched=1 的行（见 REBATE_OK）；est_commission 是店铺币种，要折算，
+  // 而 rebate_cny 是成交时冻结的人民币，再乘一次汇率就成了双折算
+  const orderRows = all<{ d: string; creator_id: number; shop_id: number; orders: Num; gmv: Num; rebate: Num; commission: Num }>(
     `SELECT ${dayO} AS d, i.creator_id AS creator_id, MIN(o.shop_id) AS shop_id,
             COUNT(DISTINCT o.id) AS orders, ROUND(SUM(${CNY('i.item_amount', 'o.currency', dayO)}), 2) AS gmv,
-            ROUND(SUM(${CNY('i.est_commission', 'o.currency', dayO)}), 2) AS commission
+            ROUND(SUM(CASE WHEN ${REBATE_OK} THEN i.rebate_cny ELSE 0 END), 2) AS rebate,
+            ROUND(SUM(CASE WHEN ${REBATE_OK} THEN ${CNY('i.est_commission', 'o.currency', dayO)} ELSE 0 END), 2) AS commission
        FROM tk_order_item i
        JOIN tk_order o ON o.id = i.order_id AND o.is_deleted = 0
        ${SHOP_JOIN('o.shop_id')}
@@ -239,6 +253,7 @@ export function rebuildCreatorDaily(start: string, end: string, userId: number |
     v.shop_id = Number(r.shop_id);
     v.orders += n(r.orders);
     v.gmv += n(r.gmv);
+    v.rebate += n(r.rebate);
     v.commission += n(r.commission);
   }
 
@@ -257,12 +272,13 @@ export function rebuildCreatorDaily(start: string, end: string, userId: number |
   );
   for (const r of refundRows) touch(`${r.d}|${r.creator_id}`).refund += n(r.refund);
 
-  // 寄样成本（sample_cost/shipping_cost 落库即人民币快照），按发货日归集；
+  // 寄样运费（shipping_cost 落库即人民币，我们掏的钱），按发货日归集；
+  // 样品货值不再记我们账上（货是品牌的），所以这里只有运费一项；
   // 有合作单时按合作店铺时区归日，没有合作单退化成 UTC 日（没有店铺可参照）
   const dayS = DAY('sm.ship_time');
   const sampleRows = all<{ d: string; creator_id: number; c: Num }>(
     `SELECT ${dayS} AS d, sm.creator_id AS creator_id,
-            ROUND(SUM(sm.sample_cost + sm.shipping_cost), 2) AS c
+            ROUND(SUM(sm.shipping_cost), 2) AS c
        FROM sample_shipment sm
        LEFT JOIN collaboration c ON c.id = sm.collab_id
        LEFT JOIN tk_shop s ON s.id = c.shop_id
@@ -271,7 +287,7 @@ export function rebuildCreatorDaily(start: string, end: string, userId: number |
     start,
     end,
   );
-  for (const r of sampleRows) touch(`${r.d}|${r.creator_id}`).sample_cost += n(r.c);
+  for (const r of sampleRows) touch(`${r.d}|${r.creator_id}`).sample_shipping += n(r.c);
 
   let affected = 0;
   for (const [k, v] of merged) {
@@ -279,17 +295,18 @@ export function rebuildCreatorDaily(start: string, end: string, userId: number |
     affected += upsert(
       'analytics_creator_daily',
       'stat_date, creator_id',
-      ['stat_date', 'creator_id', 'shop_id', 'orders', 'gmv', 'refund', 'net_gmv', 'commission', 'sample_cost', 'source', 'created_by'],
+      ['stat_date', 'creator_id', 'shop_id', 'orders', 'gmv', 'refund', 'net_gmv', 'rebate', 'sample_shipping', 'commission', 'source', 'created_by'],
       [
         'shop_id = COALESCE(excluded.shop_id, analytics_creator_daily.shop_id)',
         'orders = excluded.orders',
         'gmv = excluded.gmv',
         'refund = excluded.refund',
         'net_gmv = excluded.gmv - excluded.refund',
+        'rebate = excluded.rebate',
+        'sample_shipping = excluded.sample_shipping',
         'commission = excluded.commission',
-        'sample_cost = excluded.sample_cost',
       ],
-      [d, Number(cid), v.shop_id, v.orders, r2(v.gmv), r2(v.refund), r2(v.gmv - v.refund), r2(v.commission), r2(v.sample_cost), 'fact', userId],
+      [d, Number(cid), v.shop_id, v.orders, r2(v.gmv), r2(v.refund), r2(v.gmv - v.refund), r2(v.rebate), r2(v.sample_shipping), r2(v.commission), 'fact', userId],
     );
   }
   return affected;
@@ -670,11 +687,20 @@ export interface CreatorTrendScan {
   decline_weeks: number;
   refund_rate: number;
   net_gmv_30d: number;
-  sample_cost_30d: number;
+  /** 近 30 天应收返点（人民币）—— 我们的收入 */
+  rebate_30d: number;
+  /** 近 30 天寄样运费（人民币）—— 我们掏的钱；样品货值由品牌承担，不记我们账上 */
+  sample_shipping_30d: number;
+  /**
+   * 寄样投产比 = 返点 ÷（寄样运费 + 达人佣金），公式取自 shared 的 collabRoi。
+   * 分子刻意不用带货净 GMV：那是品牌的生意，返点才是我们的，用 GMV 做分子会让亏钱的达人排到榜首。
+   * 坑位费登记在 expense/collaboration 侧、归不到 creator×日 粒度，这里没摊它 → 该值偏乐观，
+   * 要完整口径看达人中心 ROI 页（services/creator/roi.ts）。
+   */
   sample_roi: number | null;
 }
 
-/** 达人趋势扫描：连续下滑周数 / 退货率 / 样品 ROI（净 GMV ÷（样品成本+运费），附录 A） */
+/** 达人趋势扫描：连续下滑周数 / 退货率 / 寄样投产比（返点 ÷ 寄样运费+佣金，附录 A） */
 export function scanCreatorTrends(end = todayUtc(), weeks = 4): CreatorTrendScan[] {
   const start = addDays(end, -(weeks * 7 - 1));
   const rows = all<{ creator_id: number; d: string; net_gmv: Num }>(
@@ -690,8 +716,9 @@ export function scanCreatorTrends(end = todayUtc(), weeks = 4): CreatorTrendScan
     const wIdx = Math.min(weeks - 1, Math.floor((Date.parse(`${r.d}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / (7 * 86400_000)));
     arr[wIdx] += n(r.net_gmv);
   }
-  const stat30 = all<{ creator_id: number; net_gmv: Num; refund: Num; gmv: Num; sample_cost: Num }>(
-    `SELECT creator_id, SUM(net_gmv) AS net_gmv, SUM(refund) AS refund, SUM(gmv) AS gmv, SUM(sample_cost) AS sample_cost
+  const stat30 = all<{ creator_id: number; net_gmv: Num; refund: Num; gmv: Num; rebate: Num; sample_shipping: Num; commission: Num }>(
+    `SELECT creator_id, SUM(net_gmv) AS net_gmv, SUM(refund) AS refund, SUM(gmv) AS gmv,
+            SUM(rebate) AS rebate, SUM(sample_shipping) AS sample_shipping, SUM(commission) AS commission
        FROM analytics_creator_daily WHERE is_deleted = 0 AND stat_date BETWEEN ? AND ? GROUP BY creator_id`,
     addDays(end, -29),
     end,
@@ -711,7 +738,9 @@ export function scanCreatorTrends(end = todayUtc(), weeks = 4): CreatorTrendScan
     const s = s30.get(cid);
     const gmv30 = n(s?.gmv);
     const refundRate = gmv30 > 0 ? n(s?.refund) / gmv30 : 0;
-    const sampleCost = n(s?.sample_cost);
+    const rebate = n(s?.rebate);
+    const sampleShipping = n(s?.sample_shipping);
+    const commission = n(s?.commission);
     out.push({
       creator_id: cid,
       creator_name: nameOf.get(cid) ?? `达人${cid}`,
@@ -719,8 +748,9 @@ export function scanCreatorTrends(end = todayUtc(), weeks = 4): CreatorTrendScan
       decline_weeks: decline,
       refund_rate: r2(refundRate * 10000) / 10000,
       net_gmv_30d: r2(n(s?.net_gmv)),
-      sample_cost_30d: r2(sampleCost),
-      sample_roi: sampleCost > 0 ? r2((n(s?.net_gmv) / sampleCost) * 100) / 100 : null,
+      rebate_30d: r2(rebate),
+      sample_shipping_30d: r2(sampleShipping),
+      sample_roi: collabRoi({ rebate_cny: rebate, sample_shipping: sampleShipping, fixed_fee_cny: 0, commission_cny: commission }),
     });
   }
   return out;

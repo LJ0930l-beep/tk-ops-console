@@ -1,11 +1,19 @@
 import { beforeAll, describe, expect, it } from 'vitest';
-import { get } from '../src/core/db.js';
+import { REGION_TZ_OFFSET, rebateCny, round2, statDateInZone } from '@tk/shared';
+import { get, run } from '../src/core/db.js';
 import { ACCOUNTS, auth, boot, dataOf, login, pageOf } from './helper.js';
 
 /**
  * 商品中心（方案表 3 product_spu / 表 4 product_sku / 表 5 shop_listing）
- * 覆盖：店铺数据范围 / 成本掩码 / 改成本 before-after 且历史快照冻结 /
- *       映射绑定与自动匹配（多命中与空 seller_sku 不误绑）/ 待映射清单 / 导入导出与权限。
+ *
+ * 品牌服务方（代运营）口径：货是品牌的，我们不背货款，SKU 上只有两个钱字段 ——
+ * rebate_rate（品牌给我们的返点率，0~1，唯一收入的比例）与 logistics_cost（单件物流成本，人民币/件）。
+ *
+ * 覆盖：店铺数据范围 / 返点掩码（rebate_rate·logistics_cost·rebate_cny·logistics_cny）/
+ *       改返点率写 before-after 且历史行 rebate_cny 不回写 /
+ *       映射绑定与自动匹配（多命中与空 seller_sku 不误绑）/
+ *       待映射清单（含「已映射但未配返点率」两类）/ 导入导出与权限 /
+ *       rebate_rate=0 的订单行落 rebate_matched=0 并整行退出利润（绝不按 0 收入参与计算）。
  */
 
 const http = boot().http;
@@ -30,6 +38,32 @@ function lastLog(table: string, id: number, contains?: string): { before: Record
   return row ? (JSON.parse(row.before_after) as { before: Record<string, unknown>; after: Record<string, unknown> }) : null;
 }
 
+/**
+ * 明细行「成交当时」的折算基数：报表自然日（站点 IANA 时区切日，与 seed/利润引擎同一口径）
+ * 当天的汇率。用来手工复算冻结在行上的 rebate_cny —— 复算不出来就说明快照与口径不一致。
+ */
+function itemFxBasis(itemId: number): { item_amount: number; quantity: number; currency: string; rate: number; stat_day: string } {
+  const row = get<{
+    item_amount: number; quantity: number; currency: string; order_time: string; timezone: string | null; region: string | null;
+  }>(
+    `SELECT i.item_amount, i.quantity, o.currency, o.order_time, s.timezone, s.region
+       FROM tk_order_item i JOIN tk_order o ON o.id = i.order_id JOIN tk_shop s ON s.id = o.shop_id
+      WHERE i.id = ?`,
+    itemId,
+  );
+  if (!row) throw new Error(`订单明细 ${itemId} 不存在`);
+  const stat_day = statDateInZone(String(row.order_time), String(row.timezone ?? ''), REGION_TZ_OFFSET[String(row.region ?? '')] ?? 0);
+  const rate = Number(
+    get<{ rate_to_cny: number }>(
+      `SELECT rate_to_cny FROM exchange_rate WHERE is_deleted = 0 AND currency = ? AND rate_date <= ?
+        ORDER BY rate_date DESC, id DESC LIMIT 1`,
+      row.currency,
+      stat_day,
+    )?.rate_to_cny ?? 0,
+  );
+  return { item_amount: Number(row.item_amount), quantity: Number(row.quantity), currency: String(row.currency), rate, stat_day };
+}
+
 const token: Record<string, string> = {};
 beforeAll(async () => {
   for (const [k, u] of Object.entries(ACCOUNTS)) token[k] = await login(http, u);
@@ -37,12 +71,18 @@ beforeAll(async () => {
   token.zhaolei = await login(http, 'zhaolei');
 });
 
-/** 种子：SPU1 ORICO-66059（2 个 SKU），SKU1 = 采购 96 + 头程 22 */
+/** 种子：SPU1 ORICO-66059（2 个 SKU），SKU1 = 品牌返点率 0.22 + 单件物流 14 元/件 */
 const SPU1 = 1;
 const SKU1 = 1;
+/** SKU1 种子里的返点口径（改返点率之后用来验证「历史行仍按成交当时的值冻结」） */
+const SEED_REBATE_RATE = 0.22;
+const SEED_LOGISTICS_PER_UNIT = 14;
 
-async function makeSku(spuId: number, skuCode: string, purchase: number, firstLeg: number): Promise<number> {
-  const res = await http.post('/api/products/sku').set(auth(token.boss)).send({ spu_id: spuId, sku_code: skuCode, purchase_cost: purchase, first_leg_cost: firstLeg });
+async function makeSku(spuId: number, skuCode: string, rebateRate: number, logisticsCost: number): Promise<number> {
+  const res = await http
+    .post('/api/products/sku')
+    .set(auth(token.boss))
+    .send({ spu_id: spuId, sku_code: skuCode, rebate_rate: rebateRate, logistics_cost: logisticsCost });
   expect(res.status).toBe(200);
   return dataOf<{ id: number }>(res.body).id;
 }
@@ -110,96 +150,145 @@ describe('商品中心：鉴权与店铺数据范围（方案 8.1）', () => {
 });
 
 /* ==================================================================== */
-describe('成本：单一来源 + 权限掩码 + 历史不回写（要点 5.1）', () => {
-  it('无 can_see_cost：purchase_cost / first_leg_cost / unit_cost 全部 ***', async () => {
+describe('返点与物流：单一来源 + 权限掩码 + 历史不回写（要点 5.1）', () => {
+  it('无 can_see_cost：rebate_rate / logistics_cost 全部 ***（返点率是和品牌的商务条件）', async () => {
     const boss = pageOf((await http.get('/api/products/sku?spu_id=1&pageSize=50').set(auth(token.boss))).body);
     const one = boss.list.find((r) => Number(r.id) === SKU1) as Record<string, unknown>;
-    expect(Number(one.purchase_cost)).toBe(96);
-    expect(Number(one.first_leg_cost)).toBe(22);
-    expect(Number(one.unit_cost)).toBe(118);
+    expect(Number(one.rebate_rate)).toBe(SEED_REBATE_RATE); // 0.22 = 实收 GMV 的 22% 归我们
+    expect(Number(one.logistics_cost)).toBe(SEED_LOGISTICS_PER_UNIT); // 14 元/件
+    // 自采口径的合成列必须彻底消失：没有「单件成本」这种东西了
+    expect(one).not.toHaveProperty('unit_cost');
+    expect(one).not.toHaveProperty('purchase_cost');
+    expect(one).not.toHaveProperty('first_leg_cost');
     expect(one.last_cost_by).toBe(null);
 
     const limy = pageOf((await http.get('/api/products/sku?spu_id=1&pageSize=50').set(auth(token.ops))).body);
     const masked = limy.list.find((r) => Number(r.id) === SKU1) as Record<string, unknown>;
-    expect(masked.purchase_cost).toBe('***');
-    expect(masked.first_leg_cost).toBe('***');
-    expect(masked.unit_cost).toBe('***');
+    expect(masked.rebate_rate).toBe('***');
+    expect(masked.logistics_cost).toBe('***');
     expect(masked.sku_code).not.toBe('***');
-
+    // 掩码字段不能只在列表里遮，明细/下拉也得遮
     const detailBoss = dataOf<Record<string, unknown>>((await http.get(`/api/products/sku/${SKU1}`).set(auth(token.boss))).body);
-    expect(Number(detailBoss.unit_cost)).toBe(118);
+    expect(Number(detailBoss.rebate_rate)).toBe(SEED_REBATE_RATE);
     expect(Number(detailBoss.listing_count)).toBeGreaterThan(0);
     const detailLimy = dataOf<Record<string, unknown>>((await http.get(`/api/products/sku/${SKU1}`).set(auth(token.ops))).body);
-    expect(detailLimy.purchase_cost).toBe('***');
+    expect(detailLimy.rebate_rate).toBe('***');
+    expect(detailLimy.logistics_cost).toBe('***');
     const subSkus = dataOf<Record<string, unknown>[]>((await http.get(`/api/products/spu/${SPU1}/skus`).set(auth(token.ops))).body);
     expect(subSkus.length).toBe(2);
-    expect(subSkus[0]?.unit_cost).toBe('***');
+    expect(subSkus[0]?.rebate_rate).toBe('***');
+    expect(subSkus[0]?.logistics_cost).toBe('***');
     const subBoss = dataOf<Record<string, unknown>[]>((await http.get(`/api/products/spu/${SPU1}/skus`).set(auth(token.boss))).body);
-    expect(Number(subBoss[0]?.unit_cost)).toBe(118);
+    expect(Number(subBoss[0]?.rebate_rate)).toBe(SEED_REBATE_RATE);
   });
 
-  it('改成本写 before/after，历史 cost_snapshot 一字不动；无权限改不了', async () => {
-    const frozen = get<{ id: number; cost_snapshot: number }>(
-      `SELECT id, cost_snapshot FROM tk_order_item WHERE sku_id = ? AND cost_matched = 1 ORDER BY id ASC LIMIT 1`,
+  it('返点率必须落在 0~1：填成「18」这种金额直接 400，并提示用小数', async () => {
+    const tooBig = await http.post('/api/products/sku').set(auth(token.boss)).send({ spu_id: SPU1, sku_code: 'RATE-TOO-BIG', rebate_rate: 1.6 });
+    expect(tooBig.status).toBe(400);
+    expect(String(tooBig.body.message)).toContain('rebate_rate');
+    // 18% 填成 18 会让返点直接放大 100 倍，报错必须把「填小数」说清楚
+    expect(String(tooBig.body.message)).toContain('请填 0~1 的小数');
+    expect(get(`SELECT id FROM product_sku WHERE sku_code = 'RATE-TOO-BIG'`)).toBeUndefined();
+
+    expect((await http.post('/api/products/sku').set(auth(token.boss)).send({ spu_id: SPU1, sku_code: 'RATE-NEG', rebate_rate: -0.1 })).status).toBe(400);
+    // 边界值 0 与 1 都合法：0 = 未配返点率（另有用例），1 = 品牌把全部 GMV 返给我们
+    expect((await http.post('/api/products/sku').set(auth(token.boss)).send({ spu_id: SPU1, sku_code: 'RATE-EDGE-1', rebate_rate: 1 })).status).toBe(200);
+    expect((await http.put(`/api/products/sku/${SKU1}`).set(auth(token.boss)).send({ rebate_rate: 1.6 })).status).toBe(400);
+    expect((await http.put(`/api/products/sku/${SKU1}`).set(auth(token.boss)).send({ logistics_cost: -1 })).status).toBe(400);
+    expect(skuRow(SKU1).rebate_rate).toBe(SEED_REBATE_RATE);
+    const edgeRow = get<{ id: number; rebate_rate: number }>(`SELECT id, rebate_rate FROM product_sku WHERE sku_code = 'RATE-EDGE-1'`);
+    expect(Number(edgeRow?.rebate_rate)).toBe(1);
+    expect((await http.delete(`/api/products/sku/${Number(edgeRow?.id)}`).set(auth(token.boss))).status).toBe(200);
+  });
+
+  it('改 SKU 返点率写 before/after，历史行 rebate_cny 一字不动；无权限改不了', async () => {
+    const frozen = get<{ id: number; rebate_rate: number; rebate_cny: number; logistics_cny: number }>(
+      `SELECT id, rebate_rate, rebate_cny, logistics_cny FROM tk_order_item WHERE sku_id = ? AND rebate_matched = 1 ORDER BY id ASC LIMIT 1`,
       SKU1,
     );
     expect(frozen).toBeTruthy();
+    const basis = itemFxBasis(Number(frozen?.id));
+    // 手工复算成交当时的快照：应收返点 = 实收折 CNY × 成交当时冻结的返点率
+    //   income_cny = round2(item_amount × rate) = round2(?) —— 这里是 ${basis.item_amount} × ${basis.rate}
+    //   rebate_cny = round2(income_cny × 0.22)；logistics_cny = round2(14 元/件 × quantity)
+    const handIncomeCny = round2(basis.item_amount * basis.rate);
+    const handRebate = rebateCny(handIncomeCny, SEED_REBATE_RATE);
+    const handLogistics = round2(SEED_LOGISTICS_PER_UNIT * basis.quantity);
+    expect(Number(frozen?.rebate_cny)).toBe(handRebate);
+    expect(Number(frozen?.logistics_cny)).toBe(handLogistics);
 
-    expect((await http.put(`/api/products/sku/${SKU1}`).set(auth(token.ops)).send({ purchase_cost: 1 })).status).toBe(403);
-    expect(skuRow(SKU1).purchase_cost).toBe(96);
+    // 返点率是钱口径：无成本权限的角色连改都不能改
+    expect((await http.put(`/api/products/sku/${SKU1}`).set(auth(token.ops)).send({ rebate_rate: 0.9 })).status).toBe(403);
+    expect(skuRow(SKU1).rebate_rate).toBe(SEED_REBATE_RATE);
 
-    const res = await http.put(`/api/products/sku/${SKU1}`).set(auth(token.boss)).send({ purchase_cost: 100, first_leg_cost: 25 });
+    const res = await http.put(`/api/products/sku/${SKU1}`).set(auth(token.boss)).send({ rebate_rate: 0.3, logistics_cost: 20 });
     expect(res.status).toBe(200);
     const d = dataOf<Record<string, unknown>>(res.body);
     expect(d.cost_changed).toBe(true);
-    expect(Number(d.unit_cost)).toBe(125);
+    expect(Number(d.rebate_rate)).toBe(0.3);
+    expect(Number(d.logistics_cost)).toBe(20);
     expect(String(d.tip)).toContain('历史订单');
-    expect(skuRow(SKU1).purchase_cost).toBe(100);
-    expect(skuRow(SKU1).first_leg_cost).toBe(25);
+    expect(skuRow(SKU1).rebate_rate).toBe(0.3);
+    expect(skuRow(SKU1).logistics_cost).toBe(20);
 
-    const after = get<{ cost_snapshot: number }>(`SELECT cost_snapshot FROM tk_order_item WHERE id = ?`, Number(frozen?.id));
-    expect(Number(after?.cost_snapshot)).toBe(Number(frozen?.cost_snapshot));
+    // 历史行冻结的是成交当时的返点率与物流：改 SKU 之后既不回写金额，也不回写比率
+    const after = get<{ rebate_rate: number; rebate_cny: number; logistics_cny: number }>(
+      `SELECT rebate_rate, rebate_cny, logistics_cny FROM tk_order_item WHERE id = ?`,
+      Number(frozen?.id),
+    );
+    expect(Number(after?.rebate_cny)).toBe(Number(frozen?.rebate_cny));
+    expect(Number(after?.logistics_cny)).toBe(Number(frozen?.logistics_cny));
+    expect(Number(after?.rebate_rate)).toBe(SEED_REBATE_RATE);
+    // 新返点率 0.3 与旧比率都不等于历史行的冻结值 —— 证明历史行没被新商务条件追溯
+    expect(handRebate).not.toBe(rebateCny(handIncomeCny, 0.3));
 
-    const log = lastLog('product_sku', SKU1, 'purchase_cost');
-    expect(Number(log?.before?.purchase_cost)).toBe(96);
-    expect(Number(log?.after?.purchase_cost)).toBe(100);
-    expect(Number(log?.after?.unit_cost)).toBe(125);
+    const log = lastLog('product_sku', SKU1, 'rebate_rate');
+    expect(Number(log?.before?.rebate_rate)).toBe(SEED_REBATE_RATE);
+    expect(Number(log?.after?.rebate_rate)).toBe(0.3);
+    expect(Number(log?.after?.logistics_cost)).toBe(20);
     expect(String(log?.after?.sku_code)).toBe('ORICO-66059-01');
 
-    // 只改规格不改成本 → cost_changed=false
+    // 只改规格不改钱口径 → cost_changed=false
     const noCost = dataOf<Record<string, unknown>>(
       (await http.put(`/api/products/sku/${SKU1}`).set(auth(token.boss)).send({ spec: '白色 3米 改版' })).body,
     );
     expect(noCost.cost_changed).toBe(false);
-    expect(Number(noCost.unit_cost)).toBe(125);
+    expect(Number(noCost.rebate_rate)).toBe(0.3);
 
-    expect((await http.put('/api/products/sku/999999').set(auth(token.boss)).send({ purchase_cost: 1 })).status).toBe(404);
+    expect((await http.put('/api/products/sku/999999').set(auth(token.boss)).send({ rebate_rate: 0.1 })).status).toBe(404);
     expect((await http.post('/api/products/sku').set(auth(token.boss)).send({ spu_id: 999999, sku_code: 'NO-SPU' })).status).toBe(400);
     expect((await http.post('/api/products/sku').set(auth(token.boss)).send({ spu_id: 1, sku_code: 'ORICO-66059-01' })).status).toBe(400);
     expect((await http.post('/api/products/sku').set(auth(token.boss)).send({ spu_id: 1 })).status).toBe(400);
     expect((await http.get('/api/products/sku/999999').set(auth(token.boss))).status).toBe(404);
   });
 
-  it('成本时间线读 sys_op_log；无成本权限 403', async () => {
+  it('返点率时间线读 sys_op_log；无成本权限 403', async () => {
     const d = dataOf<Record<string, unknown>>((await http.get(`/api/products/sku/${SKU1}/cost-history`).set(auth(token.boss))).body);
     expect(d.sku_code).toBe('ORICO-66059-01');
-    expect(Number(d.current_unit_cost)).toBe(125);
+    expect(Number(d.current_rebate_rate)).toBe(0.3);
+    expect(Number(d.current_rebate_pct)).toBe(30); // 时间线给人看：0.3 折成 30%
+    expect(Number(d.current_logistics_cost)).toBe(20);
     const timeline = d.timeline as Record<string, unknown>[];
     expect(timeline.length).toBeGreaterThanOrEqual(1);
-    expect(Number(timeline[0]?.before_purchase_cost)).toBe(96);
-    expect(Number(timeline[0]?.after_purchase_cost)).toBe(100);
-    expect(Number(timeline[0]?.diff_unit_cost)).toBe(7);
+    expect(Number(timeline[0]?.before_rebate_rate)).toBe(SEED_REBATE_RATE);
+    expect(Number(timeline[0]?.after_rebate_rate)).toBe(0.3);
+    expect(Number(timeline[0]?.before_rebate_pct)).toBe(22);
+    expect(Number(timeline[0]?.after_rebate_pct)).toBe(30);
+    expect(Number(timeline[0]?.diff_logistics_cost)).toBe(6); // 20 − 14
     expect(timeline[0]?.user_name).toBe('陈新');
     expect(String(d.tip)).toContain('不回溯');
     expect((await http.get(`/api/products/sku/${SKU1}/cost-history`).set(auth(token.ops))).status).toBe(403);
     expect((await http.get('/api/products/sku/999999/cost-history').set(auth(token.boss))).status).toBe(404);
   });
 
-  it('缺成本预警：cost_missing=1 只给（采购+头程）=0 的 SKU', async () => {
-    const created = await makeSku(SPU1, 'COST-MISSING-01', 0, 0);
-    const list = pageOf((await http.get('/api/products/sku?cost_missing=1&pageSize=200').set(auth(token.boss))).body);
-    expect(list.list.every((r) => Number(r.purchase_cost) + Number(r.first_leg_cost) === 0)).toBe(true);
+  it('未配返点率预警：rebate_missing=1（旧 cost_missing 别名）只给 rebate_rate=0 的 SKU', async () => {
+    const created = await makeSku(SPU1, 'RATE-MISSING-01', 0, 0);
+    const list = pageOf((await http.get('/api/products/sku?rebate_missing=1&pageSize=200').set(auth(token.boss))).body);
+    expect(list.list.every((r) => Number(r.rebate_rate) === 0)).toBe(true);
     expect(list.list.some((r) => Number(r.id) === created)).toBe(true);
+    // 别名保持兼容：老前端/用例还按 cost_missing 查
+    const legacy = pageOf((await http.get('/api/products/sku?cost_missing=1&pageSize=200').set(auth(token.boss))).body);
+    expect(legacy.total).toBe(list.total);
     expect((await http.delete(`/api/products/sku/${created}`).set(auth(token.boss))).status).toBe(200);
   });
 
@@ -208,13 +297,13 @@ describe('成本：单一来源 + 权限掩码 + 历史不回写（要点 5.1）
     expect((await http.delete(`/api/products/sku/${SKU1}`).set(auth(token.boss))).status).toBe(403);
 
     // 上架 → 不能删；解绑 → 可以删；进过订单 → 永远不能删
-    const sku = await makeSku(SPU1, 'DEL-GUARD-01', 7, 2);
+    const sku = await makeSku(SPU1, 'DEL-GUARD-01', 0.2, 9);
     const listingId = await makeListing(1, 'TK-DEL-GUARD', 'DEL-GUARD-01', sku);
     expect((await http.delete(`/api/products/sku/${sku}`).set(auth(token.boss))).status).toBe(403);
     expect((await http.delete(`/api/products/listing/${listingId}`).set(auth(token.boss))).status).toBe(200);
     expect((await http.delete(`/api/products/sku/${sku}`).set(auth(token.boss))).status).toBe(200);
     expect(skuRow(sku).is_deleted).toBe(1);
-    const ordered = get<{ id: number }>(`SELECT sku_id AS id FROM tk_order_item WHERE cost_matched = 1 LIMIT 1`);
+    const ordered = get<{ id: number }>(`SELECT sku_id AS id FROM tk_order_item WHERE rebate_matched = 1 LIMIT 1`);
     expect((await http.delete(`/api/products/sku/${Number(ordered?.id)}`).set(auth(token.boss))).status).toBe(403);
 
     // SPU 建 → 改 → 清空后删
@@ -268,10 +357,10 @@ describe('店铺商品映射：手工绑定 / 解绑 / 自动匹配都留 before
 
   it('自动匹配：唯一命中才绑，多命中与空 seller_sku 留人工', async () => {
     const spu = dataOf<{ id: number }>((await http.post('/api/products/spu').set(auth(token.boss)).send({ spu_code: 'AUTO-SPU', name_cn: '自动映射测试款' })).body);
-    await makeSku(spu.id, 'AM-EXACT', 10, 1);
-    await makeSku(spu.id, 'AM-PREFIX', 10, 1);
-    await makeSku(spu.id, 'AM-A', 10, 1);
-    await makeSku(spu.id, 'AM-A-B', 10, 1);
+    await makeSku(spu.id, 'AM-EXACT', 0.1, 1);
+    await makeSku(spu.id, 'AM-PREFIX', 0.1, 1);
+    await makeSku(spu.id, 'AM-A', 0.1, 1);
+    await makeSku(spu.id, 'AM-A-B', 0.1, 1);
 
     const exact = await makeListing(1, 'TK-AM-1', 'AM-EXACT');
     const prefix = await makeListing(1, 'TK-AM-2', 'AM-PREFIX-A1');
@@ -324,16 +413,20 @@ describe('店铺商品映射：手工绑定 / 解绑 / 自动匹配都留 before
     expect((await http.post('/api/products/mapping/auto').set(auth(token.ops)).send({ shop_id: 0 })).status).toBe(400);
   });
 
-  it('待映射清单：listing + 未匹配订单行数与金额，并写明排除口径', async () => {
+  it('待映射清单：listing + 算不出返点的订单行数与金额，并写明排除口径', async () => {
     const boss = dataOf<Record<string, unknown>>((await http.get('/api/products/unmapped?pageSize=50').set(auth(token.boss))).body);
     expect(Number(boss.total)).toBeGreaterThanOrEqual(3);
     const totals = boss.totals as Record<string, number>;
     expect(Number(totals.listing_count)).toBe(Number(boss.total));
     expect(Number(totals.unmatched_items)).toBeGreaterThanOrEqual(1);
-    expect(String(boss.warn)).toContain('不按 0 成本参与计算');
+    // 铁则：算不出返点的行整体退出返点/毛利/利润，绝不按 0 收入参与计算
+    expect(String(boss.warn)).toContain('绝不按 0 收入参与计算');
+    expect(String(boss.warn)).toContain('SKU 未配品牌返点率');
     const rows = boss.rows as Record<string, unknown>[];
     expect(rows.length).toBeGreaterThanOrEqual(1);
     expect(rows.every((r) => Number(r.quantity) >= 1 && r.item_amount_cny !== undefined)).toBe(true);
+    // 影响金额是按报表自然日汇率折出来的人民币，不是原币也不是 0
+    expect(rows.every((r) => Number(r.item_amount_cny) === round2(Number(r.item_amount) * Number(r.rate_to_cny)))).toBe(true);
     expect(rows[0]?.tk_order_id).toBeTruthy();
     const list = boss.list as Record<string, unknown>[];
     expect(list.every((l) => Number(l.map_status) === 2)).toBe(true);
@@ -373,51 +466,111 @@ describe('表格导入兜底 + 导出（can_export）', () => {
     expect((await http.post('/api/products/import/spu').set(auth(token.ops)).send({ rows: [] })).status).toBe(400);
   });
 
-  it('import/sku：只给 spu_code 也能归属，重复编码进 failed', async () => {
+  it('import/sku：模板带 rebate_rate + logistics_cost，只给 spu_code 也能归属，返点率填成金额的行被挡下', async () => {
     const res = await http
       .post('/api/products/import/sku')
       .set(auth(token.boss))
       .send({
         rows: [
-          { spu_code: 'IMP-SPU-1', sku_code: 'IMP-SPU-1-01', spec: '黑色', purchase_cost: 30, first_leg_cost: 5 },
-          { spu_code: 'GHOST-SPU', sku_code: 'IMP-GHOST-01', purchase_cost: 1 },
-          { spu_code: 'IMP-SPU-1', sku_code: 'IMP-SPU-1-01', purchase_cost: 9 },
+          { spu_code: 'IMP-SPU-1', sku_code: 'IMP-SPU-1-01', spec: '黑色', rebate_rate: 0.18, logistics_cost: 5 },
+          { spu_code: 'GHOST-SPU', sku_code: 'IMP-GHOST-01', rebate_rate: 0.1 },
+          { spu_code: 'IMP-SPU-1', sku_code: 'IMP-SPU-1-01', rebate_rate: 0.2 },
+          // 18% 填成 18：表格导入必须逐行挡下，而不是静默落库后把返点放大 100 倍
+          { spu_code: 'IMP-SPU-1', sku_code: 'IMP-SPU-1-02', rebate_rate: 18, logistics_cost: 5 },
         ],
       });
     const d = dataOf<Record<string, unknown>>(res.body);
     expect(Number(d.success)).toBe(1);
-    expect(Number(d.failed_count)).toBe(2);
+    expect(Number(d.failed_count)).toBe(3);
     const failed = d.failed as { row: number; reason: string }[];
-    expect(String(failed[0]?.reason)).toContain('所属商品不存在');
-    expect(String(failed[1]?.reason)).toContain('已存在');
+    // zod 逐行校验的失败先收（第 4 行），业务冲突在入库循环里收（第 2、3 行）
+    expect(failed.map((f) => f.row)).toEqual([4, 2, 3]);
+    expect(String(failed[0]?.reason)).toContain('请填 0~1 的小数');
+    expect(String(failed[1]?.reason)).toContain('所属商品不存在');
+    expect(String(failed[2]?.reason)).toContain('已存在');
+    expect(get(`SELECT id FROM product_sku WHERE sku_code = 'IMP-SPU-1-02'`)).toBeUndefined();
+
     const row = get<Record<string, unknown>>(`SELECT * FROM product_sku WHERE sku_code = 'IMP-SPU-1-01'`) ?? {};
-    expect(Number(row.purchase_cost)).toBe(30);
+    expect(Number(row.rebate_rate)).toBe(0.18);
+    expect(Number(row.logistics_cost)).toBe(5);
+    // 采购口径的三列已随口径一起删掉，导入模板不再收「货款」
+    expect(row).not.toHaveProperty('purchase_cost');
+    expect(row).not.toHaveProperty('first_leg_cost');
+    expect(row).not.toHaveProperty('unit_cost');
     expect(Number(row.spu_id)).toBe(Number(get<{ id: number }>(`SELECT id FROM product_spu WHERE spu_code = 'IMP-SPU-1'`)?.id));
-    // 导入的 SKU 也带 unit_cost 视图
+    // 列表视图同样按新口径给返点率与单件物流
     const viaList = pageOf((await http.get('/api/products/sku?keyword=IMP-SPU-1-01').set(auth(token.boss))).body);
-    expect(Number((viaList.list[0] as Record<string, unknown>).unit_cost)).toBe(35);
+    expect(Number((viaList.list[0] as Record<string, unknown>).rebate_rate)).toBe(0.18);
+    expect(Number((viaList.list[0] as Record<string, unknown>).logistics_cost)).toBe(5);
   });
 
-  it('导出价目表：需 can_export 且必写 action=export 日志', async () => {
+  it('导出价目表：需 can_export，成本列打码后原始导出也不泄露返点率', async () => {
     const res = await http.get('/api/products/export/sku').set(auth(token.boss));
     expect(res.status).toBe(200);
     const d = dataOf<Record<string, unknown>>(res.body);
     const columns = d.columns as string[];
-    expect(columns).toContain('purchase_cost');
+    expect(columns).toContain('rebate_rate');
+    expect(columns).toContain('logistics_cost');
+    for (const gone of ['purchase_cost', 'first_leg_cost', 'unit_cost']) expect(columns).not.toContain(gone);
     const rows = d.rows as Record<string, unknown>[];
     expect(Number(d.count)).toBe(rows.length);
     expect(rows.length).toBeGreaterThan(0);
     expect(rows[0]?.sku_code).toBeTruthy();
-    expect(rows.find((r) => Number(r.id) === SKU1)?.purchase_cost).toBe(100);
+    // SKU1 在前面的用例里改成了 0.3 / 20 元每件
+    const sku1 = rows.find((r) => Number(r.id) === SKU1) as Record<string, unknown>;
+    expect(Number(sku1.rebate_rate)).toBe(0.3);
+    expect(Number(sku1.logistics_cost)).toBe(20);
     const log = get<{ action: string; before_after: string }>(
       `SELECT action, before_after FROM sys_op_log WHERE target_table = 'product_sku' AND action = 'export' ORDER BY id DESC LIMIT 1`,
     );
     expect(log?.action).toBe('export');
     expect(Number(JSON.parse(String(log?.before_after)).after.rows)).toBeGreaterThan(0);
     expect((await http.get('/api/products/export/sku').set(auth(token.ops))).status).toBe(403);
-    // 运营主管有导出权限但无成本权限 → 成本列打码
+
+    // 运营主管：有导出权限，也有成本权限（8.1 里 ops_manager 的 can_see_cost=1）→ 数字照给
     const byManager = dataOf<Record<string, unknown>>((await http.get('/api/products/export/sku').set(auth(token.opsManager))).body);
-    expect((byManager.rows as Record<string, unknown>[]).length).toBeGreaterThan(0);
+    const managerRows = byManager.rows as Record<string, unknown>[];
+    expect(managerRows.length).toBeGreaterThan(0);
+    expect(Number((managerRows.find((r) => Number(r.id) === SKU1) as Record<string, unknown>).rebate_rate)).toBe(0.3);
+    // 运营：有商品菜单但没有导出权限 → 整个导出接口 403
+    expect((await http.get('/api/products/export/sku').set(auth(token.ops))).status).toBe(403);
+
+    /**
+     * 「只有导出权限、没有成本权限」这一档才是掩码真正要守住的口子：
+     * 种子角色里没有这种组合（ops 不能导出、ops_manager 能看成本），所以这里临时给 ops 打开 can_export，
+     * 验完立刻还原 —— 打码后的行既要在 JSON 里是 ***，原始 CSV 文件里也不许出现返点率与物流成本。
+     */
+    const bossCsv = await http.get('/api/products/export/sku?format=csv').set(auth(token.boss));
+    const bossLines = String(bossCsv.text).replace(/^/, '').split('\r\n');
+    const header = bossLines[0]?.split(',') ?? [];
+    expect(header).toContain('rebate_rate');
+    const rateCol = header.indexOf('rebate_rate');
+    const legCol = header.indexOf('logistics_cost');
+    // 老板的 CSV 是同一份列，但带真实数字（对照：打码只作用于无成本权限的人）
+    expect(bossLines.find((l) => l.startsWith('ORICO-66059-01,'))?.split(',')[rateCol]).toBe('0.3');
+    expect(bossLines.find((l) => l.startsWith('ORICO-66059-01,'))?.split(',')[legCol]).toBe('20');
+
+    run(`UPDATE sys_role SET can_export = 1 WHERE role_key = 'ops'`);
+    try {
+      const byNoCost = dataOf<Record<string, unknown>>((await http.get('/api/products/export/sku').set(auth(token.ops))).body);
+      const maskedRows = byNoCost.rows as Record<string, unknown>[];
+      expect(maskedRows.length).toBeGreaterThan(0);
+      expect(maskedRows.every((r) => r.rebate_rate === '***' && r.logistics_cost === '***')).toBe(true);
+      const csv = await http.get('/api/products/export/sku?format=csv').set(auth(token.ops));
+      expect(csv.status).toBe(200);
+      const lines = String(csv.text).replace(/^/, '').split('\r\n');
+      expect(lines[0]).toBe(header.join(','));
+      const sku1Line = lines.find((l) => l.startsWith('ORICO-66059-01,'));
+      expect(sku1Line).toBeTruthy();
+      expect(sku1Line?.split(',')[rateCol]).toBe('***');
+      expect(sku1Line?.split(',')[legCol]).toBe('***');
+      const logLine = get<{ before_after: string }>(
+        `SELECT before_after FROM sys_op_log WHERE target_table = 'product_sku' AND action = 'export' ORDER BY id DESC LIMIT 1`,
+      );
+      expect(JSON.parse(String(logLine?.before_after)).after).toMatchObject({ cost_masked: true });
+    } finally {
+      run(`UPDATE sys_role SET can_export = 0 WHERE role_key = 'ops'`);
+    }
   });
 });
 
@@ -461,3 +614,162 @@ describe('列表筛选与关键字（前端表格联调用）', () => {
     expect(((oneListing.list as Record<string, unknown>[])[0] as Record<string, unknown>).sku_code).toBeTruthy();
   });
 });
+
+/* ==================================================================== */
+describe('未配返点率的订单行：整行退出利润口径（铁则，不是按 0 收入算）', () => {
+  /** 店铺 1 = ORICO MY（MYR，Asia/Kuala_Lumpur）；2026-09-18 是种子汇率的最后一天 */
+  const ORDER_TIME = '2026-09-18 03:00:00';
+
+  const rateOn = (currency: string, day: string): number =>
+    Number(
+      get<{ rate_to_cny: number }>(
+        `SELECT rate_to_cny FROM exchange_rate WHERE is_deleted = 0 AND currency = ? AND rate_date <= ?
+          ORDER BY rate_date DESC, id DESC LIMIT 1`,
+        currency,
+        day,
+      )?.rate_to_cny ?? 0,
+    );
+
+  it('SKU 返点率 0：同步进来的行落 rebate_matched=0 并计成同步失败，不进任何钱口径', async () => {
+    const skuId = await makeSku(SPU1, 'NO-RATE-01', 0, 8);
+    const listingId = await makeListing(1, 'TK-NORATE-1', 'NO-RATE-01-MY', skuId);
+    // 映射本身是好的：唯一缺的是品牌返点率（syncJobs.snapshotRebate 的判据是 rate > 0）
+    expect(listingRow(listingId).map_status).toBe(1);
+
+    const importRes = await http
+      .post('/api/sync/import/orders')
+      .set(auth(token.boss))
+      .send({
+        shop_id: 1,
+        rows: [
+          {
+            order_id: 'IMP-NORATE-1',
+            status: 'COMPLETED',
+            order_time: ORDER_TIME,
+            currency: 'MYR',
+            subtotal: 200,
+            total_paid: 200,
+            items: [{ sku_id: 'TK-NORATE-1', quantity: 2, price: 100 }],
+          },
+        ],
+      });
+    expect(importRes.status).toBe(200);
+    const run0 = dataOf<{ run: { failed: number; detail: Record<string, number> } }>(importRes.body).run;
+    expect(Number(run0.failed)).toBe(1); // 算不出返点不是「成功」：同步把它记成失败行
+    expect(Number(run0.detail.rebate_unconfigured)).toBe(1); // 分桶：已映射但未配返点率（另一种是 unmapped_items）
+
+    const orderId = Number(get<{ id: number }>(`SELECT id FROM tk_order WHERE tk_order_id = 'IMP-NORATE-1'`)?.id);
+    const item = get<Record<string, unknown>>(`SELECT * FROM tk_order_item WHERE order_id = ?`, orderId) as Record<string, unknown>;
+    expect(Number(item.sku_id)).toBe(skuId);
+    expect(Number(item.item_amount)).toBe(200); // 单价 100 × 数量 2 − 优惠 0
+    expect(Number(item.rebate_matched)).toBe(0);
+    // 未配返点率的行不冻结任何钱：既没有 0 收入，也没有孤零零的物流支出
+    expect(Number(item.rebate_cny)).toBe(0);
+    expect(Number(item.logistics_cny)).toBe(0);
+
+    // 接口层同样不许把它当成「收入 0 的一行」：金额给 null + 说明，而不是 0
+    const detail = dataOf<Record<string, unknown>>((await http.get(`/api/orders/${orderId}`).set(auth(token.boss))).body);
+    const line = (detail.items as Record<string, unknown>[])[0] as Record<string, unknown>;
+    expect(line.unmapped).toBe(true);
+    expect(line.rebate_rate).toBe(null);
+    expect(line.rebate_cny).toBe(null);
+    expect(line.logistics_cny).toBe(null);
+    expect(line.profit_cny).toBe(null);
+    expect(String(line.rebate_note)).toContain('未配返点率');
+    expect(Number(detail.unmapped_item_count)).toBe(1);
+    expect(Number(detail.matched_amount)).toBe(0); // 参与口径的实收：这一行没进来
+    expect(Number(detail.rebate_cny)).toBe(0);
+
+    // 利润引擎：整单因「没有一行算得出返点」被剔除，并计入 warn 而不是按 0 收入参与计算
+    const breakdown = dataOf<Record<string, unknown>>((await http.get(`/api/finance/profit/order/${orderId}`).set(auth(token.boss))).body);
+    expect(breakdown.excluded_reason).toBe('unmapped');
+    expect(Number(breakdown.unmapped_items)).toBe(1);
+    expect(Number(breakdown.unmapped_amount_src)).toBe(200); // 被排除的金额要报出来，不是被吞掉
+    expect(Number(breakdown.rebate_cny)).toBe(0);
+    expect(Number(breakdown.logistics_cny)).toBe(0);
+    const pLine = (breakdown.items as Record<string, unknown>[])[0] as Record<string, unknown>;
+    expect(Number(pLine.counted)).toBe(0);
+    expect(Number(pLine.rebate_matched)).toBe(0);
+
+    // 订单利润拆解页：同样只统计已配返点率的行
+    const profit = dataOf<Record<string, unknown>>((await http.get(`/api/orders/${orderId}/profit`).set(auth(token.boss))).body);
+    const income = profit.income as Record<string, unknown>;
+    expect(Number(income.matched_items)).toBe(0);
+    expect(Number(income.matched_amount)).toBe(0);
+    expect(Number(income.excluded_unmapped_items)).toBe(1);
+    // 排除口径要在响应里说清楚，不能只给一个 0
+    expect(String(income.note)).toContain('不按 0 返点参与计算');
+    expect(Number((profit.rebate as Record<string, unknown>).unmatched_items)).toBe(1);
+
+    // 待映射清单里能看到它，且带 sku_id —— 运营要做的动作是「配返点率」，不是「重新映射」
+    const unmapped = dataOf<Record<string, unknown>>((await http.get('/api/products/unmapped?pageSize=50').set(auth(token.boss))).body);
+    const rows = unmapped.rows as Record<string, unknown>[];
+    const hit = rows.find((r) => Number(r.item_id) === Number(item.id));
+    expect(hit).toBeTruthy();
+    expect(Number(hit?.sku_id)).toBe(skuId);
+    expect(Number(hit?.item_amount)).toBe(200);
+  });
+
+  it('补上返点率并跑「派生汇总」才回填快照：返点 = 实收折 CNY × 比率，物流 = 单件成本 × 件数', async () => {
+    const skuId = Number(get<{ id: number }>(`SELECT id FROM product_sku WHERE sku_code = 'NO-RATE-01'`)?.id);
+    expect(skuId).toBeGreaterThan(0);
+    const upd = dataOf<Record<string, unknown>>(
+      (await http.put(`/api/products/sku/${skuId}`).set(auth(token.boss)).send({ rebate_rate: 0.25 })).body,
+    );
+    expect(upd.cost_changed).toBe(true);
+
+    const refreshed = dataOf<{ runs: { detail: Record<string, number>; inserted: number }[] }>(
+      (await http.post('/api/sync/run').set(auth(token.boss)).send({ task_type: 'aggregate', shop_id: 1 })).body,
+    );
+    const agg = refreshed.runs[0] as { detail: Record<string, number>; inserted: number };
+    // 回填候选是「sku_id 或 listing 上有 SKU」的 rebate_matched=0 行：店铺 1 里只有我们这一条
+    expect(Number(agg.detail.item_backfilled)).toBe(1);
+    expect(Number(agg.inserted)).toBe(1);
+
+    const orderId = Number(get<{ id: number }>(`SELECT id FROM tk_order WHERE tk_order_id = 'IMP-NORATE-1'`)?.id);
+    const item = get<Record<string, unknown>>(`SELECT * FROM tk_order_item WHERE order_id = ?`, orderId) as Record<string, unknown>;
+    // 手工复算（与 shared 的 rebateCny / 单件物流 × 数量同一口径）：
+    //   汇率 fx = 2026-09-18 当天 MYR 牌价（种子：round2(2.12 × (1 − 0.0045)) = 2.11）
+    //   income_cny = round2(item_amount × fx) = round2(200 × fx)
+    //   rebate_cny = round2(income_cny × 0.25) = income_cny 的四分之一
+    //   logistics_cny = round2(8 元/件 × 2 件) = 16
+    const fx = rateOn('MYR', ORDER_TIME.slice(0, 10));
+    expect(fx).toBe(2.11);
+    const incomeCny = round2(200 * fx);
+    expect(incomeCny).toBe(422);
+    expect(Number(item.rebate_matched)).toBe(1);
+    expect(Number(item.rebate_rate)).toBe(0.25);
+    expect(Number(item.rebate_cny)).toBe(round2(incomeCny * 0.25));
+    expect(Number(item.rebate_cny)).toBe(105.5);
+    expect(Number(item.logistics_cny)).toBe(16);
+
+    // 回填后这一行才进利润：订单详情与单笔拆解都给得出金额，且不再是 unmapped
+    const detail = dataOf<Record<string, unknown>>((await http.get(`/api/orders/${orderId}`).set(auth(token.boss))).body);
+    expect(Number(detail.unmapped_item_count)).toBe(0);
+    const line = (detail.items as Record<string, unknown>[])[0] as Record<string, unknown>;
+    expect(line.unmapped).toBe(false);
+    expect(Number(line.rebate_cny)).toBe(105.5);
+    expect(Number(line.logistics_cny)).toBe(16);
+    // 贡献毛益 = 应收返点 − 物流 − 达人佣金（这单没有佣金）= 105.5 − 16 − 0
+    expect(Number(line.profit_cny)).toBe(89.5);
+
+    const profit = dataOf<Record<string, unknown>>((await http.get(`/api/orders/${orderId}/profit`).set(auth(token.boss))).body);
+    expect(Number((profit.income as Record<string, unknown>).matched_items)).toBe(1);
+    expect(Number(profit.contribution_cny)).toBe(89.5);
+
+    // 单笔拆解：配好返点率并回填后这一行才算「计入口径」
+    const breakdown = dataOf<Record<string, unknown>>((await http.get(`/api/finance/profit/order/${orderId}`).set(auth(token.boss))).body);
+    expect(breakdown.excluded_reason).toBe('');
+    expect(Number(breakdown.rebate_cny)).toBe(105.5);
+    expect(Number(breakdown.logistics_cny)).toBe(16);
+    const bLine = (breakdown.items as Record<string, unknown>[])[0] as Record<string, unknown>;
+    expect(Number(bLine.counted)).toBe(1);
+    expect(Number(bLine.gross_profit_cny)).toBe(89.5);
+
+    const listingId = Number(get<{ id: number }>(`SELECT id FROM shop_listing WHERE tk_sku_id = 'TK-NORATE-1'`)?.id);
+    // 映射被订单明细引用 → 删不掉；SKU 同样删不掉（成本可改，历史不可抹）
+    expect((await http.delete(`/api/products/listing/${listingId}`).set(auth(token.boss))).status).toBe(403);
+    expect((await http.delete(`/api/products/sku/${skuId}`).set(auth(token.boss))).status).toBe(403);
+  });
+});
+

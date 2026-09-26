@@ -24,7 +24,7 @@
         </el-table-column>
         <el-table-column label="敏感权限" width="230">
           <template #default="{ row }">
-            <el-tag size="small" :type="on(row.can_see_cost) ? 'danger' : 'info'" effect="plain" class="perm">可见成本</el-tag>
+            <el-tag size="small" :type="on(row.can_see_cost) ? 'danger' : 'info'" effect="plain" class="perm">可见金额</el-tag>
             <el-tag size="small" :type="on(row.can_see_contact) ? 'warning' : 'info'" effect="plain" class="perm">联系方式</el-tag>
             <el-tag size="small" :type="on(row.can_export) ? 'success' : 'info'" effect="plain" class="perm">导出</el-tag>
           </template>
@@ -79,10 +79,11 @@
           <el-col :span="12">
             <el-form-item label="敏感与导出">
               <div class="switches">
-                <span class="sw"><em>可见成本</em><el-switch v-model="form.can_see_cost" :active-value="1" :inactive-value="0" /></span>
+                <span class="sw"><em>可见金额</em><el-switch v-model="form.can_see_cost" :active-value="1" :inactive-value="0" /></span>
                 <span class="sw"><em>联系方式</em><el-switch v-model="form.can_see_contact" :active-value="1" :inactive-value="0" /></span>
                 <span class="sw"><em>导出</em><el-switch v-model="form.can_export" :active-value="1" :inactive-value="0" /></span>
               </div>
+              <div class="tip">「可见金额」管的是我们这一侧的钱：品牌返点率与应收返点、物流/寄样运费、坑位费与达人佣金、毛利与投产比。关掉后这些字段由后端返回 ***（列不隐藏，便于对账）；货款不在我们账上，所以没有「可见成本」这一说了。</div>
             </el-form-item>
           </el-col>
         </el-row>

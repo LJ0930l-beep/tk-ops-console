@@ -37,7 +37,7 @@ export const MENUS: { key: MenuKey; title: string; icon: string; phase: 1 | 2 | 
     key: 'product', title: '商品中心', icon: 'Goods', phase: 1,
     children: [
       { key: 'product:spu', title: '商品(SPU)', path: '/products/spu' },
-      { key: 'product:sku', title: 'SKU 与成本', path: '/products/sku' },
+      { key: 'product:sku', title: 'SKU 与返点', path: '/products/sku' },
       { key: 'product:listing', title: '店铺商品映射', path: '/products/listing' },
       { key: 'product:unmapped', title: '待映射清单', path: '/products/unmapped' },
       { key: 'product:abc', title: 'ABC 分层与渠道', path: '/products/abc' },
@@ -159,7 +159,8 @@ export const SELECTION_CONCLUSION = { PENDING: 0, PASS: 1, FAIL: 2, RETEST: 3 } 
 export const SELECTION_CONCLUSION_LABELS: Record<number, string> = { 0: '未提交', 1: '通过', 2: '不通过', 3: '需调整后复测' };
 
 /** 选品来源（方案 11.1 阶段一） */
-export const SELECTION_SOURCES = ['市场调研', '竞品对标', '达人推荐', '供应链推荐'] as const;
+/** 候选品从哪来。没有"供应链推荐"了 —— 我们不找货，是品牌把货交给我们运营 */
+export const SELECTION_SOURCES = ['市场调研', '竞品对标', '达人推荐', '品牌方指定', '平台榜单'] as const;
 
 /**
  * 阶段四的销售前准备清单。

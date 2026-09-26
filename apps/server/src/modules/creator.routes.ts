@@ -11,7 +11,6 @@ import {
   normalizeHandle,
   num,
   round2,
-  unitCostCny,
   type CurrentUser,
 } from '@tk/shared';
 import { config } from '../config.js';
@@ -55,8 +54,11 @@ const conflict = (msg: string): AppError => new AppError(409, msg, 40901);
 const canWrite = requireMenu('creator');
 
 const CONTACT_FIELDS = ['email', 'whatsapp'];
-const COST_FIELDS = ['fixed_fee', 'fee_cny', 'sample_cost', 'shipping_cost'];
-const ROI_COST_FIELDS = ['gmv_cny', 'refund_cny', 'net_gmv_cny', 'sample_cost', 'sample_shipping', 'fixed_fee_cny', 'commission_cny', 'cost', 'roi'];
+/** 寄样/合作上我们真正掏的钱：坑位费与寄样运费（样品货值是品牌的，sample_shipment 已无 sample_cost 列） */
+const COST_FIELDS = ['fixed_fee', 'fee_cny', 'shipping_cost'];
+const ROI_COST_FIELDS = ['gmv_cny', 'refund_cny', 'net_gmv_cny', 'rebate_cny', 'logistics_cny', 'sample_shipping', 'fixed_fee_cny', 'commission_cny', 'cost', 'cost_cny', 'roi'];
+/** BD 绩效榜的脱敏清单：返点是我们的收入，和 GMV / 成本一样不能让无成本权限的角色看到 */
+const BD_COST_FIELDS = ['gmv_cny', 'net_gmv_cny', 'rebate_cny', 'cost_cny', 'cost', 'roi'];
 
 /**
  * core 的 scope 片段（creatorScope / personScope / shopScope）自带前导 "AND "，
@@ -1237,7 +1239,7 @@ creatorRouter.post(
   }),
 );
 
-/** 单个合作投产比 + 发布达标（净 GMV ÷（样品 + 运费 + 坑位费 + 佣金）） */
+/** 单个合作投产比 + 发布达标（应收返点 ÷（寄样运费 + 坑位费 + 达人佣金），全部人民币） */
 creatorRouter.get(
   '/collab/:id/roi',
   wrap((req, res) => {
@@ -1257,7 +1259,7 @@ creatorRouter.get(
       publish_ok: promised > 0 ? videos >= promised : null,
       deadline: row.deadline,
       status: row.status,
-      formula: '净 GMV(CNY) ÷（样品成本 + 寄样运费 + 坑位费(CNY) + 达人佣金(CNY)）',
+      formula: '应收返点(CNY) ÷（寄样运费 + 坑位费(CNY) + 达人佣金(CNY)）',
     };
     ok(res, user.can_see_cost ? payload : maskFields(payload, ROI_COST_FIELDS, false));
   }),
@@ -1265,6 +1267,10 @@ creatorRouter.get(
 
 /* ---------------- 表 12 寄样 sample_shipment ---------------- */
 
+/**
+ * 寄样只有运费是我们掏的钱：样品货值是品牌的（DDL 已无 sample_cost 列），
+ * 所以入参/落库都不再有「样品成本」，前端旧表单还带着这个字段时会被 zod 剥掉。
+ */
 const sampleBody = z.object({
   collab_id: z.number().int().positive().nullish(),
   creator_id: z.number().int().positive(),
@@ -1276,7 +1282,6 @@ const sampleBody = z.object({
   tracking_no: z.string().max(64).nullish(),
   ship_time: z.string().max(20).nullish(),
   sign_time: z.string().max(20).nullish(),
-  sample_cost: z.number().min(0).nullish(),
   status: z.number().int().min(1).max(6).nullish(),
 });
 
@@ -1329,7 +1334,7 @@ function sampleQ(req: Request, user: CurrentUser): Q {
   return q;
 }
 
-/** 寄样导出（PRD D13 九类之一）：样品成本/运费同样过 decorateSample 的成本掩码 */
+/** 寄样导出（PRD D13 九类之一）：寄样运费同样过 decorateSample 的成本掩码（样品货值是品牌的，不导出成本） */
 const SAMPLE_EXPORT_COLUMNS = [
   { key: 'creator_handle', label: '达人账号' },
   { key: 'creator_nickname', label: '达人昵称' },
@@ -1339,8 +1344,7 @@ const SAMPLE_EXPORT_COLUMNS = [
   { key: 'quantity', label: '件数' },
   { key: 'ship_method', label: '发货方式' },
   { key: 'tracking_no', label: '运单号' },
-  { key: 'sample_cost', label: '样品成本(CNY)' },
-  { key: 'shipping_cost', label: '运费(CNY)' },
+  { key: 'shipping_cost', label: '寄样运费(CNY)' },
   { key: 'status', label: '状态' },
   { key: 'ship_time', label: '发货时间' },
   { key: 'sign_time', label: '签收时间' },
@@ -1384,7 +1388,7 @@ creatorRouter.get(
   }),
 );
 
-/** 新增寄样：自动取 SKU 成本快照（unitCostCny × 数量，人民币），发货信息齐了自动置在途 */
+/** 新增寄样：只登记我们掏的寄样运费（样品货值是品牌的，不再有样品成本快照）；发货信息齐了自动置在途 */
 creatorRouter.post(
   '/sample',
   canWrite,
@@ -1414,16 +1418,9 @@ creatorRouter.post(
         body.creator_id,
       )?.id ?? null;
     }
-    let sampleCost = body.sample_cost;
-    if (body.sku_id) {
-      const sku = get<{ purchase_cost: number; first_leg_cost: number; sku_code: string }>(
-        `SELECT purchase_cost, first_leg_cost, sku_code FROM product_sku WHERE id = ? AND is_deleted = 0`,
-        body.sku_id,
-      );
-      if (!sku) throw notFound('SKU 不存在');
-      sampleCost = round2(unitCostCny(sku) * (body.quantity ?? 1));
-    } else if (sampleCost === undefined || sampleCost === null) {
-      throw badRequest('未选 SKU 时必须手工填写 sample_cost（人民币）');
+    /** SKU 必须真实存在（寄样要能追溯到卖的是哪一档货），但它的钱与我们无关：货是品牌的 */
+    if (body.sku_id && !get<{ id: number }>(`SELECT id FROM product_sku WHERE id = ? AND is_deleted = 0`, body.sku_id)) {
+      throw notFound('SKU 不存在');
     }
     const shipped = !!body.tracking_no || !!body.ship_time;
     const status = body.status ?? (body.sign_time ? SAMPLE_STATUS.SIGNED : shipped ? SAMPLE_STATUS.IN_TRANSIT : SAMPLE_STATUS.TO_SHIP);
@@ -1433,7 +1430,6 @@ creatorRouter.post(
         creator_id: body.creator_id,
         sku_id: body.sku_id ?? null,
         quantity: body.quantity ?? 1,
-        sample_cost: sampleCost ?? 0,
         shipping_cost: body.shipping_cost ?? 0,
         ship_method: body.ship_method ?? 2,
         tk_order_id: body.tk_order_id ?? null,
@@ -1443,12 +1439,12 @@ creatorRouter.post(
         status,
         created_by: user.id,
       }));
-      writeOpLog({ user_id: user.id, module: '达人中心', action: 'create', target_table: 'sample_shipment', target_id: newId, after: { ...body, sample_cost: sampleCost ?? 0 }, ip: req.ip });
+      writeOpLog({ user_id: user.id, module: '达人中心', action: 'create', target_table: 'sample_shipment', target_id: newId, after: { ...body, shipping_cost: body.shipping_cost ?? 0 }, ip: req.ip });
       if (status >= SAMPLE_STATUS.IN_TRANSIT) advanceCollab(collabId, COLLAB_STATUS.IN_TRANSIT, user);
       if (status >= SAMPLE_STATUS.SIGNED) advanceCollab(collabId, COLLAB_STATUS.TO_PUBLISH, user);
       return newId;
     });
-    ok(res, { id, sample_cost: sampleCost ?? 0, collab_id: collabId, status });
+    ok(res, { id, shipping_cost: body.shipping_cost ?? 0, collab_id: collabId, status });
   }),
 );
 
@@ -1505,8 +1501,6 @@ creatorRouter.post(
     if (!creator) throw notFound('达人不存在');
     const skuId = firstItem.sku_id === null || firstItem.sku_id === undefined ? null : Number(firstItem.sku_id);
     const quantity = Number(firstItem.qty ?? firstItem.quantity ?? 1);
-    const sku = skuId ? get<{ purchase_cost: number; first_leg_cost: number }>(`SELECT purchase_cost, first_leg_cost FROM product_sku WHERE id = ?`, skuId) : undefined;
-    const sampleCost = sku ? round2(unitCostCny(sku) * quantity) : 0;
     const status = ['DELIVERED', 'COMPLETED'].includes(String(order.order_status))
       ? SAMPLE_STATUS.SIGNED
       : ['SHIPPED', 'TRANSIT_TO_SHIP'].includes(String(order.order_status))
@@ -1522,7 +1516,6 @@ creatorRouter.post(
         creator_id: creatorId,
         sku_id: skuId,
         quantity,
-        sample_cost: sampleCost,
         shipping_cost: round2(num(order.shipping_fee) * exchangeRate(order.currency, today().slice(0, 10))),
         ship_method: 1,
         tk_order_id: body.tk_order_id,
@@ -1536,7 +1529,7 @@ creatorRouter.post(
       if (collabId && status >= SAMPLE_STATUS.IN_TRANSIT) advanceCollab(collabId, COLLAB_STATUS.IN_TRANSIT, user);
       return newId;
     });
-    ok(res, { id, creator_id: creatorId, sku_id: skuId, quantity, sample_cost: sampleCost, status, hint: sampleCost === 0 ? '样品 SKU 未映射成本，寄样成本按 0 计，请先做商品映射' : null });
+    ok(res, { id, creator_id: creatorId, sku_id: skuId, quantity, status });
   }),
 );
 
@@ -1548,13 +1541,10 @@ creatorRouter.put(
     const id = Number(req.params.id);
     const before = get<Record<string, unknown>>(`SELECT * FROM sample_shipment WHERE id = ? AND is_deleted = 0`, id);
     if (!before) throw notFound('寄样单不存在');
-    if (!user.can_see_cost && (req.body?.sample_cost !== undefined || req.body?.shipping_cost !== undefined)) throw forbidden('没有成本查看权限，不能修改寄样成本');
+    /** 寄样唯一的钱是我们掏的运费；样品货值是品牌的，改 SKU 也不产生任何「样品成本」 */
+    if (!user.can_see_cost && req.body?.shipping_cost !== undefined) throw forbidden('没有成本查看权限，不能修改寄样运费');
     const body = parseBody(sampleBody.partial().omit({ creator_id: true }), req.body ?? {});
-    if (body.sku_id) {
-      const sku = get<{ purchase_cost: number; first_leg_cost: number }>(`SELECT purchase_cost, first_leg_cost FROM product_sku WHERE id = ? AND is_deleted = 0`, body.sku_id);
-      if (!sku) throw notFound('SKU 不存在');
-      body.sample_cost = round2(unitCostCny(sku) * Number(body.quantity ?? before.quantity ?? 1));
-    }
+    if (body.sku_id && !get<{ id: number }>(`SELECT id FROM product_sku WHERE id = ? AND is_deleted = 0`, body.sku_id)) throw notFound('SKU 不存在');
     update('sample_shipment', id, cols(body));
     logIfChanged({
       user_id: user.id,
@@ -1564,7 +1554,7 @@ creatorRouter.put(
       target_id: id,
       before,
       after: { ...before, ...body },
-      keys: ['sku_id', 'quantity', 'sample_cost', 'shipping_cost', 'ship_method', 'tk_order_id', 'tracking_no', 'ship_time', 'sign_time', 'status', 'collab_id'],
+      keys: ['sku_id', 'quantity', 'shipping_cost', 'ship_method', 'tk_order_id', 'tracking_no', 'ship_time', 'sign_time', 'status', 'collab_id'],
       ip: req.ip,
     });
     ok(res, { id });
@@ -1671,6 +1661,33 @@ const periodFilter = (col: string, p: PeriodRange): string => {
 const mapBy = <T extends object>(rows: T[], key: (r: T) => number): Map<number, T> =>
   new Map(rows.map((r) => [key(r), r]));
 
+/**
+ * 归因到达人的「冻结返点」（人民币）：只累加 tk_order_item.rebate_cny 且 rebate_matched=1 的行。
+ * 归因两条路径与 services/creator/roi.ts 完全一致（明细直达 creator_id，或经内容 ID 找到视频），
+ * 同一行经 UNION 去重后只算一次。
+ * 没配返点率的行整体跳过：它们本该待在待映射清单里，既不能进分子，也不能按 0 把 ROI 摊薄。
+ */
+function rebateCnyByCreator(period: PeriodRange): Map<number, number> {
+  const od = periodFilter('o.order_time', period);
+  const rows = all<{ creator_id: number; rebate_cny: number | null }>(
+    `SELECT k.creator_id AS creator_id, COALESCE(SUM(i.rebate_cny), 0) AS rebate_cny
+       FROM (
+         SELECT i.id AS item_id, i.creator_id AS creator_id
+           FROM tk_order_item i JOIN tk_order o ON o.id = i.order_id
+          WHERE i.is_deleted = 0 AND i.rebate_matched = 1 AND i.creator_id IS NOT NULL AND ${ATTRIBUTABLE_ORDER}${od}
+         UNION
+         SELECT i.id AS item_id, v.creator_id AS creator_id
+           FROM tk_order_item i
+           JOIN tk_order o ON o.id = i.order_id
+           JOIN video v ON v.tk_video_id = i.content_id AND v.is_deleted = 0
+          WHERE i.is_deleted = 0 AND i.rebate_matched = 1 AND v.creator_id IS NOT NULL AND ${ATTRIBUTABLE_ORDER}${od}
+       ) k
+       JOIN tk_order_item i ON i.id = k.item_id
+      GROUP BY k.creator_id`,
+  );
+  return new Map(rows.map((r) => [Number(r.creator_id), round2(num(r.rebate_cny))]));
+}
+
 /** 按 BD（sys_user）聚合：建联 / 回复 / 有意向 / 谈妥 / 合作单 / 私海 / 首响 / 净 GMV / 成本 / 投产比 */
 function bdRows(user: CurrentUser, period: PeriodRange, group: boolean): Record<string, unknown>[] {
   const scope = group ? personScope(user, 'u.id', true) : { sql: 'AND u.id = ?', params: [user.id] as SqlParam[] };
@@ -1722,13 +1739,25 @@ function bdRows(user: CurrentUser, period: PeriodRange, group: boolean): Record<
     ),
     (r) => Number(r.user_id),
   );
-  /** 金额按达人归属汇总（roiByCreator 口径：净 GMV / 样品 + 运费 + 坑位 + 佣金） */
-  const money = new Map<number, { net: number; cost: number }>();
+  /**
+   * 金额按达人归属汇总到 BD。
+   * 新口径下这一栏的每一分收入都来自 `tk_order_item.rebate_cny`（已折 CNY 并冻结），
+   * 分母是我们自己掏的三笔：寄样运费 + 坑位费 + 达人佣金 —— 净 GMV 仍然展示，但它是品牌的生意。
+   */
+  const rebateByCreator = rebateCnyByCreator(period);
+  type BdMoney = { net: number; cost: number; rebate: number; shipping: number; fixed: number; commission: number };
+  const emptyMoney = (): BdMoney => ({ net: 0, cost: 0, rebate: 0, shipping: 0, fixed: 0, commission: 0 });
+  const money = new Map<number, BdMoney>();
   for (const r of roiByCreator({ period, limit: 500 })) {
     if (r.owner_id === null) continue;
-    const cur = money.get(r.owner_id) ?? { net: 0, cost: 0 };
+    const cur = money.get(r.owner_id) ?? emptyMoney();
     cur.net = round2(cur.net + r.net_gmv_cny);
-    cur.cost = round2(cur.cost + r.cost);
+    cur.rebate = round2(cur.rebate + (rebateByCreator.get(Number(r.creator_id)) ?? 0));
+    cur.shipping = round2(cur.shipping + r.sample_shipping);
+    cur.fixed = round2(cur.fixed + r.fixed_fee_cny);
+    cur.commission = round2(cur.commission + r.commission_cny);
+    // 成本 = 新口径 ROI 的分母（sample_cost 已随 DDL 一起去掉，不再用 roi.ts 的 cost 汇总）
+    cur.cost = round2(cur.shipping + cur.fixed + cur.commission);
     money.set(r.owner_id, cur);
   }
   const rows = users.map((u) => {
@@ -1736,7 +1765,7 @@ function bdRows(user: CurrentUser, period: PeriodRange, group: boolean): Record<
     const c = collabs.get(u.user_id);
     const p = privates.get(u.user_id);
     const fr = firstResponse.get(u.user_id);
-    const m = money.get(u.user_id) ?? { net: 0, cost: 0 };
+    const m = money.get(u.user_id) ?? emptyMoney();
     const outreach = num(f?.outreach_cnt);
     const replied = num(f?.replied_cnt);
     return {
@@ -1753,8 +1782,9 @@ function bdRows(user: CurrentUser, period: PeriodRange, group: boolean): Record<
       private_creators: num(p?.private_creators),
       avg_first_response_hours: fr?.avg_first_response_hours == null ? null : num(fr.avg_first_response_hours),
       net_gmv_cny: m.net,
+      rebate_cny: m.rebate,
       cost_cny: m.cost,
-      roi: collabRoi({ net_gmv_cny: m.net, sample_cost: 0, sample_shipping: 0, fixed_fee_cny: m.cost, commission_cny: 0 }),
+      roi: collabRoi({ rebate_cny: m.rebate, sample_shipping: m.shipping, fixed_fee_cny: m.fixed, commission_cny: m.commission }),
     };
   });
   rows.sort((a, b) => num(b.net_gmv_cny) - num(a.net_gmv_cny) || num(b.outreach_cnt) - num(a.outreach_cnt) || num(a.user_id) - num(b.user_id));
@@ -1825,7 +1855,7 @@ creatorRouter.get(
         dimension: 'bd',
         period,
         total: rows.length,
-        list: user.can_see_cost ? rows : rows.map((r) => maskFields(r, ['gmv_cny', 'net_gmv_cny', 'cost_cny', 'cost', 'roi'], false)),
+        list: user.can_see_cost ? rows : rows.map((r) => maskFields(r, BD_COST_FIELDS, false)),
       });
       return;
     }
@@ -1850,7 +1880,7 @@ creatorRouter.get(
     const user = current(req);
     const group = qv(req, 'group') === 'true' || qv(req, 'group') === '1';
     const period = safePeriod(resolvePeriod(qv(req, 'period')));
-    const list = bdRows(user, period, group).map((r) => (user.can_see_cost ? r : maskFields(r, ['gmv_cny', 'net_gmv_cny', 'cost_cny', 'cost', 'roi'], false)));
+    const list = bdRows(user, period, group).map((r) => (user.can_see_cost ? r : maskFields(r, BD_COST_FIELDS, false)));
     list.sort((a, b) => num(b.outreach_cnt) - num(a.outreach_cnt) || num(b.net_gmv_cny) - num(a.net_gmv_cny));
     ok(res, { period, dimension: group ? (user.data_scope === DATA_SCOPE.ALL ? 'all' : 'dept') : 'self', total: list.length, list });
   }),

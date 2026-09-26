@@ -96,7 +96,7 @@ docs/{prd,development-standards,epics,changes-vs-plan,source-plan}.md/.txt + iss
 
 | 事项 | 规则 |
 | --- | --- |
-| 不支持 `UPDATE ... FROM` | 跨表更新必须用相关子查询：`UPDATE tk_order_item i SET cost_snapshot = (SELECT ...) WHERE i.id = ?`（MySQL 用 `UPDATE a JOIN b` 也行，但为保一致**两边都写子查询**） |
+| 不支持 `UPDATE ... FROM` | 跨表更新必须用相关子查询：`UPDATE tk_order_item i SET rebate_cny = (SELECT ...) WHERE i.id = ?`（MySQL 用 `UPDATE a JOIN b` 也行，但为保一致**两边都写子查询**） |
 | 不支持 `FILTER (WHERE ...)` | 条件聚合一律 `SUM(CASE WHEN x THEN y ELSE 0 END)` |
 | 无 `GROUP_CONCAT(DISTINCT ... ORDER BY)` 通用写法 | 用子查询去重后再 `GROUP_CONCAT`（MySQL）/`GROUP_CONCAT`（SQLite），或干脆在 JS 里拼 |
 | 部分唯一索引 | SQLite 用 `CREATE UNIQUE INDEX ux_x ON t(cols) WHERE is_deleted = 0`（现 6 处：`ux_user_shop`/`ux_dict`/`ux_listing_shop_sku`/`ux_ad_daily`/`ux_settle_txn`/`ux_rate`）；**MySQL 没有部分索引** → `schema.mysql.sql` 把 `is_deleted` 放进唯一键，服务层负责"恢复/新建时先探测同键活跃行"并返回 409 |
@@ -214,17 +214,17 @@ demoRouter.get('/list', requireMenu('order'), requireExport, wrap((req, res) => 
   const shop = shopScope(user, 'o.shop_id');          // 店维度：ALL/DEPT/SELF/SHOPS → {sql,params}
   const person = personScope(user, 'c.owner_id', true); // 人维度：第三参 true 才允许"本组"(dept)；否则 DEPT 也退化成仅本人
   const rows = all<Record<string, unknown>>(
-    `SELECT o.id, o.total_paid, o.cost_snapshot FROM tk_order o WHERE o.is_deleted = 0 ${shop.sql} ${person.sql}`.replace('  ', ' '),
+    `SELECT o.id, o.total_paid, o.rebate_cny FROM tk_order o WHERE o.is_deleted = 0 ${shop.sql} ${person.sql}`.replace('  ', ' '),
     ...shop.params, ...person.params,
   );
-  ok(res, rows.map((r) => maskFields(r, ['cost_snapshot'], user.can_see_cost))); // 无权限 → 值变 '***'
+  ok(res, rows.map((r) => maskFields(r, ['rebate_cny', 'rebate_rate'], user.can_see_cost))); // 无权限 → 值变 '***'
 }));
 
 /* ---- 8) 日志与告警 ---- */
 writeOpLog({ user_id: user.id, module: '商品中心', action: 'update', target_table: 'product_sku', target_id: id,
              before, after: { ...before, ...body }, ip: req.ip });   // before_after 存 {"before":..,"after":..}
 logIfChanged({ user_id: user.id, module: '商品中心', action: 'update', target_table: 'product_sku', target_id: id,
-               before, after: { ...before, ...body }, keys: ['purchase_cost', 'first_leg_cost'] }); // keys 无变化则不写
+               before, after: { ...before, ...body }, keys: ['rebate_rate', 'logistics_cost'] }); // keys 无变化则不写
 sendAlert({ title: '订单同步失败', detail: `shop=1 ${msg}`, level: 'error' }); // 有 ALERT_WEBHOOK 就推，无则 console.warn
 ```
 
@@ -247,12 +247,13 @@ sendAlert({ title: '订单同步失败', detail: `shop=1 ${msg}`, level: 'error'
 
 | 主题 | 唯一实现 | 规则 |
 | --- | --- | --- |
-| 单件成本 | `unitCostCny(sku)` | `purchase_cost + first_leg_cost`，人民币/件 |
-| 成本快照 | `tk_order_item.cost_snapshot` | 明细写入时冻结；**任何改价不得 UPDATE 历史行** |
-| 有效成本 | `cost_matched = 1` | 所有成本/毛利/利润 SQL 必须带此条件；GMV 不带 |
-| 预估毛利 | `estItemProfitCny()` | `实收折算CNY − cost_snapshot − 佣金折算`；`rate \|\| 1` 的兜底**只允许** `currency==='CNY'` 时生效 |
-| GMV | `net_gmv` 口径 | `item_amount` 折 CNY，`AND is_sample_order = 0`，扣 `tk_return.status='COMPLETED'` 退款 |
-| 达人/合作 ROI | `collabRoi()` | 分母仅 `样品成本 + 寄样运费 + 坑位费 + 达人佣金`；分母 ≤0 → `null`（显示"—"，不参与 Top） |
+| 品牌返点率 | `product_sku.rebate_rate` | 0-1 小数（0.18 = 实收 GMV 的 18% 归我们）。我们是品牌服务方，**没有采购价**这一说；返点率是唯一的收入口径 |
+| 单件物流成本 | `unitLogisticsCny(sku)` | `logistics_cost`（头程 + 海外仓），人民币/件；品牌承担物流时填 0 |
+| 返点/物流快照 | `tk_order_item.rebate_cny` / `logistics_cny` | 明细写入时冻结；**任何改返点率不得 UPDATE 历史行**（同旧的成本快照规则） |
+| 有效返点 | `rebate_matched = 1` | 所有返点/毛利/利润 SQL 必须带此条件；GMV 不带。`rebate_matched=0` 是"没配到返点率"，**不许当成 0 收入混进利润**（也不许猜一个比率） |
+| 预估毛利 | `estItemProfitCny()` | `应收返点 − 物流 − 佣金折算`；`rate \|\| 1` 的兜底**只允许** `currency==='CNY'` 时生效 |
+| GMV | `net_gmv` 口径 | `item_amount` 折 CNY，`AND is_sample_order = 0`，扣 `tk_return.status='COMPLETED'` 退款。GMV 是**品牌**的生意规模，不是我们的收入 |
+| 达人/合作 ROI | `collabRoi()` | **分子是应收返点，不是带货 GMV**；分母仅 `物流 + 寄样运费 + 坑位费 + 达人佣金`；分母 ≤0 → `null`（显示"—"，不参与 Top） |
 | 广告 ROI | `adRoi(spend,gmv)` | `spend<=0 → null` |
 | 利润率 | `profitRate(profit, base)` | 分母 ≤0 → 0，别返回 `NaN` |
 | 切日 | `statDate(utc, tzOffsetMinutes)` | **偏移必须由 `tk_shop.timezone`(IANA) 计算**，不得直接用 `REGION_TZ_OFFSET` 常量（PRD D4）；`ad_daily.stat_date` 落库即站点自然日 |
@@ -310,7 +311,7 @@ sendAlert({ title: '订单同步失败', detail: `shop=1 ${msg}`, level: 'error'
 | 取数 | `pageOf(res.body)` 取 `{list,total}`；`dataOf(res.body)` 取 `data`；断言只依赖响应体，不在测试里 import 服务的私有 SQL |
 | 账号 | 固定用 `ACCOUNTS`（boss/ops=limy/opsManager=wangqiang/bd=chenbd/bd2=lubd/content=yinuo/finance=finwu/ads=adskent/warehouse=whzhao），密码统一 `DEFAULT_PASSWORD='Passw0rd!'` |
 | 模式 | 测试永远 `TIKTOK_API_MODE=mock`；需要真实凭证的用 `describe.skipIf(!process.env.TT_APP_KEY)` |
-| 必测清单 | ① 10 角色 × 敏感字段 × 越权（PRD §2.4 逐条）；② 三条口径硬约束（成本快照不回溯 / 待映射不按 0 成本 / 样品单不计 GMV）；③ 两套状态机非法流转 400；④ 同步幂等（重复执行行数不变 + 旧报文不覆盖新状态）；⑤ 汇率缺失/回退；⑥ 分页上限 200；⑦ `pageSize=10000`、`sortBy=<非白名单>`、注入串三类恶意输入；⑧ 10 万订单行下列表 P95 |
+| 必测清单 | ① 10 角色 × 敏感字段 × 越权（PRD §2.4 逐条）；② 三条口径硬约束（返点与物流快照不回溯 / 未配返点率不按 0 收入进利润 / 样品单不计 GMV）；③ 两套状态机非法流转 400；④ 同步幂等（重复执行行数不变 + 旧报文不覆盖新状态）；⑤ 汇率缺失/回退；⑥ 分页上限 200；⑦ `pageSize=10000`、`sortBy=<非白名单>`、注入串三类恶意输入；⑧ 10 万订单行下列表 P95 |
 | 前端 | `apps/web/tests/unit/*.spec.ts`（`npm run test:e2e -w @tk/web`，jsdom + @vue/test-utils），至少覆盖 `ResourcePage` 的列格式化与掩码渲染 |
 | 归档 | 每个 Issue 的"测试要求"栏写进 `*.spec.ts` 的 `describe` 名，末尾标 `// EPIC-<n>-<seq>`，便于 DoD 反查 |
 
@@ -334,7 +335,7 @@ sendAlert({ title: '订单同步失败', detail: `shop=1 ${msg}`, level: 'error'
 
 ## 13. 代码评审要点（评审者按此逐项打回）
 
-1. **口径**：有没有绕过 `calc.ts` 自己写公式？聚合 SQL 有没有漏 `cost_matched = 1` / `is_sample_order = 0`？汇率回退是否静默？
+1. **口径**：有没有绕过 `calc.ts` 自己写公式？聚合 SQL 有没有漏 `rebate_matched = 1` / `is_sample_order = 0`？返点与佣金有没有一边剔一边留（分子剔了分母没剔）？汇率回退是否静默？
 2. **权限**：`shopScope` 用在了人维度（或反之）？越权靠前端隐藏？导出没走 `requireExport`？
 3. **幂等**：新写入是否可安全重跑（同步、费用生成、库存流水、归因回填、自动匹配）？有无显式幂等键或唯一索引？
 4. **软删**：查询漏 `is_deleted = 0`？用物理 DELETE？恢复/新建没探测同键活跃行（MySQL 无部分索引）？

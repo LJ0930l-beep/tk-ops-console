@@ -119,8 +119,8 @@ CREATE TABLE IF NOT EXISTS product_sku (
   spu_id         BIGINT UNSIGNED NOT NULL,
   sku_code       VARCHAR(64)     NOT NULL,
   spec           VARCHAR(200),                          -- 颜色/尺码/套装
-  purchase_cost  DECIMAL(18,2)   NOT NULL DEFAULT 0,   -- 采购成本（人民币/件）
-  first_leg_cost DECIMAL(18,2)   NOT NULL DEFAULT 0,   -- 头程成本（人民币/件）
+  rebate_rate    DECIMAL(8,4)    NOT NULL DEFAULT 0,   -- 品牌给的返点率（0.18 = 实收 GMV 的 18% 归我们）
+  logistics_cost DECIMAL(18,2)   NOT NULL DEFAULT 0,   -- 单件物流成本（头程+海外仓，人民币/件）
   weight_g       INT,
   package_size   VARCHAR(50),
   status         TINYINT         NOT NULL DEFAULT 1,   -- 1在售 0停售
@@ -220,8 +220,10 @@ CREATE TABLE IF NOT EXISTS tk_order_item (
   unit_price      DECIMAL(18,2) NOT NULL DEFAULT 0,
   discount        DECIMAL(18,2) NOT NULL DEFAULT 0,
   item_amount     DECIMAL(18,2) NOT NULL DEFAULT 0,
-  cost_snapshot   DECIMAL(18,2) NOT NULL DEFAULT 0,     -- 下单时冻结的（采购+头程）×数量，人民币
-  cost_matched    TINYINT       NOT NULL DEFAULT 0,     -- 1=成本快照有效
+  rebate_rate     DECIMAL(8,4)  NOT NULL DEFAULT 0,     -- 成交时冻结的品牌返点率（事后改 SKU 不影响历史单）
+  rebate_cny      DECIMAL(18,2) NOT NULL DEFAULT 0,     -- 冻结的应收返点（人民币）= 实收折 CNY × rebate_rate
+  logistics_cny   DECIMAL(18,2) NOT NULL DEFAULT 0,     -- 冻结的物流支出（人民币）= 单件物流成本 × 数量
+  rebate_matched  TINYINT       NOT NULL DEFAULT 0,     -- 1=返点率已配且快照有效；0 不参与利润
   creator_id      BIGINT UNSIGNED,                       -- 带货达人，自然流量为空
   content_type    TINYINT,                                -- 1达人视频 2达人直播 3自营视频 4自营直播 5商品卡
   content_id      VARCHAR(64),                            -- 视频 ID / 直播场次 ID
@@ -321,8 +323,7 @@ CREATE TABLE IF NOT EXISTS sample_shipment (
   creator_id    BIGINT UNSIGNED NOT NULL,
   sku_id        BIGINT UNSIGNED,
   quantity      INT           NOT NULL DEFAULT 1,
-  sample_cost   DECIMAL(18,2) NOT NULL DEFAULT 0,       -- SKU 成本快照（人民币）
-  shipping_cost DECIMAL(18,2) NOT NULL DEFAULT 0,       -- 寄样运费（人民币）
+  shipping_cost DECIMAL(18,2) NOT NULL DEFAULT 0,       -- 寄样运费（人民币，我们掏的钱；样品货值由品牌承担）
   ship_method   TINYINT       NOT NULL DEFAULT 2,       -- 1平台免费样品 2线下自寄 3海外仓代发
   tk_order_id   VARCHAR(64),
   tracking_no   VARCHAR(64),
@@ -511,7 +512,7 @@ CREATE TABLE IF NOT EXISTS stock_ledger (
   id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   warehouse_id BIGINT UNSIGNED NOT NULL,
   sku_id       BIGINT UNSIGNED NOT NULL,
-  change_type  TINYINT  NOT NULL DEFAULT 1,              -- 1采购入库 2头程发货 3调拨 4销售出库 5样品出库 6退货入库 7盘点调整
+  change_type  TINYINT  NOT NULL DEFAULT 1,              -- 1品牌入仓 2头程调拨 3调拨 4销售出库 5样品出库 6退货入库 7盘点调整
   quantity     INT      NOT NULL DEFAULT 0,              -- 入库为正 出库为负
   ref_no       VARCHAR(64),
   op_time      DATETIME NOT NULL,
@@ -670,7 +671,8 @@ CREATE TABLE IF NOT EXISTS analytics_creator_daily (
   gmv         DECIMAL(18,2) NOT NULL DEFAULT 0,
   refund      DECIMAL(18,2) NOT NULL DEFAULT 0,
   net_gmv     DECIMAL(18,2) NOT NULL DEFAULT 0,
-  sample_cost DECIMAL(18,2) NOT NULL DEFAULT 0,
+  rebate DECIMAL(18,2) NOT NULL DEFAULT 0,
+  sample_shipping DECIMAL(18,2) NOT NULL DEFAULT 0,
   commission  DECIMAL(18,2) NOT NULL DEFAULT 0,
   source      VARCHAR(10)   NOT NULL DEFAULT 'fact',
   created_by  BIGINT UNSIGNED,
@@ -827,10 +829,12 @@ CREATE TABLE IF NOT EXISTS selection_flow (
   name             VARCHAR(255)  NOT NULL,
   image_url        VARCHAR(512),
   category         VARCHAR(64),
-  supplier         VARCHAR(128),
-  purchase_price   DECIMAL(12,4) NOT NULL DEFAULT 0,
-  moq              INT           NOT NULL DEFAULT 0,
-  lead_days        INT           NOT NULL DEFAULT 0,
+  brand_name       VARCHAR(128),
+  list_price       DECIMAL(12,4) NOT NULL DEFAULT 0,
+  planned_discount DECIMAL(8,4)  NOT NULL DEFAULT 0,
+  rebate_rate      DECIMAL(8,4)  NOT NULL DEFAULT 0,
+  commission_rate  DECIMAL(8,4)  NOT NULL DEFAULT 0,
+  logistics_rate   DECIMAL(8,4)  NOT NULL DEFAULT 0,
   est_margin       DECIMAL(8,4)  NOT NULL DEFAULT 0,
   breakeven_roas   DECIMAL(8,4)  NOT NULL DEFAULT 0,
   source           VARCHAR(32),

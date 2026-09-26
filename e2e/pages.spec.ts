@@ -18,7 +18,7 @@ const PAGES: { path: string; title: string }[] = [
   { path: '/shops', title: '店铺管理' },
   { path: '/accounts', title: 'TikTok 账号' },
   { path: '/products/spu', title: '商品(SPU)' },
-  { path: '/products/sku', title: 'SKU 与成本' },
+  { path: '/products/sku', title: 'SKU 与返点' },
   { path: '/products/listing', title: '店铺商品映射' },
   { path: '/products/unmapped', title: '待映射清单' },
   { path: '/products/abc', title: 'ABC 分层与渠道' },

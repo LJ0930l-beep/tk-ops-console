@@ -5,7 +5,7 @@
       type="info"
       show-icon
       :closable="false"
-      title="订单金额与状态由同步作业写入，页面不可改（仅样品单标记可人工纠正并写日志）。灰底 = 样品单不计 GMV，黄底 = 含待映射明细不计成本。"
+      title="订单金额与状态由同步作业写入，页面不可改（仅样品单标记可人工纠正并写日志）。灰底 = 样品单不计 GMV，黄底 = 含没配到品牌返点率的明细，这些行整体不计利润。"
     />
     <ResourcePage
       ref="rp"
@@ -85,7 +85,7 @@ const searchFields = computed<SearchDef[]>(() => [
   { key: 'region', label: '站点', type: 'select', dictType: 'region', options: regionOptions.value },
   { key: 'fulfillment_type', label: '履约方式', type: 'select', options: FULFILLMENT },
   { key: 'is_sample_order', label: '样品单', type: 'select', options: YES_NO },
-  { key: 'only_unmapped', label: '仅含待映射行', type: 'select', options: [{ value: 1, label: '是' }] },
+  { key: 'only_unmapped', label: '仅含不计利润的行', type: 'select', options: [{ value: 1, label: '是（有未配返点率的明细）' }] },
 ]);
 
 const columns = computed<ColumnDef[]>(() => [
@@ -94,9 +94,9 @@ const columns = computed<ColumnDef[]>(() => [
   { prop: 'order_status', label: '状态', width: 100, type: 'tag', options: statusOptions },
   { prop: 'order_time', label: '下单时间', type: 'datetime', width: 145 },
   { prop: 'paid_time', label: '支付时间', type: 'datetime', width: 145 },
-  { prop: 'total_paid', label: '实付金额', type: 'money', width: 110 },
+  { prop: 'total_paid', label: '买家实付(店铺币种)', type: 'money', width: 140 },
   { prop: 'currency', label: '币种', width: 70 },
-  { prop: 'total_paid_cny', label: '实付折算(CNY)', type: 'money', width: 120 },
+  { prop: 'total_paid_cny', label: '实付折 CNY·带货口径', type: 'money', width: 150 },
   { prop: 'subtotal', label: '商品小计', type: 'money', width: 105 },
   { prop: 'shipping_fee', label: '运费', type: 'money', width: 90 },
   { prop: 'item_count', label: '明细行数', width: 85 },
@@ -104,7 +104,7 @@ const columns = computed<ColumnDef[]>(() => [
   { prop: 'tracking_no', label: '运单号', width: 160 },
   { prop: 'sample_flag', label: '样品单', width: 110 },
   { prop: 'attribution', label: '带货归因', minWidth: 170 },
-  { prop: 'est_profit', label: '预估毛利(CNY)', type: 'money', width: 130 },
+  { prop: 'est_profit', label: '预估贡献毛利(CNY)', type: 'money', width: 145 },
   { prop: 'synced_at', label: '同步时间', type: 'datetime', width: 145 },
 ]);
 
@@ -141,7 +141,7 @@ function mapRow(row: Record<string, unknown>): Record<string, unknown> {
   };
 }
 
-/** 样品单灰底；含待映射行黄底（PRD §3.4 告警态） */
+/** 样品单灰底；含未配返点率明细黄底（那些行整体排除在利润之外，PRD §3.4 告警态） */
 function rowClass({ row }: { row: Record<string, unknown> }): string {
   if (Number(row.is_sample_order) === 1) return 'sample-row';
   if (Number(row.unmapped_n ?? 0) > 0) return 'warning-row';

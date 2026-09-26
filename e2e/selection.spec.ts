@@ -67,10 +67,11 @@ async function register(page: Page, name: string): Promise<string> {
   await page.getByRole('button', { name: /登记候选品/ }).click();
   await expect(dialog(page)).toBeVisible();
   await field(page, '品名').locator('input').first().fill(name);
-  await putNumber(page, '采购价', '9');
-  await putNumber(page, '预估毛利率', '0.4');
-  await putNumber(page, '起订量', '100');
-  await putNumber(page, '交货周期(天)', '5');
+  await field(page, '品牌方').locator('input').first().fill('e2e 品牌');
+  await putNumber(page, '建议售价', '39.9');
+  await putNumber(page, '品牌返点率', '0.6');
+  await putNumber(page, '计划达人佣金率', '0.08');
+  await putNumber(page, '计划物流费率', '0.02');
   await pick(page, '选品来源', '市场调研');
   await clearMessages(page);
   await dialog(page).getByRole('button', { name: /登记/ }).click();
@@ -93,9 +94,15 @@ test.describe('选品流水线', () => {
     await login(page, 'boss');
     await openBoard(page);
 
-    /* ① 登记：后端自动给候选品编号与盈亏平衡 ROAS（毛利率 0.5 ⇒ 基准 ROAS = 2） */
+    /* ① 登记：后端自动给候选品编号，并按三个率推出毛利率与盈亏平衡 ROAS（0.6−0.08−0.02=0.5 ⇒ 基准 ROAS = 2） */
     const code = await register(page, `e2e 选品 ${Date.now().toString(36)}`);
     expect(await card(page, code).innerText(), '卡片应当显示停留天数与超时档位').toMatch(/停留 \d+ 天/);
+    // 这两个数在表单里是只读的推导值：能当场看到，才说明"手算毛利"没有第二个口径
+    await act(page, code, '编辑').click();
+    await expect(dialog(page).getByRole('button', { name: /保存/ })).toBeVisible();
+    await expect(field(page, '预估贡献毛利率').locator('.ro').first()).toContainText('50');
+    await expect(field(page, '盈亏平衡 ROAS').locator('.ro').first()).toContainText('2');
+    await dialog(page).getByRole('button', { name: /取消/ }).click();
 
     /* ② 进上架测试：必须指定测试店铺 */
     await act(page, code, '流转').click();

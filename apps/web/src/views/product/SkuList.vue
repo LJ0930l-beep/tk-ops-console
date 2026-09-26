@@ -3,7 +3,9 @@
     <div v-if="rp && !rp.rows.length" class="page-tip">
       <el-alert type="info" :closable="false" show-icon title="还没有 SKU">
         <template #default>
-          SKU 挂在 SPU 下，一个规格一行。采购成本 + 头程成本 = 单件成本（人民币/件），成本未维护的 SKU 会让订单利润算不平，请优先补齐。
+          SKU 挂在 SPU 下，一个规格一行。我们是品牌服务方：货是品牌的，我们不付货款，每个 SKU 要维护的是
+          <b>品牌返点率</b>（我们唯一收入的来源）与<b>单件物流成本</b>（人民币/件，品牌承担填 0）。
+          返点率没配的 SKU，它出的订单行不参与利润，请优先补齐。
         </template>
       </el-alert>
     </div>
@@ -15,6 +17,7 @@
       :columns="columns"
       :search-fields="searchFields"
       :form-fields="formFields"
+      :map-row="decorate"
       :can-write="canWrite"
       :action-width="150"
       dialog-width="720px"
@@ -23,11 +26,12 @@
         <ExportButton url="/products/export/sku" name="product-sku" :params="query" />
       </template>
       <template #form-extra="{ form, editing }">
-        <el-form-item v-if="canSeeCost" label="成本口径">
-          <el-alert type="warning" :closable="false" show-icon :title="`单件成本 = 采购成本 + 头程成本 = ${unitCost(form)} CNY/件`">
+        <el-form-item v-if="canSeeCost" label="收入与物流口径">
+          <el-alert type="warning" :closable="false" show-icon :title="`这一行的收入 = 实收金额 × 品牌返点率 ${rateText(form.rebate_rate)}；我们掏的只有物流 ${logisticsText(form.logistics_cost)} CNY/件`">
             <template #default>
               <span class="tip">
-                修改成本<b>只影响后续订单</b>，历史订单已按下单当时冻结 <code>cost_snapshot</code>，不回溯改写。
+                改返点率<b>只影响后续订单</b>：历史订单已按成交当时冻结 <code>rebate_rate</code> / <code>rebate_cny</code> / <code>logistics_cny</code>，不回溯改写。
+                返点率填 0 = 还没跟品牌谈到数，这种 SKU 出的订单行整体不参与利润（不会按 0 收入计）。
                 <template v-if="editing">该 SKU 近 90 天订单行数 {{ numOrDash((editing as Record<string, unknown>).order_rows_90d) }}、被映射店铺数 {{ numOrDash((editing as Record<string, unknown>).listing_shop_count) }}。</template>
               </span>
             </template>
@@ -41,7 +45,7 @@
 <script setup lang="ts">
 import { ElMessage } from 'element-plus';
 import { computed, onMounted, ref } from 'vue';
-import { num } from '@tk/shared';
+import { MASK, num, round2 } from '@tk/shared';
 import { apiGet, type Paged, errMsg } from '@/api/client';
 import { useAuthStore } from '@/stores/auth';
 import { useDictStore } from '@/stores/dict';
@@ -53,14 +57,19 @@ const dict = useDictStore();
 const rp = ref();
 
 const canWrite = computed(() => auth.roleKey === 'boss' || auth.menus.includes('product'));
-/** PRD 3.0 敏感字段：无权限时后端返回 *** ；本页按分工要求直接不出成本列 */
+/** 返点率与物流是「我们这一侧的账」，与旧口径的成本同级：无 can_see_cost 时后端掩码，本页按分工不出这两列 */
 const canSeeCost = computed(() => auth.canSeeCost);
 
 const SKU_STATUS: OptionDef[] = [
   { value: 1, label: '在售', type: 'success' },
   { value: 0, label: '停售', type: 'info' },
 ];
-const YES: OptionDef[] = [{ value: 1, label: '仅看成本未维护' }];
+const YES: OptionDef[] = [{ value: 1, label: '仅看返点率未配' }];
+/** 后端下发的是小数（0.18），ResourcePage 的 percent 列按「已是百分数」渲染，所以另加展示键，不改原字段 */
+const REBATE_STATE: OptionDef[] = [
+  { value: '已配返点', label: '已配返点', type: 'success' },
+  { value: '未配·不计利润', label: '未配·不计利润', type: 'danger' },
+];
 
 const spuOpts = ref<OptionDef[]>([]);
 const categoryOpts = ref<OptionDef[]>([]);
@@ -83,11 +92,11 @@ onMounted(async () => {
 });
 
 const columns = computed<ColumnDef[]>(() => {
-  const costCols: ColumnDef[] = canSeeCost.value
+  const rebateCols: ColumnDef[] = canSeeCost.value
     ? [
-        { prop: 'purchase_cost', label: '采购成本(CNY/件)', width: 130, type: 'money', sortable: true },
-        { prop: 'first_leg_cost', label: '头程成本(CNY/件)', width: 130, type: 'money', sortable: true },
-        { prop: 'unit_cost', label: '单件成本(CNY)', width: 130, type: 'money', sortable: true },
+        { prop: 'rebate_rate_pct', label: '品牌返点率', width: 110, type: 'percent' },
+        { prop: 'logistics_cost', label: '单件物流(CNY/件)', width: 130, type: 'money', sortable: true },
+        { prop: 'rebate_state', label: '返点维护', width: 130, type: 'tag', options: REBATE_STATE },
       ]
     : [];
   return [
@@ -95,21 +104,33 @@ const columns = computed<ColumnDef[]>(() => {
     { prop: 'spu_code', label: 'SPU 编码', width: 140 },
     { prop: 'name_cn', label: '商品名称', minWidth: 180 },
     { prop: 'spec', label: '规格', minWidth: 130 },
-    ...costCols,
+    ...rebateCols,
     { prop: 'weight_g', label: '重量(g)', width: 90 },
     { prop: 'package_size', label: '包装尺寸', width: 120 },
     { prop: 'status', label: '状态', width: 90, type: 'tag', options: SKU_STATUS },
-    { prop: 'updater_name', label: '最近改价人', width: 110 },
+    { prop: 'updater_name', label: '最近维护人', width: 110 },
     { prop: 'updated_at', label: '最近修改时间', width: 150, type: 'datetime' },
   ];
 });
+
+/** 只加展示键（百分数 / 维护状态），后端原字段一个都不动：编辑表单直接吃 rebate_rate 原值，动了就串单位 */
+function decorate(row: Record<string, unknown>): Record<string, unknown> {
+  const rate = row.rebate_rate;
+  const masked = rate === MASK || rate === null || rate === undefined;
+  return {
+    ...row,
+    rebate_rate_pct: masked ? rate : round2(num(rate) * 100),
+    rebate_state: masked ? '—' : num(rate) > 0 ? '已配返点' : '未配·不计利润',
+  };
+}
 
 const searchFields = computed<SearchDef[]>(() => [
   { key: 'keyword', label: 'SKU/规格', placeholder: '编码或规格' },
   { key: 'spu_id', label: '所属 SPU', type: 'select', options: spuOpts.value },
   { key: 'category', label: '品类', type: 'select', options: categoryOpts.value },
   { key: 'status', label: '状态', type: 'select', options: SKU_STATUS },
-  { key: 'cost_missing', label: '成本维护', type: 'select', options: YES },
+  // 新口径下「成本未维护」这件事就是「没配到品牌返点率」，筛选键跟着改名（后端需支持 rebate_missing）
+  { key: 'rebate_missing', label: '返点率维护', type: 'select', options: YES },
 ]);
 
 const formFields = computed<FormFieldDef[]>(() => [
@@ -118,8 +139,27 @@ const formFields = computed<FormFieldDef[]>(() => [
   { key: 'spec', label: '规格', placeholder: '如 黑色/XL' },
   ...(canSeeCost.value
     ? [
-        { key: 'purchase_cost', label: '采购成本', type: 'number' as const, min: 0, precision: 2, default: 0 },
-        { key: 'first_leg_cost', label: '头程成本', type: 'number' as const, min: 0, precision: 2, default: 0 },
+        {
+          key: 'rebate_rate',
+          label: '品牌返点率',
+          type: 'number' as const,
+          min: 0,
+          max: 1,
+          precision: 4,
+          step: 0.01,
+          default: 0,
+          placeholder: '小数：0.18 = 实收 GMV 的 18% 归我们；没谈到先填 0',
+        },
+        {
+          key: 'logistics_cost',
+          label: '单件物流(CNY)',
+          type: 'number' as const,
+          min: 0,
+          precision: 2,
+          step: 1,
+          default: 0,
+          placeholder: '头程 + 海外仓，人民币/件；品牌承担填 0',
+        },
       ]
     : []),
   { key: 'weight_g', label: '重量(g)', type: 'number', min: 0, precision: 0, default: 0 },
@@ -127,8 +167,14 @@ const formFields = computed<FormFieldDef[]>(() => [
   { key: 'status', label: '状态', type: 'select', options: SKU_STATUS, default: 1 },
 ]);
 
-function unitCost(form: Record<string, unknown>) {
-  return (num(form.purchase_cost) + num(form.first_leg_cost)).toFixed(2);
+/** 表单里的小数 → 百分数文案（只用于提示，不参与任何金额汇总） */
+function rateText(v: unknown): string {
+  if (v === MASK) return MASK;
+  const n = num(v);
+  return `${round2(n * 100)}%`;
+}
+function logisticsText(v: unknown): string {
+  return v === MASK ? MASK : num(v).toFixed(2);
 }
 function numOrDash(v: unknown) {
   return v === undefined || v === null || v === '***' ? '—' : String(v);

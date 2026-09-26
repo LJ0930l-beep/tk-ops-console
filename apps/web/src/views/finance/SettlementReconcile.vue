@@ -17,8 +17,9 @@
       <template #toolbar-extra>
         <el-alert type="info" :closable="false" show-icon class="page-tip">
           <template #title>
-            逐单核「预估收入 vs 平台实际打款」。差异必须能拆到具体科目（佣金 / 平台费 / 运费 / 补贴 / 退款 / 人工调整），
+            逐单核「带货实付 vs 平台实际打款」。差异必须能拆到具体科目（佣金 / 平台费 / 运费 / 补贴 / 退款 / 人工调整），
             拆完剩下的 <code>explain_residual_cny</code> 应当恒等于 0 —— 残差不为 0 就说明有口径没被解释，不是「差不多就行」。
+            注意：这里对的是平台的钱，<b>我们的收入只有品牌返点，走品牌账单另行核对</b>，不要把打款差异读成我们的盈亏。
             灰底 = 样品单或已取消，本就不该有结算；红底 = 差异超过 5%。
           </template>
         </el-alert>
@@ -32,6 +33,7 @@
     </ResourcePage>
 
     <el-drawer v-model="drawer" size="52%" :title="`结算流水：${currentNo}`">
+      <el-alert v-if="txnError" type="error" :closable="false" show-icon class="page-tip" :title="`结算流水加载失败：${txnError}`" description="对账结论仍来自同一份流水汇总，但这里看不到逐笔科目，先修接口再判断差异。" />
       <el-table v-loading="txnLoading" :data="txns" border size="small">
         <el-table-column prop="txn_type" label="类型" width="110" />
         <el-table-column prop="amount" label="原币金额" width="120" align="right" />
@@ -40,8 +42,14 @@
         <el-table-column prop="payment_status" label="打款状态" width="110" />
         <el-table-column prop="statement_id" label="账单号" min-width="150" />
         <el-table-column prop="statement_time" label="时间" width="160" />
+        <template #empty>
+          <el-empty
+            v-if="!txnLoading"
+            :description="txnError ? '流水没拉到（见上方错误），不是这单没有流水' : '该单暂无结算流水（未出账或未到结算周期）'"
+            :image-size="60"
+          />
+        </template>
       </el-table>
-      <el-empty v-if="!txnLoading && !txns.length" description="该单暂无结算流水（未出账或未到结算周期）" :image-size="60" />
     </el-drawer>
   </div>
 </template>
@@ -56,8 +64,9 @@
  */
 import { computed, ref } from 'vue';
 import { useRouter } from 'vue-router';
-import { num } from '@tk/shared';
-import { apiGet, type Paged } from '@/api/client';
+import { ElMessage } from 'element-plus';
+import { MASK, num, round2 } from '@tk/shared';
+import { apiGet, errMsg, type Paged } from '@/api/client';
 import ResourcePage, { type ColumnDef, type OptionDef, type SearchDef } from '@/components/ResourcePage.vue';
 import ExportButton from '@/components/ExportButton.vue';
 
@@ -77,10 +86,10 @@ const columns = computed<ColumnDef[]>(() => [
   { prop: 'order_status', label: '订单状态', width: 130 },
   { prop: 'excluded_reason', label: '剔除原因', width: 120 },
   { prop: 'settled_flag', label: '结算', width: 90, type: 'tag' },
-  { prop: 'est_total_paid_cny', label: '预估实付(CNY)', width: 120, type: 'money' },
+  { prop: 'est_total_paid_cny', label: '带货实付(CNY)', width: 130, type: 'money' },
   { prop: 'settled_paid_cny', label: '实际打款(CNY)', width: 130, type: 'money' },
   { prop: 'diff_cny', label: '差异(CNY)', width: 120, type: 'money', sortable: true },
-  { prop: 'diff_rate', label: '差异率', width: 100, type: 'percent' },
+  { prop: 'diff_rate_pct', label: '差异率', width: 100, type: 'percent' },
   { prop: 'commission_diff_cny', label: '佣金差', width: 110, type: 'money' },
   { prop: 'platform_fee_cny', label: '平台费', width: 110, type: 'money' },
   { prop: 'shipping_fee_cny', label: '运费', width: 110, type: 'money' },
@@ -88,9 +97,9 @@ const columns = computed<ColumnDef[]>(() => [
   { prop: 'settle_refund_cny', label: '退款扣减', width: 110, type: 'money' },
   { prop: 'adjust_cny', label: '人工调整', width: 110, type: 'money' },
   { prop: 'explain_residual_cny', label: '未解释残差', width: 120, type: 'money', sortable: true },
-  { prop: 'est_profit_cny', label: '预估利润', width: 120, type: 'money' },
-  { prop: 'settled_profit_cny', label: '结算口径利润', width: 130, type: 'money' },
-  { prop: 'unmapped_items', label: '待映射行', width: 100, align: 'right' },
+  { prop: 'est_profit_cny', label: '预估贡献毛利(CNY)', width: 150, type: 'money' },
+  { prop: 'settled_profit_cny', label: '结算口径贡献毛利', width: 150, type: 'money' },
+  { prop: 'unmapped_items', label: '未配返点行·不计利润', width: 150, align: 'right' },
   { prop: 'rate_flag', label: '汇率', width: 90, type: 'tag' },
 ]);
 
@@ -106,7 +115,8 @@ function mapRow(r: Record<string, unknown>): Record<string, unknown> {
     ...r,
     settled_flag: r.has_settlement ? '已结算' : '未结算',
     rate_flag: r.rate_missing ? '兜底价' : '牌价',
-    diff_rate: num(r.diff_rate),
+    // diff_rate 后端是小数（0.05 = 5%），percent 列按「已是百分数」渲染，所以另加展示键、不动原字段
+    diff_rate_pct: r.diff_rate === MASK ? MASK : round2(num(r.diff_rate) * 100),
   };
 }
 
@@ -119,18 +129,23 @@ function rowClass(row: Record<string, unknown>): string {
 const drawer = ref(false);
 const currentNo = ref('');
 const txnLoading = ref(false);
+const txnError = ref('');
 const txns = ref<Record<string, unknown>[]>([]);
 
 async function openOrder(row: Record<string, unknown>): Promise<void> {
   currentNo.value = String(row.tk_order_id ?? '');
   drawer.value = true;
   txnLoading.value = true;
+  txnError.value = '';
   try {
     const data = await apiGet<{ list: Record<string, unknown>[] }>(`/finance/settlement/by-order/${encodeURIComponent(currentNo.value)}`);
     txns.value = data?.list ?? [];
-  } catch {
-    // 流水拉不到不影响对账结论（本页数据来自同一份结算流水汇总），只在抽屉里给空态
+  } catch (e) {
+    // 流水拉不到不影响对账结论（本页数据来自同一份结算流水汇总），但空抽屉会被读成「这单没流水」：
+    // 失败必须在抽屉里点名，同时 toast 一次服务端原文
     txns.value = [];
+    txnError.value = errMsg(e);
+    ElMessage.error(errMsg(e));
   } finally {
     txnLoading.value = false;
   }

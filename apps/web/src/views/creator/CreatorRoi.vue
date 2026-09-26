@@ -26,11 +26,14 @@
         <el-button :icon="RefreshLeft" @click="reset">重置</el-button>
       </div>
       <div class="tip">
-        ROI = 带货净 GMV ÷（样品成本 + 寄样运费 + 坑位费 + 达人佣金），全部人民币口径；分母为 0 显示「—」且不参与榜首。
-        净 GMV 已扣除已完成退款、排除样品单（PRD §5.3 / §5.7）。
+        投产比 = <b>应收返点</b> ÷（寄样运费 + 坑位费 + 达人佣金），全部人民币口径；分母为 0 显示「—」且不参与榜首。
+        分子是我们自己的收入，不是带货 GMV —— 带货 GMV 是品牌的生意规模，只看它会把一个亏钱的达人排到第一。
+        净带货 GMV 已扣除已完成退款、排除样品单（PRD §5.3 / §5.7）；样品货值由品牌承担，不再进我们的投入。
       </div>
       <el-alert v-if="!auth.canSeeCost" type="warning" show-icon :closable="false" class="page-tip"
-        title="当前账号无「成本权限」：以下金额与 ROI 由后端返回 ***，页面可打开但不可用于对账。" />
+        title="当前账号无「金额权限」（原可见成本）：以下金额与投产比由后端返回 ***，页面可打开但不可用于对账。" />
+      <el-alert v-else-if="!hasRebateCol" type="warning" show-icon :closable="false" class="page-tip"
+        title="这个维度接口没有下发「应收返点」列，合计投产比一律显示「—」（宁可不给数，也不会拿带货 GMV 冒充我们的收入）。" />
     </el-card>
 
     <el-card shadow="never">
@@ -53,7 +56,7 @@
           </template>
         </el-table-column>
         <template #empty>
-          <el-empty description="所选期间没有可归因的达人带货数据">
+          <el-empty description="所选期间没有可归因到达人的成交：订单行没挂 creator_id，或期间/站点筛得太窄">
             <el-button type="primary" @click="router.push('/creators/collab')">先去登记合作单</el-button>
           </el-empty>
         </template>
@@ -106,15 +109,15 @@ const CREATOR_COLS: Col[] = [
   { prop: 'collabs', label: '合作单数', kind: 'int', width: 95 },
   { prop: 'published_videos', label: '发布视频', kind: 'int', width: 95 },
   { prop: 'orders', label: '带货订单数', kind: 'int', width: 110 },
-  { prop: 'gmv_cny', label: 'GMV(CNY)', kind: 'money', width: 130 },
+  { prop: 'gmv_cny', label: '带货GMV(参考)', kind: 'money', width: 135 },
   { prop: 'refund_cny', label: '退款(CNY)', kind: 'money', width: 120 },
-  { prop: 'net_gmv_cny', label: '净GMV(CNY)', kind: 'money', minWidth: 130 },
-  { prop: 'sample_cost', label: '样品成本(CNY)', kind: 'money', width: 130 },
+  { prop: 'net_gmv_cny', label: '净带货GMV(参考)', kind: 'money', minWidth: 150 },
+  { prop: 'rebate_cny', label: '应收返点(CNY)·我们的收入', kind: 'money', width: 190 },
   { prop: 'sample_shipping', label: '寄样运费(CNY)', kind: 'money', width: 130 },
   { prop: 'fixed_fee_cny', label: '坑位费(CNY)', kind: 'money', width: 125 },
   { prop: 'commission_cny', label: '达人佣金(CNY)', kind: 'money', width: 130 },
   { prop: 'cost', label: '投入合计(CNY)', kind: 'money', width: 135 },
-  { prop: 'roi', label: 'ROI', kind: 'roi', width: 90 },
+  { prop: 'roi', label: '投产比(返点÷投入)', kind: 'roi', width: 150 },
 ];
 
 const BD_COLS: Col[] = [
@@ -126,9 +129,10 @@ const BD_COLS: Col[] = [
   { prop: 'agreed_cnt', label: '谈妥数', kind: 'int', width: 100 },
   { prop: 'collab_cnt', label: '合作单数', kind: 'int', width: 105 },
   { prop: 'creator_cnt', label: '触达达人数', kind: 'int', width: 115 },
-  { prop: 'net_gmv_cny', label: '净GMV(CNY)', kind: 'money', minWidth: 135 },
+  { prop: 'net_gmv_cny', label: '净带货GMV(参考)', kind: 'money', minWidth: 150 },
+  { prop: 'rebate_cny', label: '应收返点(CNY)·我们的收入', kind: 'money', width: 190 },
   { prop: 'cost_cny', label: '投入合计(CNY)', kind: 'money', width: 135 },
-  { prop: 'roi', label: 'ROI', kind: 'roi', width: 90 },
+  { prop: 'roi', label: '投产比(返点÷投入)', kind: 'roi', width: 150 },
 ];
 
 const COLLAB_COLS: Col[] = [
@@ -138,18 +142,21 @@ const COLLAB_COLS: Col[] = [
   { prop: 'status', label: '状态', kind: 'text', width: 80, align: 'center', sortable: false },
   { prop: 'published_videos', label: '发布视频', kind: 'int', width: 95 },
   { prop: 'orders', label: '带货订单数', kind: 'int', width: 110 },
-  { prop: 'net_gmv_cny', label: '净GMV(CNY)', kind: 'money', minWidth: 130 },
-  { prop: 'sample_cost', label: '样品成本(CNY)', kind: 'money', width: 130 },
+  { prop: 'net_gmv_cny', label: '净带货GMV(参考)', kind: 'money', minWidth: 150 },
+  { prop: 'rebate_cny', label: '应收返点(CNY)·我们的收入', kind: 'money', width: 190 },
   { prop: 'sample_shipping', label: '寄样运费(CNY)', kind: 'money', width: 130 },
   { prop: 'fixed_fee_cny', label: '坑位费(CNY)', kind: 'money', width: 125 },
   { prop: 'commission_cny', label: '达人佣金(CNY)', kind: 'money', width: 130 },
   { prop: 'cost', label: '投入合计(CNY)', kind: 'money', width: 135 },
-  { prop: 'roi', label: 'ROI', kind: 'roi', width: 90 },
+  { prop: 'roi', label: '投产比(返点÷投入)', kind: 'roi', width: 150 },
 ];
 
 const cols = computed<Col[]>(() => (dim.value === 'bd' ? BD_COLS : dim.value === 'collab' ? COLLAB_COLS : CREATOR_COLS));
 
 /* ---------- 渲染（后端无权限时值为 ***，直接展示） ---------- */
+/** 这个维度到底有没有「应收返点」这一列：没有就不给合计投产比，绝不拿带货 GMV 凑分子 */
+const hasRebateCol = computed(() => rows.value.some((r) => r.rebate_cny !== undefined && r.rebate_cny !== null));
+
 function render(row: Row, c: Col): string {
   const v = row[c.prop];
   if (v === MASK) return MASK;
@@ -174,10 +181,16 @@ function onSortChange({ prop, order }: { prop: string | null; order: string | nu
   rows.value = list.sort((a, b) => (sortValue(a, prop) - sortValue(b, prop)) * dir);
 }
 
-/* ---------- 合计行（ROI 用合计值重算，不做平均） ---------- */
+/* ---------- 合计行（投产比用合计值重算，不做平均） ---------- */
 function sumOf(prop: string): number | string {
   if (rows.value.some((r) => r[prop] === MASK)) return MASK;
   return round2(rows.value.reduce((s, r) => s + num(r[prop]), 0));
+}
+/** 掩码就照掩码传，数字就照数字传；非数字（列不存在）返回 null 让上层显示「—」 */
+function numOf(prop: string): number | null {
+  const s = sumOf(prop);
+  if (s === MASK) return Number.NaN;
+  return Number(s);
 }
 function summary({ columns }: { columns: { property?: string }[] }) {
   const sums: string[] = [];
@@ -193,14 +206,7 @@ function summary({ columns }: { columns: { property?: string }[] }) {
       return;
     }
     if (c.kind === 'roi') {
-      const roi = collabRoi({
-        net_gmv_cny: Number(sumOf('net_gmv_cny')) || 0,
-        sample_cost: Number(sumOf('sample_cost')) || 0,
-        sample_shipping: Number(sumOf('sample_shipping')) || 0,
-        fixed_fee_cny: Number(sumOf('fixed_fee_cny')) || 0,
-        commission_cny: Number(sumOf('commission_cny')) || 0,
-      });
-      sums.push(dim.value === 'bd' ? roiOfBdTotal() : roi === null ? '—' : roi.toFixed(2));
+      sums.push(dim.value === 'bd' ? roiOfBdTotal() : roiOfTotal());
       return;
     }
     if (c.kind === 'text') {
@@ -212,10 +218,28 @@ function summary({ columns }: { columns: { property?: string }[] }) {
   });
   return sums;
 }
+/** 达人 / 合作单维度：分子＝应收返点，分母＝寄样运费 + 坑位费 + 达人佣金（与 @tk/shared 的 collabRoi 同一公式） */
+function roiOfTotal(): string {
+  if (!hasRebateCol.value) return '—';
+  const rebate = numOf('rebate_cny');
+  if (rebate === null) return '—';
+  if (Number.isNaN(rebate)) return MASK;
+  const roi = collabRoi({
+    rebate_cny: rebate,
+    sample_shipping: numOf('sample_shipping') ?? 0,
+    fixed_fee_cny: numOf('fixed_fee_cny') ?? 0,
+    commission_cny: numOf('commission_cny') ?? 0,
+  });
+  return roi === null ? '—' : roi.toFixed(2);
+}
+/** BD 维度接口只给到投入合计（寄样运费 + 坑位 + 佣金已并成一个数），返点列没下发时同样给「—」 */
 function roiOfBdTotal(): string {
-  const net = Number(sumOf('net_gmv_cny')) || 0;
-  const cost = Number(sumOf('cost_cny')) || 0;
-  const roi = collabRoi({ net_gmv_cny: net, sample_cost: 0, sample_shipping: 0, fixed_fee_cny: cost, commission_cny: 0 });
+  if (!hasRebateCol.value) return '—';
+  const rebate = numOf('rebate_cny');
+  const cost = numOf('cost_cny');
+  if (rebate === null || cost === null) return '—';
+  if (Number.isNaN(rebate) || Number.isNaN(cost)) return MASK;
+  const roi = collabRoi({ rebate_cny: rebate, sample_shipping: 0, fixed_fee_cny: cost, commission_cny: 0 });
   return roi === null ? '—' : roi.toFixed(2);
 }
 
@@ -242,10 +266,12 @@ async function load() {
       ...(region.value ? { region: region.value } : {}),
     });
     const list = Array.isArray(data) ? data : ((data?.list as Row[] | undefined) ?? []);
+    // 应收返点：宽表口径叫 rebate、榜单口径叫 rebate_cny，两个都认（认不出就是没下发，合计投产比会显示「—」）
+    const withRebate: Row[] = list.map((r) => ({ ...r, rebate_cny: r.rebate_cny ?? r.rebate }));
     // 合作单维度后端回数字枚举，这里换成中文，否则表格里是一列 1/2/3
     rows.value = dim.value === 'collab'
-      ? list.map((r) => ({ ...r, coop_type: COOP_LABEL[num(r.coop_type)] ?? String(r.coop_type ?? ''), status: COLLAB_LABEL[num(r.status)] ?? String(r.status ?? '') }))
-      : list;
+      ? withRebate.map((r) => ({ ...r, coop_type: COOP_LABEL[num(r.coop_type)] ?? String(r.coop_type ?? ''), status: COLLAB_LABEL[num(r.status)] ?? String(r.status ?? '') }))
+      : withRebate;
   } catch (e) {
     rows.value = [];
     ElMessage.error(errMsg(e));

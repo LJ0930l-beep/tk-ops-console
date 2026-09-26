@@ -824,3 +824,120 @@ CREATE TABLE IF NOT EXISTS selection_log (
   is_deleted     INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_selection_log_flow ON selection_log(selection_id, id);
+
+/* ============================================================
+ * 表 12：AI 助手（PRD §3.13）
+ * ============================================================ */
+
+/*
+ * 模型服务商。api_key_enc 是 AES-256-GCM 密文，和 tk_shop 的凭证列同一条规矩：
+ * 读接口一律走字段白名单，只回 has_key，绝不下发密文或明文。
+ */
+CREATE TABLE IF NOT EXISTS ai_provider (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  name              TEXT    NOT NULL,
+  vendor            TEXT    NOT NULL DEFAULT 'custom',      -- openai / deepseek / gemini / custom
+  protocol          TEXT    NOT NULL DEFAULT 'openai',      -- 只有两种报文协议：openai 兼容 与 gemini
+  base_url          TEXT    NOT NULL,
+  model             TEXT    NOT NULL,
+  api_key_enc       TEXT,
+  temperature       REAL    NOT NULL DEFAULT 0.3,
+  max_output_tokens INTEGER NOT NULL DEFAULT 1024,
+  price_in_per_1k   REAL    NOT NULL DEFAULT 0,             -- 每 1K 输入 token 单价（CNY，估算用，不是账单）
+  price_out_per_1k  REAL    NOT NULL DEFAULT 0,
+  supports_tools    INTEGER NOT NULL DEFAULT 1,             -- 0 = 该模型不支持函数调用，工具环节整体跳过
+  enabled           INTEGER NOT NULL DEFAULT 1,
+  is_default        INTEGER NOT NULL DEFAULT 0,
+  last_test_at      TEXT,
+  last_test_ok      INTEGER,
+  last_test_error   TEXT,                                   -- 已 maskError：不许出现密钥片段
+  created_by        INTEGER,
+  created_at        TEXT    NOT NULL DEFAULT (datetime('now')),
+  updated_at        TEXT    NOT NULL DEFAULT (datetime('now')),
+  is_deleted        INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_ai_provider_name ON ai_provider(name) WHERE is_deleted = 0;
+
+/* 会话头：一行一个对话，标题由首条用户消息截断得来 */
+CREATE TABLE IF NOT EXISTS ai_conversation (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id         INTEGER NOT NULL,
+  title           TEXT    NOT NULL DEFAULT '新对话',
+  provider_id     INTEGER,
+  model           TEXT,
+  message_count   INTEGER NOT NULL DEFAULT 0,
+  last_message_at TEXT,
+  created_by      INTEGER,
+  created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+  updated_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+  is_deleted      INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS ix_ai_conv_user ON ai_conversation(user_id, id);
+
+/*
+ * 消息正文。tool_calls / tool_name 只在助手与工具两类消息上有值：
+ * 前端靠 tool_calls 画「AI 做了什么」卡片，不靠猜。
+ */
+CREATE TABLE IF NOT EXISTS ai_message (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id   INTEGER NOT NULL,
+  role              TEXT    NOT NULL,                        -- system / user / assistant / tool
+  content           TEXT    NOT NULL DEFAULT '',
+  tool_calls        TEXT,                                    -- 助手发起的工具调用原文（JSON）
+  tool_name         TEXT,                                    -- role=tool 时是哪个工具的返回
+  call_id           INTEGER,                                 -- 关联 ai_call_log
+  prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+  completion_tokens INTEGER NOT NULL DEFAULT 0,
+  latency_ms        INTEGER NOT NULL DEFAULT 0,
+  created_by        INTEGER,
+  created_at        TEXT    NOT NULL DEFAULT (datetime('now')),
+  updated_at        TEXT    NOT NULL DEFAULT (datetime('now')),
+  is_deleted        INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS ix_ai_msg_conv ON ai_message(conversation_id, id);
+
+/* 每次出网调用一条：token / 耗时 / 估算花费 / 失败原因（脱敏后） */
+CREATE TABLE IF NOT EXISTS ai_call_log (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id         INTEGER NOT NULL,
+  provider_id     INTEGER,
+  conversation_id INTEGER,
+  model           TEXT    NOT NULL DEFAULT '',
+  status          INTEGER NOT NULL DEFAULT 1,                -- 1 成功 2 失败
+  prompt_tokens   INTEGER NOT NULL DEFAULT 0,
+  completion_tokens INTEGER NOT NULL DEFAULT 0,
+  latency_ms      INTEGER NOT NULL DEFAULT 0,
+  cost_cny        REAL    NOT NULL DEFAULT 0,
+  tool_count      INTEGER NOT NULL DEFAULT 0,
+  error_msg       TEXT,
+  created_by      INTEGER,
+  created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+  updated_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+  is_deleted      INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS ix_ai_call_user ON ai_call_log(user_id, id);
+CREATE INDEX IF NOT EXISTS ix_ai_call_time ON ai_call_log(created_at);
+
+/*
+ * AI 通过白名单工具真正落到业务表的那一笔。业务表本身另有 op_log（created_by 是点对话的人），
+ * 这张表补的是「是谁的哪条消息、让 AI 用哪个工具、写成了什么」这条因果链。
+ */
+CREATE TABLE IF NOT EXISTS ai_action_log (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  call_id         INTEGER,
+  conversation_id INTEGER,
+  user_id         INTEGER NOT NULL,
+  tool_name       TEXT    NOT NULL,
+  status          INTEGER NOT NULL,                          -- 1 已执行 2 被拒 3 执行失败
+  arguments       TEXT,                                      -- 模型给的工具入参原文（JSON）
+  result          TEXT,                                      -- 业务侧返回的关键字段（JSON）
+  target_table    TEXT,
+  target_id       INTEGER,
+  error_msg       TEXT,
+  created_by      INTEGER,
+  created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+  updated_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+  is_deleted      INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS ix_ai_action_user ON ai_action_log(user_id, id);
+CREATE INDEX IF NOT EXISTS ix_ai_action_call ON ai_action_log(call_id);

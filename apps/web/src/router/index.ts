@@ -58,6 +58,10 @@ const routes: RouteRecordRaw[] = [
       { path: 'system/synclog', name: 'synclog', component: () => import('@/views/system/SyncLogList.vue'), meta: { title: '同步监控', menu: 'system' } },
       { path: 'system/dict', name: 'dict', component: () => import('@/views/system/DictList.vue'), meta: { title: '数据字典', menu: 'system' } },
       { path: 'system/rules', name: 'rules', component: () => import('@/views/system/RulesCenter.vue'), meta: { title: '规则中心', menu: 'system' } },
+
+      { path: 'ai/chat', name: 'ai-chat', component: () => import('@/views/ai/ChatView.vue'), meta: { title: 'AI 对话', menu: 'ai' } },
+      { path: 'ai/providers', name: 'ai-providers', component: () => import('@/views/ai/ProviderList.vue'), meta: { title: '模型服务商', menu: 'ai' } },
+      { path: 'ai/audit', name: 'ai-audit', component: () => import('@/views/ai/AiAudit.vue'), meta: { title: 'AI 调用审计', menu: 'ai' } },
     ],
   },
   { path: '/:pathMatch(.*)*', redirect: '/actions' },

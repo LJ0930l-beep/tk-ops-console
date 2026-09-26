@@ -15,7 +15,7 @@ import { canAccessShop, hasMenu, loadUser, personScope, requireMenu, shopScope, 
 import { writeOpLog } from '../core/oplog.js';
 import { reconcileDueAlertNotifications } from '../services/notifications.js';
 import { abcAnalysis, liveMinutes, shopChannelStructure } from '../services/analytics.js';
-import { bumpRuleVersion, evaluateActionResults, evaluateRules, handleEvent } from '../services/rules/engine.js';
+import { bumpRuleVersion, evaluateActionResults, evaluateRules, eventScope, handleEvent } from '../services/rules/engine.js';
 import { rateDay } from '../services/rates.js';
 
 const current = (req: Request): CurrentUser => (req as AuthedRequest).user;
@@ -31,28 +31,7 @@ const EVENT_SELECT = `
     LEFT JOIN sys_user u ON u.id = ae.owner_id
    WHERE ae.is_deleted = 0`;
 
-/** 预警读取、动作和效果回看共用同一条数据范围规则；无店铺事件按负责人收敛。 */
-export function eventScope(user: CurrentUser): { sql: string; params: (number | string)[] } {
-  const parts: string[] = [];
-  const params: (number | string)[] = [];
-  if (user.data_scope === DATA_SCOPE.SHOPS) {
-    const shop = shopScope(user, 'ae.shop_id');
-    parts.push(`((ae.shop_id IS NOT NULL AND 1 = 1 ${shop.sql}) OR (ae.shop_id IS NULL AND ae.owner_id = ?))`);
-    params.push(...shop.params, user.id);
-  }
-  if (user.data_scope === DATA_SCOPE.DEPT) {
-    const shop = shopScope(user, 'ae.shop_id');
-    parts.push(`((ae.shop_id IS NOT NULL AND 1 = 1 ${shop.sql}) OR
-      (ae.shop_id IS NULL AND ae.owner_id IN (SELECT id FROM sys_user WHERE dept = (SELECT dept FROM sys_user WHERE id = ?))))`);
-    params.push(...shop.params, user.id);
-  }
-  if (user.data_scope === DATA_SCOPE.SELF) {
-    parts.push('ae.owner_id = ?');
-    params.push(user.id);
-  }
-  if (![DATA_SCOPE.ALL, DATA_SCOPE.DEPT, DATA_SCOPE.SELF, DATA_SCOPE.SHOPS].some((scope) => scope === user.data_scope)) parts.push('1 = 0');
-  return { sql: parts.length ? ` AND ${parts.join(' AND ')}` : '', params };
-}
+/** eventScope 已搬到 services/rules/engine.ts —— AI 工具查预警要用同一条数据范围 */
 
 /**
  * 生成/失效到期提醒。**必须是写接口**：

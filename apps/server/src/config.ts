@@ -124,6 +124,34 @@ export const config = {
   exportMaxRows: num('EXPORT_MAX_ROWS', 20000),
   /** 单条记录的变更历史一次最多回几条：既是缺省值也是硬上限（历史是排查用的，不是拿来做全量导出的） */
   oplogHistoryMaxRows: num('OPLOG_HISTORY_MAX_ROWS', 50),
+  /* ---- AI 助手（PRD §3.13）：出网总开关与三个上限，全部配置化，不许在客户端里写死 ---- */
+  /**
+   * 关掉时 /api/ai/* 一律 503「AI 能力未启用」。
+   * 默认开：本项目没有内置假数据分支（用户明确定的是"没配服务商就报错"），
+   * 所以真不出网的前提是"没有可用服务商配置"，而不是靠这个开关兜底。
+   */
+  aiEnabled: process.env.AI_ENABLED !== 'false',
+  /** 单次模型调用超时：比 TikTok 同步宽，模型首 token 慢是常态 */
+  aiTimeoutMs: num('AI_HTTP_TIMEOUT_MS', 45_000),
+  aiMaxRetry: num('AI_MAX_RETRY', 1),
+  /**
+   * 一轮对话里最多允许模型回传几轮工具调用。
+   * 没有这个数，模型可以一直"再查一个工具"把会话吊住并无限烧 token。
+   */
+  aiMaxToolRounds: num('AI_MAX_TOOL_ROUNDS', 4),
+  /** 一次请求最多带多少条历史消息进模型（超了从最旧一侧裁，系统提示词与本轮问题永不裁） */
+  aiHistoryLimit: num('AI_HISTORY_LIMIT', 20),
+  /**
+   * 允许出网的 base_url 主机白名单（逗号分隔，空 = 不限制）。
+   * 存在的理由：服务商配置是界面上可写的，没有这道闸，一个被拿下的管理员账号
+   * 就能把 api_key 指向自己的服务器 —— 密钥泄露不需要读接口，只需要一次"测活"。
+   */
+  aiAllowedHosts: (process.env.AI_ALLOWED_HOSTS ?? '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean),
+  /** 单次调用允许送进模型的最大字符数（提示词 + 工具返回都算），超了就截断并说明 */
+  aiMaxPromptChars: num('AI_MAX_PROMPT_CHARS', 24_000),
   enableScheduler: process.env.ENABLE_SCHEDULER !== 'false',
   /**
    * 反向代理层数（nginx 等）。不设时 req.ip 就是代理自己的地址，

@@ -37,6 +37,8 @@ apps/server/src/
   db/{schema.sqlite.sql,schema.mysql.sql,migrate.ts,seed.ts,cli.ts,bootstrap.ts}
   modules/<domain>.routes.ts   # HTTP 层：只做参数校验 + 调 service + 权限 + 日志
   services/<domain>/*.ts       # 业务层：口径、状态机、汇总（可被 job 与 route 共用）
+  services/ai/*.ts           # 模型服务商适配（providers）、解析（registry）、工具白名单（tools）、对话编排（chat）
+  services/creator/outreach.ts # 建联跟进写入：界面与 AI 工具共用同一个 recordOutreach()
   jobs/{scheduler,syncJobs,creatorJobs}.ts   # 定时与手动触发共用的作业入口
 apps/web/src/
   api/client.ts  router/index.ts  stores/*.ts  layouts/MainLayout.vue
@@ -383,3 +385,34 @@ sendAlert({ title: '订单同步失败', detail: `shop=1 ${msg}`, level: 'error'
 **改界面会撞到的断言**：`router-contract.spec.ts` 把每个懒加载页面真的编译一遍（模板写错立刻红）；
 `e2e/pages.spec.ts` 要求每页渲染出 `.el-table/.el-card/.el-form/.el-descriptions/canvas/.el-empty` 之一且零 console error；
 `e2e/action-center.spec.ts` 依赖 `.page-card/.stat-grid/.ev-row/.ev-chips`；`e2e/selection.spec.ts` 硬依赖 `.board .col` 恰好 5 列、`.scard`、表单 label 文案与 `.ro`。
+
+---
+
+## 15. AI 助手规范（服务商、工具与写入边界）
+
+**协议两种，厂商可扩**：`openai` 兼容（GPT / DeepSeek / 自建网关）与 `gemini` 原生。加一家新厂商只在 `AI_VENDOR_PRESETS` 加一行（协议 + base_url + 默认模型），**不许**再写第三个适配器或第三套报文。
+
+**密钥的三条死规矩**（照 `tk_shop` 凭证那套来，一条都不能省）：
+
+1. 落库前 `encryptSecret()`（AES-256-GCM，密钥来自 `CRED_ENC_KEY`），列名以 `_enc` 结尾；
+2. 读接口一律走**字段白名单**（`PROVIDER_COLUMNS`），只回 `has_key` 布尔，密文与明文都不出接口；
+3. 出网失败/服务商回显的文案必须过 `safe()` + `maskError()` 才允许进 `error_msg`、`ai_call_log`、日志与响应。
+   `base_url` 是界面上可写的，所以还要过 `assertBaseUrlAllowed()`（强制 https + 可选 `AI_ALLOWED_HOSTS` 主机白名单）——
+   否则被盗用的管理员账号只要点一次"测活"，就能把 key 送到别人的服务器。
+
+**没有 mock**：产品代码里不存在假数据分支，没配服务商就是 409 一句可读提示。要测真实链路就在测试里注入桩 `transport`
+（`runChat({ transport })`，与 `services/tiktok/realClient.ts` 的注入点同一套路），桩只替掉 `fetch` 这一层，
+其余（报文、工具循环、落库、脱敏）走的都是生产代码。**不要**为了"e2e 能跑通"往产品里加假回复。
+
+**AI 写数据的边界**：
+
+- 只有 `AI_WRITE_TOOLS` 里的工具能写；名单在 `packages/shared/src/constants.ts`，加一项要连带加测试与 PRD 说明。
+- 工具实现**必须复用现有 service 函数**（`handleEvent` / `recordOutreach` / `computeProfitReport` / `dashboardMetrics`），
+  不在 `services/ai/tools.ts` 里写第二套 SQL 或第二套口径 —— 那是本项目一直在防的分叉。
+- 执行时传的是**发起对话那个人的 `CurrentUser`**：菜单不够、数据范围外的对象，AI 一律做不到；
+  `op_log.created_by` 记这个人，不是"AI"。
+- 每次写工具调用（成功或被拒）都要落 `ai_action_log`，字段含 `tool_name / status / target_table / target_id / 会话与调用 ID`。
+- 删除、改价/上架、对外给达人发消息这三类**永远不进名单**，用户提这种要求要模型直接拒绝（系统提示词里写死了这条）。
+
+**观测**：每次出网一条 `ai_call_log`（token、耗时、估算花费、工具数、失败原因）；对话轮数受
+`AI_MAX_TOOL_ROUNDS` 限制，用完必须留一条"为什么收口"的说明，不许静默空回复。

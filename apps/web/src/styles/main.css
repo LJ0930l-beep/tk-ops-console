@@ -66,6 +66,11 @@ body {
 .page {
   padding: var(--tk-page-pad);
 }
+/* ResourcePage 的根节点自己带 .page，页面为了放页头/统计条又包了一层 .page ——
+   于是 24 个列表页的实际内边距是 32px 而不是 16px。嵌套的那一层不再重复出padding。 */
+.page .page {
+  padding: 0;
+}
 .page-card {
   margin-bottom: var(--tk-s4);
 }

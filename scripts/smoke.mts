@@ -55,6 +55,10 @@ const SAMPLE_SQL: Record<string, string> = {
   '/api/actions/analytics/live/:id/minutes': 'SELECT id FROM live_session WHERE is_deleted = 0 ORDER BY id LIMIT 1',
   '/api/selection/:id': 'SELECT id FROM selection_flow WHERE is_deleted = 0 ORDER BY id LIMIT 1',
   '/api/selection/:id/logs': 'SELECT id FROM selection_flow WHERE is_deleted = 0 ORDER BY id LIMIT 1',
+  // 演示库里刻意不 seed 任何 AI 服务商/会话（没有真实 key，也不该有假数据）：
+  // 这两条会走「无样本数据，跳过」的 warn 分支，与 /api/system/jobs/:id 同一待遇。
+  '/api/ai/providers/:id': 'SELECT id FROM ai_provider WHERE is_deleted = 0 ORDER BY id LIMIT 1',
+  '/api/ai/conversations/:id': 'SELECT id FROM ai_conversation WHERE is_deleted = 0 ORDER BY id LIMIT 1',
 };
 
 const day = (offset: number): string => {

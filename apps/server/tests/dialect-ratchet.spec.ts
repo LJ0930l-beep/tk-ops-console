@@ -34,17 +34,20 @@ const PATTERNS: Record<string, { re: RegExp; to: string }> = {
  * 预算 = 实测值。改小请连带改这里；改大必须在 PR 里说清为什么又欠了一笔。
  * 2026-09-23 选品两张表 +5/+5/+2：全部来自 DDL 的 DEFAULT (datetime('now')) 与 AUTOINCREMENT 惯例，
  * 新增的选品业务代码没有引入任何一处 julianday/datetime() 计算（日期差都在 JS 里算）。
+ * 2026-09-26 AI 助手五张表 +10/+10/+5：同样全部来自建表惯例
+ * （5 张表 × created_at/updated_at 的 DEFAULT (datetime('now'))，加 5 个 AUTOINCREMENT 主键），
+ * services/ai 与 modules/ai.routes 没有新增任何一处 SQLite 专有函数 —— 时间计算一律在 JS 里做。
  * 迁移完成的目标是整块删掉这个文件（docs/db-migration.md 第 4 节）。
  */
 const BUDGET: Record<string, number> = {
-  "datetime('now')": 122,
-  'datetime( 函数调用': 130,
+  "datetime('now')": 132,
+  'datetime( 函数调用': 140,
   IFNULL: 59,
   'substr( 取日期': 38,
   julianday: 10,
   'INSERT OR IGNORE': 1,
   PRAGMA: 13,
-  AUTOINCREMENT: 39,
+  AUTOINCREMENT: 44,
   group_concat: 0,
   strftime: 0,
   '自定义 SQL 函数注册': 1,

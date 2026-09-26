@@ -8,6 +8,7 @@
     "can_export": 0,
     "menus": [
       "ads",
+      "ai",
       "dashboard",
       "order"
     ]
@@ -20,6 +21,7 @@
     "can_see_contact": 1,
     "can_export": 0,
     "menus": [
+      "ai",
       "content",
       "creator",
       "dashboard"
@@ -33,6 +35,7 @@
     "can_see_contact": 1,
     "can_export": 1,
     "menus": [
+      "ai",
       "content",
       "creator",
       "dashboard"
@@ -47,6 +50,7 @@
     "can_export": 1,
     "menus": [
       "ads",
+      "ai",
       "content",
       "creator",
       "dashboard",
@@ -67,6 +71,7 @@
     "can_see_contact": 0,
     "can_export": 0,
     "menus": [
+      "ai",
       "content",
       "dashboard"
     ]
@@ -80,6 +85,7 @@
     "can_export": 1,
     "menus": [
       "ads",
+      "ai",
       "dashboard",
       "finance",
       "order"
@@ -93,6 +99,7 @@
     "can_see_contact": 0,
     "can_export": 0,
     "menus": [
+      "ai",
       "content",
       "dashboard"
     ]
@@ -105,6 +112,7 @@
     "can_see_contact": 0,
     "can_export": 0,
     "menus": [
+      "ai",
       "content",
       "dashboard",
       "order",
@@ -122,6 +130,7 @@
     "can_export": 1,
     "menus": [
       "ads",
+      "ai",
       "content",
       "dashboard",
       "finance",
@@ -140,6 +149,7 @@
     "can_see_contact": 0,
     "can_export": 0,
     "menus": [
+      "ai",
       "creator",
       "dashboard",
       "stock"

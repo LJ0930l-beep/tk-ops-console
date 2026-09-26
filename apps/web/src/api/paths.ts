@@ -32,6 +32,17 @@ export const API_PATHS = [
   '/ads/summary',
   '/ads/trend',
   '/ads/types',
+  '/ai/actions',
+  '/ai/calls',
+  '/ai/calls/usage',
+  '/ai/chat',
+  '/ai/conversations',
+  '/ai/conversations/:id',
+  '/ai/providers',
+  '/ai/providers/:id',
+  '/ai/providers/:id/test',
+  '/ai/providers/all',
+  '/ai/tools',
   '/auth/login',
   '/auth/me',
   '/auth/password',
@@ -232,6 +243,17 @@ export type ApiPath =
   | '/ads/summary'
   | '/ads/trend'
   | '/ads/types'
+  | '/ai/actions'
+  | '/ai/calls'
+  | '/ai/calls/usage'
+  | '/ai/chat'
+  | '/ai/conversations'
+  | `/ai/conversations/${string}`
+  | '/ai/providers'
+  | `/ai/providers/${string}`
+  | `/ai/providers/${string}/test`
+  | '/ai/providers/all'
+  | '/ai/tools'
   | '/auth/login'
   | '/auth/me'
   | '/auth/password'

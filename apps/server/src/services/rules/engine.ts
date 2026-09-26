@@ -8,7 +8,8 @@
  */
 import { all, get, insert, update } from '../../core/db.js';
 import { badRequest, notFound } from '../../core/http.js';
-import { breakevenRoas, DEFAULT_ALERT_RULES } from '@tk/shared';
+import { shopScope } from '../../core/auth.js';
+import { breakevenRoas, DATA_SCOPE, DEFAULT_ALERT_RULES, type CurrentUser } from '@tk/shared';
 import { rateToCnyExpr, todayUtc } from '../rates.js';
 import { scanCreatorTrends, scanProductChannels, scanVideoDecay } from '../analytics.js';
 import { SELECTION_EVALUATORS } from './selection.js';
@@ -463,6 +464,33 @@ export function metricSnapshot(targetType: string, targetId: number | null, end 
     return { metric: 'roas_7d', value: spend > 0 ? r2((n(row?.gmv) / spend) * 100) / 100 : 0 };
   }
   return { metric: 'none', value: 0 };
+}
+
+/**
+ * 预警的数据范围：读取列表、处理动作、AI 工具查预警，三处必须是同一条规则，
+ * 否则会出现"界面上看不见、AI 却能查到并处理"的越权。
+ * 无店铺的事件（如达人趋势类）按负责人收敛。
+ */
+export function eventScope(user: CurrentUser): { sql: string; params: (number | string)[] } {
+  const parts: string[] = [];
+  const params: (number | string)[] = [];
+  if (user.data_scope === DATA_SCOPE.SHOPS) {
+    const shop = shopScope(user, 'ae.shop_id');
+    parts.push(`((ae.shop_id IS NOT NULL AND 1 = 1 ${shop.sql}) OR (ae.shop_id IS NULL AND ae.owner_id = ?))`);
+    params.push(...shop.params, user.id);
+  }
+  if (user.data_scope === DATA_SCOPE.DEPT) {
+    const shop = shopScope(user, 'ae.shop_id');
+    parts.push(`((ae.shop_id IS NOT NULL AND 1 = 1 ${shop.sql}) OR
+      (ae.shop_id IS NULL AND ae.owner_id IN (SELECT id FROM sys_user WHERE dept = (SELECT dept FROM sys_user WHERE id = ?))))`);
+    params.push(...shop.params, user.id);
+  }
+  if (user.data_scope === DATA_SCOPE.SELF) {
+    parts.push('ae.owner_id = ?');
+    params.push(user.id);
+  }
+  if (![DATA_SCOPE.ALL, DATA_SCOPE.DEPT, DATA_SCOPE.SELF, DATA_SCOPE.SHOPS].some((scope) => scope === user.data_scope)) parts.push('1 = 0');
+  return { sql: parts.length ? ` AND ${parts.join(' AND ')}` : '', params };
 }
 
 export interface HandleInput {

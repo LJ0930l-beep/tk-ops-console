@@ -21,6 +21,7 @@ import { stockRouter } from './modules/stock.routes.js';
 import { syncRouter } from './modules/sync.routes.js';
 import { importRouter } from './modules/import.routes.js';
 import { actionsRouter } from './modules/actions.routes.js';
+import { aiRouter } from './modules/ai.routes.js';
 
 export interface AppOptions {
   /**
@@ -67,6 +68,7 @@ export function createApp(opts: AppOptions = {}): Express {
   api.use('/stock', stockRouter);
   api.use('/sync', syncRouter);
   api.use('/actions', actionsRouter);
+  api.use('/ai', aiRouter);
   app.use('/api', api);
 
   app.use('/api', (_req, res) => res.status(404).json({ code: 40400, message: '接口不存在', data: null }));

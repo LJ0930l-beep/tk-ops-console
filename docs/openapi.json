@@ -22,6 +22,9 @@
       "name": "ads"
     },
     {
+      "name": "ai"
+    },
+    {
       "name": "auth"
     },
     {
@@ -1427,6 +1430,727 @@
         "x-router": "ads.routes.ts#adsRouter",
         "x-menu": [
           "ads"
+        ]
+      }
+    },
+    "/api/ai/actions": {
+      "get": {
+        "tags": [
+          "ai"
+        ],
+        "operationId": "get_ai_actions",
+        "parameters": [
+          {
+            "name": "end_date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "start_date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tool_name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封，data 为分页体",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Paged"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-router": "ai.routes.ts#aiRouter",
+        "x-menu": [
+          "ai"
+        ]
+      }
+    },
+    "/api/ai/calls": {
+      "get": {
+        "tags": [
+          "ai"
+        ],
+        "operationId": "get_ai_calls",
+        "description": "调用审计：只给看得到 ai 菜单的人；普通角色只看到自己的，主管/老板看全部",
+        "parameters": [
+          {
+            "name": "end_date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "provider_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "start_date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封，data 为分页体",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Paged"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-router": "ai.routes.ts#aiRouter",
+        "x-menu": [
+          "ai"
+        ]
+      }
+    },
+    "/api/ai/calls/usage": {
+      "get": {
+        "tags": [
+          "ai"
+        ],
+        "operationId": "get_ai_calls_usage",
+        "parameters": [],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "x-router": "ai.routes.ts#aiRouter",
+        "x-menu": [
+          "ai"
+        ]
+      }
+    },
+    "/api/ai/chat": {
+      "post": {
+        "tags": [
+          "ai"
+        ],
+        "operationId": "post_ai_chat",
+        "description": "一次对话：非流式（内部系统一问一答够用，且 SSE 带不上 Authorization 头）",
+        "parameters": [],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "x-router": "ai.routes.ts#aiRouter",
+        "x-menu": [
+          "ai"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              },
+              "x-zod-schema": "chatBody"
+            }
+          }
+        }
+      }
+    },
+    "/api/ai/conversations": {
+      "get": {
+        "tags": [
+          "ai"
+        ],
+        "operationId": "get_ai_conversations",
+        "parameters": [
+          {
+            "name": "keyword",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封，data 为分页体",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Paged"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-router": "ai.routes.ts#aiRouter",
+        "x-menu": [
+          "ai"
+        ]
+      }
+    },
+    "/api/ai/conversations/:id": {
+      "get": {
+        "tags": [
+          "ai"
+        ],
+        "operationId": "get_ai_conversations_id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "x-router": "ai.routes.ts#aiRouter",
+        "x-menu": [
+          "ai"
+        ]
+      },
+      "delete": {
+        "tags": [
+          "ai"
+        ],
+        "operationId": "delete_ai_conversations_id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "x-router": "ai.routes.ts#aiRouter",
+        "x-menu": [
+          "ai"
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ai/providers": {
+      "get": {
+        "tags": [
+          "ai"
+        ],
+        "operationId": "get_ai_providers",
+        "description": "服务商列表：ResourcePage 直接可用（返回 {list,total}），密文换成 has_key",
+        "parameters": [
+          {
+            "name": "enabled",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "keyword",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vendor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封，data 为分页体",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Paged"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-router": "ai.routes.ts#aiRouter",
+        "x-menu": [
+          "ai"
+        ]
+      },
+      "post": {
+        "tags": [
+          "ai"
+        ],
+        "operationId": "post_ai_providers",
+        "parameters": [],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "x-router": "ai.routes.ts#aiRouter",
+        "x-menu": [
+          "ai"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              },
+              "x-zod-schema": "providerBody"
+            }
+          }
+        }
+      }
+    },
+    "/api/ai/providers/:id": {
+      "get": {
+        "tags": [
+          "ai"
+        ],
+        "operationId": "get_ai_providers_id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "x-router": "ai.routes.ts#aiRouter",
+        "x-menu": [
+          "ai"
+        ]
+      },
+      "put": {
+        "tags": [
+          "ai"
+        ],
+        "operationId": "put_ai_providers_id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "x-router": "ai.routes.ts#aiRouter",
+        "x-menu": [
+          "ai"
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "ai"
+        ],
+        "operationId": "delete_ai_providers_id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "x-router": "ai.routes.ts#aiRouter",
+        "x-menu": [
+          "ai"
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ai/providers/:id/test": {
+      "post": {
+        "tags": [
+          "ai"
+        ],
+        "operationId": "post_ai_providers_id_test",
+        "description": "测活：一次最小往返，结果连同错误（脱敏后）落到该服务商上",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "x-router": "ai.routes.ts#aiRouter",
+        "x-menu": [
+          "ai"
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ai/providers/all": {
+      "get": {
+        "tags": [
+          "ai"
+        ],
+        "operationId": "get_ai_providers_all",
+        "parameters": [],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "x-router": "ai.routes.ts#aiRouter",
+        "x-menu": [
+          "ai"
+        ]
+      }
+    },
+    "/api/ai/tools": {
+      "get": {
+        "tags": [
+          "ai"
+        ],
+        "operationId": "get_ai_tools",
+        "description": "工具清单：前端把\"AI 能干什么、哪些是写入\"显示出来，不让人猜",
+        "parameters": [],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "x-router": "ai.routes.ts#aiRouter",
+        "x-menu": [
+          "ai"
         ]
       }
     },
@@ -4013,7 +4737,7 @@
           "creators"
         ],
         "operationId": "post_creators_outreach",
-        "description": "新增跟进：自动 user_id = 当前用户、contact_time = now；\n随后为达人续期保护期（+7 天），公海达人自动转入本人私海（视为已建联）。",
+        "description": "新增跟进：自动 user_id = 当前用户、contact_time = now；\n随后为达人续期保护期（+7 天），公海达人自动转入本人私海（视为已建联）。\n真正的写入在 services/creator/outreach.ts，AI 工具调的是同一个函数。",
         "parameters": [],
         "security": [
           {

@@ -293,8 +293,10 @@ describe('权限与数据范围', () => {
     const permsOf = (key: string): string[] =>
       JSON.parse(String(get<{ menu_perms: string }>(`SELECT menu_perms FROM sys_role WHERE role_key = ?`, key)?.menu_perms ?? '[]')) as string[];
     expect(permsOf('ops')).toContain('selection');
-    // 手工改过的其它权限必须原样保留，迁移只加不减
-    expect(permsOf('ops')).toEqual(['dashboard', 'shop', 'product', 'order', 'selection']);
+    // 手工改过的其它权限必须原样保留，迁移只加不减。
+    // 末尾的 'ai' 来自 migrateAiMenu（给所有有 dashboard 的角色补 AI 菜单）——
+    // 这条断言因此同时证明"两段菜单迁移互不覆盖"。
+    expect(permsOf('ops')).toEqual(['dashboard', 'shop', 'product', 'order', 'selection', 'ai']);
     expect(permsOf('bd')).toContain('selection');
     expect(permsOf('finance')).not.toContain('selection');
   });

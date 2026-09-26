@@ -48,6 +48,9 @@ const PAGES: { path: string; title: string }[] = [
   { path: '/system/synclog', title: '同步监控' },
   { path: '/system/dict', title: '数据字典' },
   { path: '/system/rules', title: '规则中心' },
+  { path: '/ai/chat', title: 'AI 对话' },
+  { path: '/ai/providers', title: '模型服务商' },
+  { path: '/ai/audit', title: 'AI 调用审计' },
 ];
 
 /** 与本项目无关的浏览器噪声：devtools 提示、SourceMap、favicon */

@@ -449,6 +449,35 @@
 - **与商品/新品端口的关系**（方案 11.4）：选品管"从 0 到 1"，转 `正常销售` 后写 `spu_id` 与 `selling_at`，归商品端口做动态检测；三个端口共用同一个 SPU，数据不重复录入，只做状态流转。
 
 
+
+### 3.13 `ai` AI 助手 `[已实现]`（模型服务商接入 + 对话 + 白名单工具）
+
+| 子页 | key / path | 表 | 后端 | 前端 |
+| --- | --- | --- | --- | --- |
+| AI 对话 | `ai:chat` → `/ai/chat` | `ai_conversation` + `ai_message` + `ai_call_log` + `ai_action_log` | `ai.routes.ts`（15 端点） | `views/ai/ChatView.vue` |
+| 模型服务商 | `ai:provider` → `/ai/providers` | `ai_provider` | 同上 | `views/ai/ProviderList.vue` |
+| AI 调用审计 | `ai:audit` → `/ai/audit` | `ai_call_log` + `ai_action_log` | 同上 | `views/ai/AiAudit.vue` |
+
+**这一节的边界（用户定的三条，写死在这里免得下一轮被人"顺手放宽"）**：
+
+1. **协议只有两种**：`openai` 兼容报文（GPT / DeepSeek / 自建网关，只差 base_url 与 model）与 `gemini` 原生报文。加一家新厂商 = 在 `AI_VENDOR_PRESETS` 加一行预设，不是再写一个适配器。
+2. **没有 mock 服务商**：没配 key 就是 409 一句可读的"去模型服务商配一家"，产品代码里不存在假数据分支。真实模型往返因此**不在 e2e 里测**，改由 `tests/ai.spec.ts` 注入桩 transport 离线对拍（报文形态、工具循环、落库、脱敏全都走生产代码）。
+3. **AI 可以写业务数据，但只有白名单**：`AI_WRITE_TOOLS` 当前是 `record_alert_action`（预警处置）与 `create_outreach`（建联跟进）。写入走的是**人在界面上写时同一个 service 函数**（`handleEvent` / `recordOutreach`），因此权限、数据范围、校验、op_log 一条都不会少；`created_by` 记的是发起对话的那个人。删除、改价/上架、对外给达人发消息三类**永不进名单**。
+
+| 端点 | 作用 | 硬规则 |
+| --- | --- | --- |
+| `GET/POST /api/ai/providers`、`PUT/DELETE /:id` | 服务商 CRUD | 读取走字段白名单，**密文列 `api_key_enc` 与明文 key 都不出接口**（只回 `has_key`）；`base_url` 必须 https（本机回环例外）且命中 `AI_ALLOWED_HOSTS`（配了才校验）；编辑时 key 留空＝保持原值 |
+| `POST /api/ai/providers/:id/test` | 测活：一次最小往返 | 结果与失败原因（`maskError` 后）落到该行上，界面上看得见"上次测活：失败 + 为什么" |
+| `GET /api/ai/tools` | 工具清单（名称/中文标签/是否写入） | 前端把"AI 能干什么"显示出来，不让人猜 |
+| `POST /api/ai/chat` | 一轮对话（非流式） | `AI_ENABLED=false` → 503；没可用服务商 → 409；单条 >8000 字 → 400；工具轮数上限 `AI_MAX_TOOL_ROUNDS`，用完必须留一条说明而不是空回复 |
+| `GET /api/ai/conversations`、`/:id`、`DELETE /:id` | 会话 | 只能看/删自己的会话；别人的会话一律 404（不区分 403/404，免得被拿来探测 ID） |
+| `GET /api/ai/calls`、`/calls/usage`、`/actions` | 审计与用量 | SELF 角色只看到自己发起的调用与花费，主管/老板看全部 |
+
+- **为什么非流式**：内部系统一问一答够用，而 `EventSource` 带不上 `Authorization` 头 —— 要上流式得先改鉴权方式（cookie 或短期票据），那是另一整件事。
+- **前端超时必须单独放宽**：服务端出网给模型最多 `AI_HTTP_TIMEOUT_MS`（默认 45s），跟着 axios 默认的 30s 会先把请求掐掉，表现是"AI 明明在算，界面报了个网络错误"。
+- **审计三张表各司其职**：`ai_call_log` 记每次出网（token/耗时/估算花费/失败原因），`ai_message` 记对话原文（含 `tool_calls`），`ai_action_log` 只记写工具，字段是"哪条消息、哪个工具、改了哪张表哪一行、被拒还是失败"。
+- **配置项**（全部 env 可覆盖，见 `config.ts`）：`AI_ENABLED`、`AI_HTTP_TIMEOUT_MS`、`AI_MAX_RETRY`、`AI_MAX_TOOL_ROUNDS`、`AI_HISTORY_LIMIT`、`AI_ALLOWED_HOSTS`、`AI_MAX_PROMPT_CHARS`。
+
 ---
 
 ## 4. 四条核心业务流程与状态机
@@ -589,6 +618,11 @@
 | 24 | `sys_op_log` | 操作日志（不可改）| 1 | `user_id, op_time, module, action, target_table, target_id, before_after(JSON), ip` | — | `[已实现]` |
 | 25 | `sync_log` | 同步日志 | 1 | `task_type, shop_id, window_start, window_end, fetched, inserted, updated, failed, status, error_msg, started_at, finished_at` | — | `[已实现]` 查询侧 |
 | 26 | `sys_dict` | 数据字典 | 1 | `dict_type, dict_value, dict_label, sort, status` | `ux_dict(dict_type,dict_value)` | `[已实现]` |
+| 27 | `ai_provider` | 模型服务商 | 13 AI | `name, vendor, protocol, base_url, model, api_key_enc, temperature, max_output_tokens, price_in/out_per_1k, supports_tools, enabled, is_default, last_test_*` | `name` UNIQUE(软删过滤) | `[已实现]` |
+| 28 | `ai_conversation` | AI 会话头 | 13 | `user_id, title, provider_id, model, message_count, last_message_at` | `ix_ai_conv_user(user_id,id)` | `[已实现]` |
+| 29 | `ai_message` | AI 消息 | 13 | `conversation_id, role, content, tool_calls(JSON), tool_name, call_id, prompt/completion_tokens, latency_ms` | `ix_ai_msg_conv(conversation_id,id)` | `[已实现]` |
+| 30 | `ai_call_log` | AI 出网调用审计 | 13 | `user_id, provider_id, conversation_id, model, status, tokens, latency_ms, cost_cny, tool_count, error_msg` | `ix_ai_call_user`、`ix_ai_call_time` | `[已实现]` |
+| 31 | `ai_action_log` | AI 发起的写入 | 13 | `call_id, conversation_id, user_id, tool_name, status, arguments, result, target_table, target_id, error_msg` | `ix_ai_action_user`、`ix_ai_action_call` | `[已实现]` |
 
 公共 5 字段（方案表 5 约定，全部表已落）：`id`、`created_at`、`updated_at`、`is_deleted`、`remark?`（方案为 `created_by/updated_by` 语义，代码用 `created_at/updated_at + is_deleted`，差异见 `changes-vs-plan` #2）。
 
@@ -610,6 +644,7 @@
 | 返点与物流快照冻结，改协议不回溯 | `tk_order_item.rebate_cny` / `logistics_cny` | 订单写入时按当时 `rebate_rate` 与 `unitLogisticsCny(sku)×quantity` 冻结；改 `product_sku.rebate_rate` **禁止** UPDATE 任何历史明细 | 老订单行 `rebate_cny` 在改返点率前后逐字节不变 |
 | 未配返点率不能按 0 收入 | `rebate_matched=0` | 所有返点/毛利/利润 SQL 必须带 `rebate_matched=1`；GMV 仍计入并显性提示"N 行未配返点率，不计利润" | 把未配返点行的 `rebate_cny` 人为改大 → 毛利/利润数字不变 |
 | 样品单不计 GMV | `tk_order.is_sample_order` | 所有 GMV/订单数/退款率/达人业绩口径 `AND is_sample_order=0`；寄样成本走 ROI 分母 | `/api/dashboard/summary.gmv` 与手算（排除 8 条样品单）一致 |
+| AI 只能走白名单工具写数据 | `ai_provider.api_key_enc` / `ai_action_log` | key 只进不出（AES-256-GCM + 字段白名单 + `maskError`）；`base_url` 必须 https 且可被 `AI_ALLOWED_HOSTS` 锁死；写工具仅限 `AI_WRITE_TOOLS`，执行时用的是**发起对话那个人的权限与数据范围**，并同写 op_log | `tests/ai.spec.ts`：key 不出接口/不出错误文案、白名单外工具不执行、无 creator 菜单者让 AI 写建联被拒且留痕 |
 
 ### 5.4 金额与时间口径
 

@@ -16,6 +16,7 @@ export const MENU_KEYS = [
   'finance',
   'stock',
   'system',
+  'ai',
 ] as const;
 export type MenuKey = (typeof MENU_KEYS)[number];
 
@@ -99,24 +100,39 @@ export const MENUS: { key: MenuKey; title: string; icon: string; phase: 1 | 2 | 
       { key: 'rule:center', title: '规则中心', path: '/system/rules' },
     ],
   },
+  {
+    // AI 助手排在最后：没配服务商之前它只是个报错页，不该占前面的视觉位
+    key: 'ai', title: 'AI 助手', icon: 'MagicStick', phase: 3,
+    children: [
+      { key: 'ai:chat', title: 'AI 对话', path: '/ai/chat' },
+      { key: 'ai:provider', title: '模型服务商', path: '/ai/providers' },
+      { key: 'ai:audit', title: 'AI 调用审计', path: '/ai/audit' },
+    ],
+  },
 ];
 
 /** 角色 data_scope */
 export const DATA_SCOPE = { ALL: 1, DEPT: 2, SELF: 3, SHOPS: 4 } as const;
 
-/** 建议默认权限（方案 8.1） */
+/**
+ * 建议默认权限（方案 8.1）。
+ *
+ * `ai` 给到所有角色：AI 能看见什么、能改什么，靠的是「工具白名单 + 调用者本人的菜单与数据范围」，
+ * 不是靠这个菜单键藏入口 —— 菜单只是让他有个对话页。真要给某个角色关掉，去角色权限页勾掉即可。
+ */
 export const DEFAULT_ROLES = [
   { role_key: 'boss', role_name: '老板', data_scope: DATA_SCOPE.ALL, can_see_cost: 1, can_see_contact: 1, can_export: 1, menu_perms: [...MENU_KEYS] },
-  { role_key: 'ops_manager', role_name: '运营主管', data_scope: DATA_SCOPE.DEPT, can_see_cost: 1, can_see_contact: 0, can_export: 1, menu_perms: ['dashboard', 'selection', 'shop', 'product', 'order', 'content', 'ads', 'finance', 'system'] },
-  { role_key: 'ops', role_name: '运营', data_scope: DATA_SCOPE.SHOPS, can_see_cost: 0, can_see_contact: 0, can_export: 0, menu_perms: ['dashboard', 'selection', 'shop', 'product', 'order', 'content'] },
-  { role_key: 'bd_manager', role_name: 'BD 主管', data_scope: DATA_SCOPE.DEPT, can_see_cost: 0, can_see_contact: 1, can_export: 1, menu_perms: ['dashboard', 'creator', 'content'] },
-  { role_key: 'bd', role_name: '达人 BD', data_scope: DATA_SCOPE.SELF, can_see_cost: 0, can_see_contact: 1, can_export: 0, menu_perms: ['dashboard', 'creator', 'content'] },
-  { role_key: 'content', role_name: '内容(编导/剪辑)', data_scope: DATA_SCOPE.SELF, can_see_cost: 0, can_see_contact: 0, can_export: 0, menu_perms: ['dashboard', 'content'] },
-  { role_key: 'host', role_name: '主播/场控', data_scope: DATA_SCOPE.SELF, can_see_cost: 0, can_see_contact: 0, can_export: 0, menu_perms: ['dashboard', 'content'] },
-  { role_key: 'ads', role_name: '投放', data_scope: DATA_SCOPE.SHOPS, can_see_cost: 0, can_see_contact: 0, can_export: 0, menu_perms: ['dashboard', 'ads', 'order'] },
-  { role_key: 'finance', role_name: '财务', data_scope: DATA_SCOPE.ALL, can_see_cost: 1, can_see_contact: 0, can_export: 1, menu_perms: ['dashboard', 'finance', 'order', 'ads'] },
-  { role_key: 'warehouse', role_name: '仓库/发货', data_scope: DATA_SCOPE.ALL, can_see_cost: 0, can_see_contact: 0, can_export: 0, menu_perms: ['dashboard', 'creator', 'stock'] },
+  { role_key: 'ops_manager', role_name: '运营主管', data_scope: DATA_SCOPE.DEPT, can_see_cost: 1, can_see_contact: 0, can_export: 1, menu_perms: ['dashboard', 'selection', 'shop', 'product', 'order', 'content', 'ads', 'finance', 'system', 'ai'] },
+  { role_key: 'ops', role_name: '运营', data_scope: DATA_SCOPE.SHOPS, can_see_cost: 0, can_see_contact: 0, can_export: 0, menu_perms: ['dashboard', 'selection', 'shop', 'product', 'order', 'content', 'ai'] },
+  { role_key: 'bd_manager', role_name: 'BD 主管', data_scope: DATA_SCOPE.DEPT, can_see_cost: 0, can_see_contact: 1, can_export: 1, menu_perms: ['dashboard', 'creator', 'content', 'ai'] },
+  { role_key: 'bd', role_name: '达人 BD', data_scope: DATA_SCOPE.SELF, can_see_cost: 0, can_see_contact: 1, can_export: 0, menu_perms: ['dashboard', 'creator', 'content', 'ai'] },
+  { role_key: 'content', role_name: '内容(编导/剪辑)', data_scope: DATA_SCOPE.SELF, can_see_cost: 0, can_see_contact: 0, can_export: 0, menu_perms: ['dashboard', 'content', 'ai'] },
+  { role_key: 'host', role_name: '主播/场控', data_scope: DATA_SCOPE.SELF, can_see_cost: 0, can_see_contact: 0, can_export: 0, menu_perms: ['dashboard', 'content', 'ai'] },
+  { role_key: 'ads', role_name: '投放', data_scope: DATA_SCOPE.SHOPS, can_see_cost: 0, can_see_contact: 0, can_export: 0, menu_perms: ['dashboard', 'ads', 'order', 'ai'] },
+  { role_key: 'finance', role_name: '财务', data_scope: DATA_SCOPE.ALL, can_see_cost: 1, can_see_contact: 0, can_export: 1, menu_perms: ['dashboard', 'finance', 'order', 'ads', 'ai'] },
+  { role_key: 'warehouse', role_name: '仓库/发货', data_scope: DATA_SCOPE.ALL, can_see_cost: 0, can_see_contact: 0, can_export: 0, menu_perms: ['dashboard', 'creator', 'stock', 'ai'] },
 ] as const;
+
 
 /* ---- 业务状态枚举 ---- */
 export const SHOP_AUTH_STATUS = { UNAUTHORIZED: 0, AUTHORIZED: 1, EXPIRING: 2, EXPIRED: 3 } as const;
@@ -185,6 +201,73 @@ export const ORDER_STATUS_LABEL: Record<string, string> = {
   UNPAID: '待付款', ON_HOLD: '暂停', TO_BE_SHIPPED: '待发货', INVOICE_CREATED: '待发货',
   TRANSIT_TO_SHIP: '运输中', SHIPPED: '运输中', DELIVERED: '已签收', COMPLETED: '已完成',
   CANCELLED: '已取消', ON_HOLD_SUBSTATUS_ESCALATION: '暂停',
+};
+
+/* ---- AI 助手（模型服务商接入 + 工具调用） ---- */
+
+/**
+ * 协议只有两种：`openai` 兼容报文（GPT / DeepSeek / 各类自建网关）与 `gemini` 原生报文。
+ * 厂商"预设"只是给协议 + base_url + 默认模型一组初值，不新增第三种协议 ——
+ * 加一家的成本应该是填一行预设，而不是再写一个适配器。
+ */
+export const AI_PROTOCOL = { OPENAI: 'openai', GEMINI: 'gemini' } as const;
+export type AiProtocol = (typeof AI_PROTOCOL)[keyof typeof AI_PROTOCOL];
+
+export const AI_VENDOR = { OPENAI: 'openai', DEEPSEEK: 'deepseek', GEMINI: 'gemini', CUSTOM: 'custom' } as const;
+export type AiVendor = (typeof AI_VENDOR)[keyof typeof AI_VENDOR];
+
+export const AI_VENDOR_LABELS: Record<AiVendor, string> = {
+  openai: 'OpenAI（GPT）',
+  deepseek: 'DeepSeek',
+  gemini: 'Google Gemini',
+  custom: '自定义（OpenAI 兼容网关）',
+};
+
+export const AI_VENDOR_PRESETS: Record<AiVendor, { protocol: AiProtocol; base_url: string; model: string; key_hint: string }> = {
+  openai: { protocol: 'openai', base_url: 'https://api.openai.com/v1', model: 'gpt-4o-mini', key_hint: 'sk-...' },
+  deepseek: { protocol: 'openai', base_url: 'https://api.deepseek.com/v1', model: 'deepseek-chat', key_hint: 'sk-...' },
+  gemini: { protocol: 'gemini', base_url: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-2.5-flash', key_hint: 'AIza...' },
+  custom: { protocol: 'openai', base_url: '', model: '', key_hint: '' },
+};
+
+export const AI_MESSAGE_ROLE = { SYSTEM: 'system', USER: 'user', ASSISTANT: 'assistant', TOOL: 'tool' } as const;
+
+/** 一次模型调用的结果状态：失败也要落审计表，否则"AI 答不上来"和"没调"分不清 */
+export const AI_CALL_STATUS = { SUCCESS: 1, FAILED: 2 } as const;
+export const AI_CALL_STATUS_LABELS: Record<number, string> = { 1: '成功', 2: '失败' };
+
+/**
+ * AI 发起的写入状态。没有"待确认"这一档：按本轮定的边界，白名单内的写入直接执行，
+ * 但"权限不够/不在名单内被拒"和"执行失败"都必须留痕，事后能追到是哪条消息让它写的。
+ */
+export const AI_ACTION_STATUS = { EXECUTED: 1, REJECTED: 2, FAILED: 3 } as const;
+export const AI_ACTION_STATUS_LABELS: Record<number, string> = { 1: '已执行', 2: '被拒', 3: '执行失败' };
+
+/**
+ * AI 能调的工具。读工具只回数据（且按调用者的数据范围过滤）；
+ * 写工具一律复用"人在界面上写时走的同一条路径"（同样的校验、同样的数据范围、同样的 op_log）。
+ * 删除、改价/上架、对外给达人发消息这三类**永远不进这个名单**。
+ *
+ * 达人 ROI 不单开工具：get_profit_report(dim='creator') 已经按同一条利润口径给得出，
+ * 再开一个"第二套 ROI 查询"就是又一次分叉。
+ */
+export const AI_TOOL = {
+  GET_DASHBOARD: 'get_dashboard',
+  GET_PROFIT_REPORT: 'get_profit_report',
+  LIST_ALERTS: 'list_alerts',
+  RECORD_ALERT_ACTION: 'record_alert_action',
+  CREATE_OUTREACH: 'create_outreach',
+} as const;
+export type AiToolName = (typeof AI_TOOL)[keyof typeof AI_TOOL];
+
+export const AI_WRITE_TOOLS: readonly AiToolName[] = [AI_TOOL.RECORD_ALERT_ACTION, AI_TOOL.CREATE_OUTREACH];
+
+export const AI_TOOL_LABELS: Record<AiToolName, string> = {
+  [AI_TOOL.GET_DASHBOARD]: '读经营看板',
+  [AI_TOOL.GET_PROFIT_REPORT]: '读利润报表（可按店铺/SKU/达人/月份）',
+  [AI_TOOL.LIST_ALERTS]: '读未闭环预警',
+  [AI_TOOL.RECORD_ALERT_ACTION]: '给预警写处置动作',
+  [AI_TOOL.CREATE_OUTREACH]: '登记一条建联跟进',
 };
 
 export interface ApiResponse<T> { code: number; message: string; data: T }

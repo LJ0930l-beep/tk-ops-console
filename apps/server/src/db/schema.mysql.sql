@@ -878,3 +878,110 @@ CREATE TABLE IF NOT EXISTS selection_log (
   KEY ix_selection_log_flow (selection_id, id),
   CONSTRAINT fk_selection_log_flow FOREIGN KEY (selection_id) REFERENCES selection_flow(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='V3 选品阶段流转日志';
+
+/* ============================================================
+ * 表 12：AI 助手（PRD §3.13）
+ * 列名与 schema.sqlite.sql 严格一致（tests/schema-drift.spec.ts 逐表比对列集合）。
+ * MySQL 的 TEXT/BLOB 不能带 DEFAULT，所以 sqlite 侧「NOT NULL DEFAULT ''」在这里是
+ * 「可空 + 由写入方保证有值」—— 与 selection_flow.test_snapshot 的既有处理同一套路。
+ * ============================================================ */
+
+CREATE TABLE IF NOT EXISTS ai_provider (
+  id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+  name              VARCHAR(64)   NOT NULL,
+  vendor            VARCHAR(32)   NOT NULL DEFAULT 'custom',
+  protocol          VARCHAR(16)   NOT NULL DEFAULT 'openai',
+  base_url          VARCHAR(255)  NOT NULL,
+  model             VARCHAR(96)   NOT NULL,
+  api_key_enc       TEXT,                                   -- AES-256-GCM 密文，读接口不下发
+  temperature       DECIMAL(3,2)  NOT NULL DEFAULT 0.30,
+  max_output_tokens INT           NOT NULL DEFAULT 1024,
+  price_in_per_1k   DECIMAL(10,4) NOT NULL DEFAULT 0,
+  price_out_per_1k  DECIMAL(10,4) NOT NULL DEFAULT 0,
+  supports_tools    TINYINT       NOT NULL DEFAULT 1,
+  enabled           TINYINT       NOT NULL DEFAULT 1,
+  is_default        TINYINT       NOT NULL DEFAULT 0,
+  last_test_at      DATETIME      NULL,
+  last_test_ok      TINYINT       NULL,
+  last_test_error   TEXT,
+  created_by        BIGINT,
+  created_at        DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at        DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  is_deleted        TINYINT       NOT NULL DEFAULT 0,
+  UNIQUE KEY ux_ai_provider_name (name, is_deleted)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='表12 AI 模型服务商配置';
+
+CREATE TABLE IF NOT EXISTS ai_conversation (
+  id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+  user_id         BIGINT       NOT NULL,
+  title           VARCHAR(191) NOT NULL DEFAULT '新对话',
+  provider_id     BIGINT,
+  model           VARCHAR(96),
+  message_count   INT          NOT NULL DEFAULT 0,
+  last_message_at DATETIME     NULL,
+  created_by      BIGINT,
+  created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  is_deleted      TINYINT      NOT NULL DEFAULT 0,
+  KEY ix_ai_conv_user (user_id, id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='表12 AI 会话头';
+
+CREATE TABLE IF NOT EXISTS ai_message (
+  id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+  conversation_id   BIGINT      NOT NULL,
+  role              VARCHAR(16) NOT NULL,
+  content           TEXT,
+  tool_calls        JSON,
+  tool_name         VARCHAR(64),
+  call_id           BIGINT,
+  prompt_tokens     INT         NOT NULL DEFAULT 0,
+  completion_tokens INT         NOT NULL DEFAULT 0,
+  latency_ms        INT         NOT NULL DEFAULT 0,
+  created_by        BIGINT,
+  created_at        DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at        DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  is_deleted        TINYINT     NOT NULL DEFAULT 0,
+  KEY ix_ai_msg_conv (conversation_id, id),
+  CONSTRAINT fk_ai_msg_conv FOREIGN KEY (conversation_id) REFERENCES ai_conversation(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='表12 AI 消息（含工具调用原文）';
+
+CREATE TABLE IF NOT EXISTS ai_call_log (
+  id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+  user_id           BIGINT        NOT NULL,
+  provider_id       BIGINT,
+  conversation_id   BIGINT,
+  model             VARCHAR(96)   NOT NULL DEFAULT '',
+  status            TINYINT       NOT NULL DEFAULT 1,
+  prompt_tokens     INT           NOT NULL DEFAULT 0,
+  completion_tokens INT           NOT NULL DEFAULT 0,
+  latency_ms        INT           NOT NULL DEFAULT 0,
+  cost_cny          DECIMAL(12,4) NOT NULL DEFAULT 0,
+  tool_count        INT           NOT NULL DEFAULT 0,
+  error_msg         TEXT,
+  created_by        BIGINT,
+  created_at        DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at        DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  is_deleted        TINYINT       NOT NULL DEFAULT 0,
+  KEY ix_ai_call_user (user_id, id),
+  KEY ix_ai_call_time (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='表12 AI 出网调用审计';
+
+CREATE TABLE IF NOT EXISTS ai_action_log (
+  id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+  call_id           BIGINT,
+  conversation_id   BIGINT,
+  user_id           BIGINT        NOT NULL,
+  tool_name         VARCHAR(64)   NOT NULL,
+  status            TINYINT       NOT NULL,
+  arguments         JSON,
+  result            JSON,
+  target_table      VARCHAR(64),
+  target_id         BIGINT,
+  error_msg         TEXT,
+  created_by        BIGINT,
+  created_at        DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at        DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  is_deleted        TINYINT       NOT NULL DEFAULT 0,
+  KEY ix_ai_action_user (user_id, id),
+  KEY ix_ai_action_call (call_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='表12 AI 经白名单工具发起的写入';

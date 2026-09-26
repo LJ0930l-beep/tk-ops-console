@@ -710,3 +710,87 @@ export interface SelectionLogRow {
 
 /** ABC 分层默认阈值（§6.1；必须在规则中心可配置） */
 export const ABC_DEFAULTS = { a_cum_share: 0.8, b_cum_share: 0.95 };
+
+/* ---- AI 助手（PRD §3.13） ---- */
+
+/**
+ * 服务商配置。注意 `api_key_enc` 是密文列，**任何读接口都不返回它**，
+ * 前端只看 `has_key`（与 tk_shop 的 app_secret_enc 同一套做法）。
+ */
+export interface AiProvider extends BaseEntity {
+  name: string;
+  vendor: string;
+  protocol: string;
+  base_url: string;
+  model: string;
+  temperature: number;
+  max_output_tokens: number;
+  /** 每 1K token 单价（人民币，元）；只用于花费估算，不是账单 */
+  price_in_per_1k: number;
+  price_out_per_1k: number;
+  enabled: 0 | 1;
+  is_default: 0 | 1;
+  supports_tools: 0 | 1;
+  has_key?: boolean;
+  last_test_at?: string | null;
+  last_test_ok?: 0 | 1 | null;
+  last_test_error?: string | null;
+}
+
+export interface AiConversation extends BaseEntity {
+  user_id: number;
+  title: string;
+  provider_id: number | null;
+  model: string;
+  message_count: number;
+  last_message_at: string | null;
+  user_name?: string | null;
+}
+
+export interface AiMessage extends BaseEntity {
+  conversation_id: number;
+  role: string;
+  content: string;
+  /** 助手消息发起的工具调用原文（JSON 文本），前端据此画"AI 做了什么"卡片 */
+  tool_calls: string | null;
+  tool_name: string | null;
+  call_id: number | null;
+  prompt_tokens: number;
+  completion_tokens: number;
+  latency_ms: number;
+}
+
+/** 每次出网调用的审计：谁、哪个服务商、多少 token、多久、成功还是失败（失败原因已脱敏） */
+export interface AiCallLog extends BaseEntity {
+  user_id: number;
+  provider_id: number | null;
+  conversation_id: number | null;
+  model: string;
+  status: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  latency_ms: number;
+  cost_cny: number;
+  tool_count: number;
+  error_msg: string | null;
+  user_name?: string | null;
+  provider_name?: string | null;
+}
+
+/**
+ * AI 真正落到业务表的那一笔：状态三选一并存（已执行 / 被拒 / 失败），
+ * `target_table + target_id` 指回业务行，op_log 里另有同一条写入的人工视角记录。
+ */
+export interface AiActionLog extends BaseEntity {
+  call_id: number | null;
+  conversation_id: number | null;
+  user_id: number;
+  tool_name: string;
+  status: number;
+  arguments: string | null;
+  result: string | null;
+  target_table: string | null;
+  target_id: number | null;
+  error_msg: string | null;
+  user_name?: string | null;
+}

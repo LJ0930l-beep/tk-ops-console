@@ -111,6 +111,31 @@ export function migrate(db: DatabaseSync): void {
   migrateLiveSessionIdempotency(db);
   migrateSelectionMenu(db);
   migrateRebateCaliber(db);
+  migrateAiMenu(db);
+}
+
+/**
+ * 「AI 助手」是后加的一级菜单，老库的 sys_role.menu_perms 不会自己长出来。
+ * 补法与 migrateSelectionMenu 同一套：按内容判定幂等（可反复执行），
+ * 权限列解析失败的行跳过不猜；已经手工给过 'ai' 的角色保持原样。
+ * 口径：给所有本来就有工作台（dashboard）的角色补 —— AI 的可见数据与可写工具
+ * 由「工具白名单 + 调用者本人的菜单/数据范围」决定，不靠这个菜单键做兜底。
+ */
+function migrateAiMenu(db: DatabaseSync): void {
+  const rows = db.prepare(`SELECT id, menu_perms FROM sys_role WHERE is_deleted = 0`).all() as { id: number; menu_perms: string }[];
+  let hit = 0;
+  for (const r of rows) {
+    let perms: unknown;
+    try {
+      perms = JSON.parse(r.menu_perms);
+    } catch {
+      continue; // 权限列被改坏过，不该由这次迁移猜测
+    }
+    if (!Array.isArray(perms) || !perms.includes('dashboard') || perms.includes('ai')) continue;
+    db.prepare(`UPDATE sys_role SET menu_perms = ? WHERE id = ?`).run(JSON.stringify([...perms, 'ai']), r.id);
+    hit++;
+  }
+  if (hit) console.log(`[db] 迁移：${hit} 个角色的菜单已补上「AI 助手」`);
 }
 
 /**

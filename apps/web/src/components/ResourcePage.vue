@@ -61,7 +61,7 @@
             show-overflow-tooltip
           >
             <template #default="{ row }">
-              <el-image v-if="c.type === 'image'" :src="String(cell(row, c) ?? '')" style="width: 36px; height: 36px; border-radius: 4px" fit="cover" preview-teleported :preview-src-list="cell(row, c) ? [String(cell(row, c))] : []" />
+              <el-image v-if="c.type === 'image' && cell(row, c)" :src="String(cell(row, c))" style="width: 36px; height: 36px; border-radius: 4px" fit="cover" preview-teleported :preview-src-list="[String(cell(row, c))]" />
               <template v-else-if="c.type === 'money'"><span :class="{ 'money-cny': c.prop.includes('cny') || c.prop.includes('cost') }">{{ fmtMoney(cell(row, c)) }}</span></template>
               <el-tag v-else-if="c.type === 'tag'" :type="tagType(cell(row, c), c.options)" size="small">{{ optionLabel(cell(row, c), c.options) }}</el-tag>
               <span v-else-if="c.type === 'datetime'">{{ fmtDateTime(cell(row, c)) }}</span>

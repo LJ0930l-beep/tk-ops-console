@@ -1,5 +1,11 @@
 <template>
   <div class="page">
+    <PageHeader title="广告日报" sub="这里的 ROI 是带货口径 = GMV ÷ 消耗：GMV 是品牌的生意、不是我们的收入，所以 ROAS ≥ 1 并不等于赚钱">
+      <template #tag>
+        <el-tag v-if="trendTotal" size="small" :type="(trendTotal.roi ?? 0) < 1 ? 'danger' : 'info'">全期间 ROAS {{ trendTotal.roi === null ? '—' : Number(trendTotal.roi).toFixed(2) }}</el-tag>
+      </template>
+    </PageHeader>
+
     <el-card class="page-card" shadow="never">
       <el-form inline @submit.prevent="reload(1)">
         <el-form-item label="统计日期" required>
@@ -47,12 +53,18 @@
       />
     </el-card>
 
-    <div class="stat-grid">
-      <el-card v-for="k in kpiCards" :key="k.label" shadow="never" class="kpi-card">
-        <div class="kpi-label">{{ k.label }}</div>
-        <div class="kpi-value">{{ k.value }}</div>
-        <div class="kpi-sub">{{ k.sub }}</div>
-      </el-card>
+    <div class="stat-grid tk-in">
+      <StatCard v-for="k in kpiCards" :key="k.label" :label="k.label" :value="k.value" :sub="k.sub" :tone="k.tone" />
+    </div>
+
+    <el-alert v-if="chartError" type="warning" :closable="false" show-icon class="page-card" :title="`投放趋势与计划榜加载失败：${chartError}`" description="下面的表格不受影响：图取的是全量聚合接口，表取的是分页明细。" />
+    <div class="chart-grid">
+      <ChartCard title="逐日消耗与 ROAS" :tip="trendTip" :span="7" :empty="!trendRows.length" empty-text="这个区间没有投放数据">
+        <div ref="trendEl" class="chart-host" />
+      </ChartCard>
+      <ChartCard title="计划 ROAS 榜（Top 10）" :tip="rankTip" :span="5" :empty="!rankRows.length" empty-text="没有可比的计划">
+        <div ref="rankEl" class="chart-host" />
+      </ChartCard>
     </div>
 
     <el-card shadow="never">
@@ -137,10 +149,33 @@ import type { AdDaily, PageResult } from '@tk/shared';
 import { adRoi, num, round2 } from '@tk/shared';
 import { apiGet, errMsg } from '@/api/client';
 import ExportButton from '@/components/ExportButton.vue';
+import ChartCard from '@/components/ChartCard.vue';
+import PageHeader from '@/components/PageHeader.vue';
+import StatCard from '@/components/StatCard.vue';
+import { useChart } from '@/composables/useChart';
+import type { ChartOption } from '@/utils/echarts';
+import { chartColor, motion } from '@/utils/theme';
 import { useDictStore } from '@/stores/dict';
 import type { RowLike } from '@/types/row';
 
 type Row = AdDaily & Record<string, unknown>;
+
+/** /ads/trend 与 /ads/roi/rank 的行（全期间聚合，不是分页表里那一页） */
+interface TrendRow {
+  date?: string;
+  spend: number;
+  gmv: number;
+  roi: number | null;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+}
+interface RankRow {
+  group_name: string;
+  spend: number;
+  gmv: number;
+  roi: number | null;
+}
 
 const dict = useDictStore();
 const router = useRouter();
@@ -199,19 +234,120 @@ function roiClass(r: RowLike): string {
 }
 
 const kpiCards = computed(() => {
-  const spend = round2(rows.value.reduce((a, r) => a + num(r.spend), 0));
-  const gmv = round2(rows.value.reduce((a, r) => a + num(r.gmv), 0));
-  const conv = rows.value.reduce((a, r) => a + num(r.conversions), 0);
-  const imp = rows.value.reduce((a, r) => a + num(r.impressions), 0);
-  const clk = rows.value.reduce((a, r) => a + num(r.clicks), 0);
-  const roi = adRoi(spend, gmv);
+  const t = trendTotal.value;
+  const spend = t ? num(t.spend) : round2(rows.value.reduce((a, r) => a + num(r.spend), 0));
+  const gmv = t ? num(t.gmv) : round2(rows.value.reduce((a, r) => a + num(r.gmv), 0));
+  const conv = t ? num(t.conversions) : rows.value.reduce((a, r) => a + num(r.conversions), 0);
+  const imp = t ? num(t.impressions) : rows.value.reduce((a, r) => a + num(r.impressions), 0);
+  const clk = t ? num(t.clicks) : rows.value.reduce((a, r) => a + num(r.clicks), 0);
+  const roi = t && t.roi !== null && t.roi !== undefined ? num(t.roi) : adRoi(spend, gmv);
+  /** 有 /ads/trend 就报全期间，没有才退回"本页"—— 一页 50 行当总体是假的合计 */
+  const scope = t ? '全期间' : '本页';
   return [
-    { label: '消耗（本页·我们掏）', value: money(spend), sub: `${rows.value.length} 行明细` },
-    { label: '广告带货 GMV', value: money(gmv), sub: `转化 ${int(conv)} 单（品牌的生意规模）` },
-    { label: '整体 ROAS', value: roi === null ? '—' : roi.toFixed(2), sub: roi === null ? '无消耗' : 'GMV ÷ 消耗：不是我们的收益率，打平线 = 1 ÷ 贡献毛利率' },
-    { label: '点击率 CTR', value: imp > 0 ? `${((clk / imp) * 100).toFixed(2)}%` : '—', sub: `点击 ${int(clk)} / 曝光 ${int(imp)}` },
+    { label: `消耗（${scope}·我们掏）`, value: round2(spend), sub: t ? `${trendRows.value.length} 天有投放` : `${rows.value.length} 行明细`, tone: 'warning' as const, precision: 2 },
+    { label: '广告带货 GMV', value: round2(gmv), sub: `转化 ${int(conv)} 单（品牌的生意规模）`, tone: 'info' as const, precision: 2 },
+    {
+      label: '整体 ROAS',
+      value: roi === null ? '—' : round2(roi),
+      sub: roi === null ? '无消耗' : 'GMV ÷ 消耗：≥1 只是不打负，回本看盈亏平衡 ROAS = 1 ÷ 贡献毛利率',
+      tone: (roi === null ? 'info' : roi < 1 ? 'danger' : 'primary') as 'info' | 'danger' | 'primary',
+      precision: 2,
+    },
+    { label: '点击率 CTR', value: imp > 0 ? round2((clk / imp) * 100) : '—', suffix: '%', sub: `点击 ${int(clk)} / 曝光 ${int(imp)}`, tone: 'primary' as const, precision: 2 },
   ];
 });
+
+/* ---------- 逐日趋势与计划榜 ---------- */
+const trendEl = ref<HTMLDivElement>();
+const rankEl = ref<HTMLDivElement>();
+const trendRows = ref<TrendRow[]>([]);
+const trendTotal = ref<TrendRow | null>(null);
+const rankRows = ref<RankRow[]>([]);
+const chartError = ref('');
+
+const trendTip = '消耗（柱）与 ROAS（线）逐日；只跟店铺与日期范围走 —— 接口不按广告类型/计划聚合，所以那两个筛选不影响这张图';
+const rankTip = 'ROAS 从高到低 Top 10；条上标消耗，红条是 ROAS < 1（连品牌的 GMV 都没盖住花费）';
+
+function trendOption(): ChartOption | null {
+  const list = trendRows.value;
+  if (!list.length) return null;
+  return {
+    ...motion(),
+    tooltip: { trigger: 'axis' },
+    legend: { top: 0, itemWidth: 10, itemHeight: 8, textStyle: { fontSize: 11 } },
+    grid: { left: 62, right: 52, top: 34, bottom: 26 },
+    xAxis: { type: 'category', data: list.map((r) => String(r.date ?? '').slice(5)) },
+    yAxis: [
+      { type: 'value', name: '消耗', nameTextStyle: { fontSize: 11, color: chartColor.muted() }, axisLabel: { formatter: (v: number) => `${round2(num(v) / 10000)}万` } },
+      { type: 'value', name: 'ROAS', splitLine: { show: false } },
+    ],
+    series: [
+      { name: '消耗', type: 'bar', barMaxWidth: 18, itemStyle: { color: chartColor.warning(), opacity: 0.8, borderRadius: [3, 3, 0, 0] }, data: list.map((r) => round2(num(r.spend))) },
+      {
+        name: 'ROAS',
+        type: 'line',
+        yAxisIndex: 1,
+        smooth: true,
+        showSymbol: list.length <= 40,
+        lineStyle: { color: chartColor.primary(), width: 2 },
+        itemStyle: { color: chartColor.primary() },
+        data: list.map((r) => (r.roi === null || r.roi === undefined ? null : round2(num(r.roi)))),
+        markLine: { silent: true, symbol: 'none', label: { formatter: 'ROAS 1.0', fontSize: 10 }, lineStyle: { type: 'dashed', color: chartColor.muted() }, data: [{ yAxis: 1 }] },
+      },
+    ],
+  };
+}
+
+function rankOption(): ChartOption | null {
+  const list = rankRows.value.slice(0, 10);
+  if (!list.length) return null;
+  return {
+    ...motion(),
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    grid: { left: 118, right: 62, top: 12, bottom: 22 },
+    xAxis: { type: 'value', name: 'ROAS', nameTextStyle: { fontSize: 11, color: chartColor.muted() } },
+    yAxis: { type: 'category', data: list.map((r) => r.group_name).reverse(), axisLabel: { width: 110, overflow: 'truncate', fontSize: 11 } },
+    series: [
+      {
+        type: 'bar',
+        barMaxWidth: 14,
+        data: list
+          .map((r) => ({ value: r.roi === null || r.roi === undefined ? 0 : round2(num(r.roi)), itemStyle: { color: num(r.roi) < 1 ? chartColor.danger() : chartColor.success(), borderRadius: [0, 3, 3, 0] } }))
+          .reverse(),
+        label: {
+          show: true,
+          position: 'right',
+          fontSize: 10,
+          formatter: (p: { dataIndex: number }) => `${round2(num(list[list.length - 1 - p.dataIndex].spend) / 10000)}万`,
+        },
+      },
+    ],
+  };
+}
+
+useChart(trendEl, trendOption, [trendRows]);
+useChart(rankEl, rankOption, [rankRows]);
+
+/** 图表拉的是全量聚合接口，与下面那张分页表同源不同形；失败只影响图，不能把表格一起带崩 */
+async function loadCharts(): Promise<void> {
+  const base: Record<string, unknown> = { stat_date_from: dateRange.value[0], stat_date_to: dateRange.value[1] };
+  if (query.shop_id) base.shop_id = query.shop_id;
+  try {
+    const [t, r] = await Promise.all([
+      apiGet<{ rows: TrendRow[]; total: TrendRow }>('/ads/trend', base),
+      apiGet<{ list: RankRow[] }>('/ads/roi/rank', { ...base, group_by: 'campaign', limit: 10 }),
+    ]);
+    trendRows.value = t.rows ?? [];
+    trendTotal.value = t.total ?? null;
+    rankRows.value = r.list ?? [];
+    chartError.value = '';
+  } catch (e) {
+    trendRows.value = [];
+    trendTotal.value = null;
+    rankRows.value = [];
+    chartError.value = errMsg(e);
+  }
+}
 
 function dayText(d: Date): string {
   const p = (n: number) => String(n).padStart(2, '0');
@@ -261,6 +397,7 @@ async function reload(resetPage?: number): Promise<void> {
     ElMessage.error(errMsg(e));
   } finally {
     loading.value = false;
+    void loadCharts();
   }
 }
 

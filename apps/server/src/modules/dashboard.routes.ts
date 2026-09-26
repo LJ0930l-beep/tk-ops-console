@@ -12,7 +12,6 @@
  */
 import { Router, type Request } from 'express';
 import type { CurrentUser, DashboardSummary } from '@tk/shared';
-import { collabRoi } from '@tk/shared';
 import { get } from '../core/db.js';
 import { ok, qv, wrap } from '../core/http.js';
 import { maskFields, requireMenu, shopScope, type AuthedRequest } from '../core/auth.js';
@@ -27,36 +26,17 @@ export const dashboardRouter = Router();
 /** 钱敏感字段：PRD §3.1 指标卡权限列标 can_see_cost 的那几张卡（est_cost 已随口径换成返点 + 物流两项） */
 const COST_FIELDS = ['est_rebate', 'est_logistics', 'est_gross_profit', 'est_profit_rate', 'settled_amount'];
 
-/** 达人榜行里属于「我们自己的钱」的列：无 can_see_cost 时一并掩掉 */
+/** 达人榜行里属于「我们自己的钱」的列：无 can_see_cost 时一并掩掉（roi 已不再下发，留着防以后加回来时漏掩） */
 const CREATOR_COST_FIELDS = ['cost', 'roi', 'rebate_cny', 'rebate', 'sample_shipping', 'fixed_fee_cny', 'commission_cny'];
 
-/** 引擎可能同时给 rebate / rebate_cny 两种键名，取到有值的那个（取不到就是没配，绝不补 0） */
-const moneyOf = (row: Record<string, unknown>, keys: string[]): number | null => {
-  for (const k of keys) {
-    const v = row[k];
-    if (typeof v === 'number' && Number.isFinite(v)) return v;
-  }
-  return null;
-};
-
 /**
- * 达人榜 ROI 归一：分子必须是**我们收到的返点**，不能是带货 GMV。
- * 带货 GMV 是品牌的生意，拿它做分子会让一个「带得多、返点低、佣金高」的亏钱达人排到榜首。
- * 引擎已经用 shared 的 collabRoi 出数；行里带着成本明细时这里再核一次（同一函数、不会分叉），
- * 没有明细就原样透传 —— 绝不用 net_gmv 兜底重算，那是把口径错误藏进图表。
+ * 达人榜行的掩码：COST_FIELDS 只处理顶层键，榜单这一层的钱藏在数组行里，得单独过一遍。
+ * 这里刻意**不**再算 roi —— 达人投产比只有一个出处（/api/creators/roi/rank，按 PRD C9 的四项分母）。
+ * 之前这里"行里有明细就用 collabRoi 再核一次、没有就透传引擎值"，结果透传出来的那个
+ * 分母里混了广告与公共费用，和 ROI 页对不上，同一个达人在两页显示 0.02 与 1.90。
  */
 function creatorRankView(rows: DashboardSummary['creator_rank'], canSeeCost: boolean): Record<string, unknown>[] {
-  return (rows as Record<string, unknown>[]).map((r) => {
-    const rebate = moneyOf(r, ['rebate_cny', 'rebate']);
-    const shipping = moneyOf(r, ['sample_shipping']);
-    const fixedFee = moneyOf(r, ['fixed_fee_cny']);
-    const commission = moneyOf(r, ['commission_cny']);
-    const roi =
-      rebate !== null && (shipping !== null || fixedFee !== null || commission !== null)
-        ? collabRoi({ rebate_cny: rebate, sample_shipping: shipping ?? 0, fixed_fee_cny: fixedFee ?? 0, commission_cny: commission ?? 0 })
-        : r.roi;
-    return maskFields({ ...r, roi }, CREATOR_COST_FIELDS, canSeeCost);
-  });
+  return (rows as Record<string, unknown>[]).map((r) => maskFields({ ...r }, CREATOR_COST_FIELDS, canSeeCost));
 }
 
 /** 区间归一：默认近 30 天（days 可给 1~365），也接受显式 start/end（from/to 作别名） */

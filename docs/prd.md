@@ -234,7 +234,8 @@
 | 实际到账 | `settled_amount` | `settlement_txn.payment_status=1` 的 `amount` 折 CNY | `can_see_cost` |
 | 广告 | `ad_spend`/`ad_gmv`/`ad_roi` | `ad_daily` 汇总；`adRoi(spend,gmv)` | 公开 |
 
-**图表**：`gmv_trend`（近 30 天 GMV/订单/利润折线）、`shop_rank`（Top10 柱）、`creator_rank`（表 + ROI 条，`roi` 可 null）、`content_type_split`（饼，`CONTENT_TYPE` 5 类）、`bd_rank`（跟进数/谈妥数/带货 GMV）。
+**图表**：`gmv_trend`（逐日 GMV/订单/**日净利**折柱混合 —— 这一列含广告与公共费用，与指标卡的"预估贡献毛利"不是同一个数，图例已分开命名）、`shop_rank`（Top10 柱）、`creator_rank`（表：带货 GMV / 订单 / 应收返点 / **有效返点率**）、`content_type_split`（环形饼，圆心放合计）、`bd_rank`（跟进数/谈妥数/谈妥率条/带货 GMV）。
+`creator_rank` **不再带 `roi`**：达人投产比的分母按 C9 严格是「物流 + 寄样运费 + 坑位费 + 佣金」，而利润引擎的达人维度没有后两项，硬算会得到和「达人 ROI」页对不上的第二个"投产比"（演示库上同一个人 0.02 对 1.90）。投产比只有一个出处：`/api/creators/roi/rank`。
 
 **待办卡（点击跳列表并带筛选）**
 

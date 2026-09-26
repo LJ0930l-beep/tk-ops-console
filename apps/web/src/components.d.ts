@@ -8,10 +8,13 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    ChartCard: typeof import('./components/ChartCard.vue')['default']
     ElAlert: typeof import('element-plus/es')['ElAlert']
     ElAside: typeof import('element-plus/es')['ElAside']
     ElAvatar: typeof import('element-plus/es')['ElAvatar']
     ElBadge: typeof import('element-plus/es')['ElBadge']
+    ElBreadcrumb: typeof import('element-plus/es')['ElBreadcrumb']
+    ElBreadcrumbItem: typeof import('element-plus/es')['ElBreadcrumbItem']
     ElButton: typeof import('element-plus/es')['ElButton']
     ElCalendar: typeof import('element-plus/es')['ElCalendar']
     ElCard: typeof import('element-plus/es')['ElCard']
@@ -52,6 +55,7 @@ declare module 'vue' {
     ElRow: typeof import('element-plus/es')['ElRow']
     ElScrollbar: typeof import('element-plus/es')['ElScrollbar']
     ElSelect: typeof import('element-plus/es')['ElSelect']
+    ElSkeleton: typeof import('element-plus/es')['ElSkeleton']
     ElSpace: typeof import('element-plus/es')['ElSpace']
     ElSubMenu: typeof import('element-plus/es')['ElSubMenu']
     ElSwitch: typeof import('element-plus/es')['ElSwitch']
@@ -66,10 +70,12 @@ declare module 'vue' {
     ElUpload: typeof import('element-plus/es')['ElUpload']
     ExportButton: typeof import('./components/ExportButton.vue')['default']
     ImportDialog: typeof import('./components/ImportDialog.vue')['default']
+    PageHeader: typeof import('./components/PageHeader.vue')['default']
     RecordHistoryDrawer: typeof import('./components/RecordHistoryDrawer.vue')['default']
     ResourcePage: typeof import('./components/ResourcePage.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
+    StatCard: typeof import('./components/StatCard.vue')['default']
   }
   export interface GlobalDirectives {
     vLoading: typeof import('element-plus/es')['ElLoadingDirective']

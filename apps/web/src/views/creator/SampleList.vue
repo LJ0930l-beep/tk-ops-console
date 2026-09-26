@@ -25,6 +25,9 @@
       dialog-width="760px"
       :action-width="230"
     >
+      <template #stats>
+        <CreatorStats variant="sample" />
+      </template>
       <template #toolbar-extra>
         <el-button :icon="Star" @click="router.push('/creators/collab')">去合作单登记寄样</el-button>
       </template>
@@ -79,6 +82,7 @@ import { SAMPLE_STATUS } from '@tk/shared';
 import { apiGet, apiPost, apiPut, errMsg, type ApiPath } from '@/api/client';
 import ResourcePage from '@/components/ResourcePage.vue';
 import ExportButton from '@/components/ExportButton.vue';
+import CreatorStats from './CreatorStats.vue';
 import type { ColumnDef, FormFieldDef, OptionDef, SearchDef } from '@/components/ResourcePage.vue';
 
 type Row = Record<string, unknown>;

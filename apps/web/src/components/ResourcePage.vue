@@ -27,17 +27,29 @@
           <el-button :icon="RefreshLeft" @click="resetQuery">重置</el-button>
         </el-form-item>
       </el-form>
-      <div style="display: flex; justify-content: space-between; margin-bottom: 4px">
+      <div class="rp-toolbar">
         <slot name="toolbar-extra" />
-        <div>
+        <div class="rp-toolbar-right">
           <slot name="toolbar" :reload="() => reload()" :query="query" />
           <el-button v-if="createable && canWrite" type="primary" :icon="Plus" @click="openCreate">新增</el-button>
         </div>
       </div>
     </el-card>
 
+    <!--
+      统计条插槽：给列表页一个"先看图、再看表"的位置。
+      为什么把 query/total 一起喂出去而不是让页面自己再发一次请求：
+      图必须和下面这张表是同一批数据，否则"图上 12 单、表里 9 单"这种对不上
+      会被当成数据错了去查后端。
+    -->
+    <slot name="stats" :query="query" :total="total" :loading="loading" :reload="() => reload()" />
+
     <el-card shadow="never">
+      <!-- 首屏用骨架屏占位而不是转圈：表格骨架能提前告诉用户"这里将有哪几列"，
+           转圈只是让人盯着空白等。之后重新查询才用 v-loading 压在旧数据上。 -->
+      <el-skeleton v-if="loading && !rows.length" :rows="6" animated />
       <el-table
+        v-if="!(loading && !rows.length)"
         v-loading="loading"
         :data="rows"
         border
@@ -46,6 +58,7 @@
         :row-key="rowKey"
         :row-class-name="rowClassName"
         style="width: 100%"
+        empty-text="没有符合条件的数据 —— 换个筛选条件或把时间拉长一点试试"
         @sort-change="onSort"
       >
         <el-table-column type="index" label="#" width="48" />
@@ -84,12 +97,13 @@
         </el-table-column>
       </el-table>
       <el-pagination
+        v-if="rows.length"
         v-model:current-page="page"
         v-model:page-size="pageSize"
         :total="total"
         :page-sizes="[10, 20, 50, 100]"
         layout="total, sizes, prev, pager, next, jumper"
-        style="margin-top: 12px; justify-content: flex-end"
+        class="rp-pager"
         @current-change="reload()"
         @size-change="reload(1)"
       />
@@ -238,6 +252,8 @@ const props = withDefaults(
   },
 );
 
+const emit = defineEmits<{ (e: 'loaded', p: { params: Record<string, unknown>; total: number }): void }>();
+
 const dict = useDictStore();
 const loading = ref(false);
 const saving = ref(false);
@@ -306,15 +322,22 @@ async function reload(resetPage?: number) {
   if (resetPage) page.value = resetPage;
   loading.value = true;
   try {
-    const data = await apiGet<Paged<Record<string, unknown>>>(props.api, {
+    const params = {
       page: page.value,
       pageSize: pageSize.value,
       ...(sortBy.value ? { sortBy: sortBy.value, sortOrder: sortOrder.value } : {}),
       ...props.extraQuery,
       ...Object.fromEntries(Object.entries(query).filter(([, v]) => v !== '' && v !== null && v !== undefined)),
-    });
+    };
+    const data = await apiGet<Paged<Record<string, unknown>>>(props.api, params);
     rows.value = (data.list ?? []).map((r) => (props.mapRow ? props.mapRow(r) : r));
     total.value = data.total ?? 0;
+    /**
+     * 把这次真正发出去的筛选条件回吐给 #stats 插槽的用方。
+     * 不用 watch(query) 是因为 query 是同一个对象被原地改，浅 watch 根本不会触发；
+     * 而空值过滤的规则只应该在 reload 里存在一份。
+     */
+    emit('loaded', { params, total: total.value });
   } catch (e) {
     ElMessage.error(errMsg(e));
   } finally {
@@ -400,3 +423,25 @@ onMounted(async () => {
 
 defineExpose({ reload, openEdit, openCreate, rows });
 </script>
+
+<style scoped>
+.rp-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--tk-s3);
+}
+.rp-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: var(--tk-s2);
+}
+.rp-pager {
+  margin-top: var(--tk-s3);
+  justify-content: flex-end;
+}
+/* 表格行不排队进场：一屏 20 行逐条淡入，只会把"读第一行"这件事拖慢 */
+.el-card :deep(.el-table__body tr) {
+  transition: background var(--tk-dur) var(--tk-ease);
+}
+</style>

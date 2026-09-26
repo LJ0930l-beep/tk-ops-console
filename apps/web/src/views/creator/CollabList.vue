@@ -26,6 +26,9 @@
       dialog-width="760px"
       :action-width="280"
     >
+      <template #stats>
+        <CreatorStats variant="collab" />
+      </template>
       <template #toolbar-extra>
         <el-button :icon="Star" @click="router.push('/creators/mine')">从我的达人建单</el-button>
       </template>
@@ -57,6 +60,7 @@ import { COLLAB_STATUS, MASK } from '@tk/shared';
 import { apiGet, apiPost, errMsg, type ApiPath } from '@/api/client';
 import ResourcePage from '@/components/ResourcePage.vue';
 import ExportButton from '@/components/ExportButton.vue';
+import CreatorStats from './CreatorStats.vue';
 import type { ColumnDef, FormFieldDef, OptionDef, SearchDef } from '@/components/ResourcePage.vue';
 import { useDictStore } from '@/stores/dict';
 

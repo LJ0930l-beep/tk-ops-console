@@ -1,5 +1,14 @@
 <template>
   <div class="page">
+    <PageHeader title="利润报表" sub="我们的收入只有品牌返点：贡献毛利 = 应收返点 −（物流 + 达人佣金 + 分摊广告 + 分摊费用）。货款与货值都在品牌那边，从来不进我们的账。">
+      <template #tag>
+        <el-tag v-if="rows.length" size="small" :type="totals.profit < 0 ? 'danger' : 'success'">{{ rows.length }} 行 · 预估 {{ estimatedRows }} 行</el-tag>
+      </template>
+      <template #actions>
+        <ExportButton url="/finance/profit/export" :name="`profit-${dim}`" :params="exportParams" />
+      </template>
+    </PageHeader>
+
     <el-card class="page-card" shadow="never">
       <el-form inline @submit.prevent="load">
         <el-form-item label="统计维度">
@@ -42,13 +51,31 @@
 
       <el-alert type="warning" :closable="false" show-icon style="margin-bottom: 8px">
         <template #title>
-          我们的收入只有品牌返点：贡献毛利 = 应收返点 −（物流支出 + 达人佣金 + 分摊广告 + 分摊费用），货款与货值都在品牌那边，从来不进我们的账。
-          「带货 GMV / 净带货 GMV / 结算实收」是品牌的生意规模与平台打款，只作分母与对账用，不是我们的收入。贡献毛利率 = 贡献毛利 ÷ 净带货 GMV。
+          「带货 GMV / 净带货 GMV / 结算实收」是品牌的生意规模与平台打款，只作分母与对账用，不是我们的收入；贡献毛利率 = 贡献毛利 ÷ 净带货 GMV。
           灰字「预估」行为未结算订单，共 {{ estimatedRows }} 行。样品单默认不计 GMV（PRD §5.7）；
           没配到品牌返点率的订单行整体不在本表内（连 GMV 一起剔，不是按 0 返点算），去「商品中心 → 待映射清单」补齐。
         </template>
       </el-alert>
     </el-card>
+
+    <!-- 合计：先看总数，再看钱去哪儿，最后才看逐行明细 -->
+    <div class="stat-grid tk-in">
+      <StatCard label="应收返点（我们的收入）" :value="totals.rebate" :sub="`有效返点率 ${pct(totals.rebate, totals.netGmv)}`" tone="success" money :precision="2" />
+      <StatCard label="物流支出" :value="totals.logistics" sub="头程 + 海外仓操作，按件冻结在订单行上" tone="warning" :precision="2" />
+      <StatCard label="达人佣金" :value="totals.commission" :sub="`占返点 ${pct(totals.commission, totals.rebate)}`" tone="warning" :precision="2" />
+      <StatCard label="广告消耗" :value="totals.ad_spend" :sub="`占返点 ${pct(totals.ad_spend, totals.rebate)}｜这是最大的一块变动成本`" tone="warning" :precision="2" />
+      <StatCard label="公共费用" :value="totals.expense" sub="按 GMV 占比分摊到本表口径" tone="info" :precision="2" />
+      <StatCard label="贡献毛利" :value="totals.profit" :sub="`贡献毛利率 ${pct(totals.profit, totals.netGmv)}（分母＝净带货 GMV）`" :tone="totals.profit < 0 ? 'danger' : 'success'" money :precision="2" />
+    </div>
+
+    <div class="chart-grid">
+      <ChartCard title="钱去哪儿了（从应收返点到贡献毛利）" tip="瀑布：每一段是被扣掉的一项。段与段之间没有对齐就是亏损扩大的方向" :span="7" :empty="!rows.length" empty-text="所选期间没有可算利润的行">
+        <div ref="fallEl" class="chart-host" />
+      </ChartCard>
+      <ChartCard :title="`贡献毛利 ${dimLabel} 榜`" tip="正绿负红；条子长短只看绝对值，谁在赚钱谁在烧钱一眼分明" :span="5" :empty="rows.length < 2" empty-text="只有一个维度值，榜没有意义">
+        <div ref="rankEl" class="chart-host" />
+      </ChartCard>
+    </div>
 
     <el-card shadow="never">
       <el-table
@@ -126,6 +153,12 @@ import { REGIONS, num, profitRate, round2 } from '@tk/shared';
 import { apiGet, errMsg } from '@/api/client';
 import { useDictStore } from '@/stores/dict';
 import type { RowLike } from '@/types/row';
+import { useChart } from '@/composables/useChart';
+import type { ChartOption } from '@/utils/echarts';
+import { chartColor, motion } from '@/utils/theme';
+import ChartCard from '@/components/ChartCard.vue';
+import PageHeader from '@/components/PageHeader.vue';
+import StatCard from '@/components/StatCard.vue';
 
 type Dim = 'shop' | 'sku' | 'creator' | 'month';
 
@@ -160,6 +193,105 @@ const query = reactive<{ shop_id?: number; region?: string; only_settled: boolea
 
 const dimLabel = computed(() => DIMS.find((d) => d.value === dim.value)?.label.replace('按', '') ?? '维度');
 const estimatedRows = computed(() => rows.value.filter((r) => Number(r.is_estimated) === 1).length);
+
+/* ---------- 合计与两张图 ---------- */
+const fallEl = ref<HTMLDivElement>();
+const rankEl = ref<HTMLDivElement>();
+
+const sumOf = (pick: (r: Row) => number) => round2(rows.value.reduce((a, r) => a + num(pick(r)), 0));
+const totals = computed(() => ({
+  netGmv: sumOf((r) => r.net_gmv),
+  rebate: sumOf((r) => r.rebate),
+  logistics: sumOf((r) => r.logistics),
+  commission: sumOf((r) => r.commission),
+  ad_spend: sumOf((r) => r.ad_spend),
+  expense: sumOf((r) => r.expense),
+  profit: sumOf((r) => r.profit),
+}));
+const pct = (v: number, base: number) => (base > 0 ? `${((num(v) / num(base)) * 100).toFixed(1)}%` : '—');
+
+/**
+ * 瀑布：占位段透明，可见段从"扣完之后的余额"起画。
+ * 最后一段是贡献毛利 —— 为负时画到零线以下并标红，这正是这张图要说的话。
+ */
+function waterfallOption(): ChartOption | null {
+  if (!rows.value.length) return null;
+  const t = totals.value;
+  const steps = [
+    { name: '应收返点', amount: t.rebate, deduct: false },
+    { name: '− 物流', amount: t.logistics, deduct: true },
+    { name: '− 达人佣金', amount: t.commission, deduct: true },
+    { name: '− 广告分摊', amount: t.ad_spend, deduct: true },
+    { name: '− 公共费用', amount: t.expense, deduct: true },
+    { name: '贡献毛利', amount: t.profit, deduct: false },
+  ];
+  const base: number[] = [];
+  const bar: { value: number; itemStyle: { color: string; borderRadius: number[] } }[] = [];
+  let running = 0;
+  steps.forEach((s, i) => {
+    if (i === 0) {
+      base.push(0);
+      running = s.amount;
+      bar.push({ value: s.amount, itemStyle: { color: chartColor.success(), borderRadius: [3, 3, 0, 0] } });
+    } else if (i === steps.length - 1) {
+      base.push(s.amount >= 0 ? 0 : s.amount);
+      bar.push({ value: Math.abs(s.amount), itemStyle: { color: s.amount < 0 ? chartColor.danger() : chartColor.primary(), borderRadius: [3, 3, 0, 0] } });
+    } else {
+      running -= s.amount;
+      base.push(running);
+      bar.push({ value: s.amount, itemStyle: { color: chartColor.warning(), borderRadius: [3, 3, 0, 0] } });
+    }
+  });
+  return {
+    ...motion(),
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'shadow' },
+      formatter: (p: { name: string; dataIndex: number }[]) => {
+        const i = p[0]?.dataIndex ?? 0;
+        return `${steps[i].name}<br/>${money(steps[i].amount)}`;
+      },
+    },
+    grid: { left: 62, right: 18, top: 26, bottom: 30 },
+    xAxis: { type: 'category', data: steps.map((s) => s.name), axisLabel: { fontSize: 11, interval: 0 } },
+    yAxis: { type: 'value', axisLabel: { formatter: (v: number) => `${round2(num(v) / 10000)}万` } },
+    series: [
+      { type: 'bar', stack: 'w', silent: true, itemStyle: { color: 'transparent' }, data: base },
+      {
+        type: 'bar',
+        stack: 'w',
+        barMaxWidth: 42,
+        data: bar,
+        label: { show: true, position: 'top', fontSize: 11, formatter: (p: { dataIndex: number }) => money(steps[p.dataIndex].amount) },
+      },
+    ],
+  };
+}
+
+function rankOption(): ChartOption | null {
+  if (rows.value.length < 2) return null;
+  const top = [...rows.value].sort((a, b) => Math.abs(num(b.profit)) - Math.abs(num(a.profit))).slice(0, 12);
+  return {
+    ...motion(),
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: (p: { name: string; value: number }[]) => `${p[0]?.name ?? ''}<br/>贡献毛利 ${money(Number(p[0]?.value ?? 0))}` },
+    grid: { left: 110, right: 60, top: 12, bottom: 22 },
+    xAxis: { type: 'value', axisLabel: { formatter: (v: number) => `${round2(num(v) / 10000)}万` } },
+    yAxis: { type: 'category', data: top.map((r) => String(r.dim_name || r.dim_key)).reverse(), axisLabel: { width: 100, overflow: 'truncate' } },
+    series: [
+      {
+        type: 'bar',
+        barMaxWidth: 14,
+        data: top
+          .map((r) => ({ value: round2(num(r.profit)), itemStyle: { color: num(r.profit) < 0 ? chartColor.danger() : chartColor.success(), borderRadius: [0, 3, 3, 0] } }))
+          .reverse(),
+        label: { show: true, position: 'right', fontSize: 10, formatter: (p: { value: number }) => `${round2(num(p.value) / 10000)}万` },
+      },
+    ],
+  };
+}
+
+useChart(fallEl, waterfallOption, [rows, dim]);
+useChart(rankEl, rankOption, [rows, dim]);
 
 const money = (v: unknown) => (v === '***' ? '***' : num(v).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
 const int = (v: unknown) => (v === null || v === undefined ? '-' : num(v).toLocaleString('zh-CN'));

@@ -21,7 +21,27 @@
       :map-row="mapRow"
       :default-page-size="20"
       :action-width="80"
+      @loaded="onLoaded"
     >
+      <!-- 合计与两张图：数据来自 /orders/summary，和下面这张表同一套筛选条件 -->
+      <template #stats>
+        <div v-if="sum" class="stat-grid tk-in">
+          <StatCard label="订单数" :value="num(sum.totals.orders)" :sub="`取消 ${num(sum.totals.cancelled_orders)} · 样品单 ${num(sum.totals.sample_orders)}（都不计 GMV）`" tone="primary" />
+          <StatCard label="净带货 GMV" :value="num(sum.totals.net_gmv_cny)" :sub="`退款率 ${num(sum.totals.refund_rate).toFixed(2)}%｜GMV 是品牌的生意`" tone="info" money :precision="2" />
+          <StatCard label="应收返点（我们的收入）" :value="num(sum.totals.rebate_cny)" :sub="`占净 GMV ${share(sum.totals.rebate_cny, sum.totals.net_gmv_cny)}`" tone="success" money :precision="2" />
+          <StatCard label="预估贡献毛利" :value="num(sum.totals.est_profit_cny)" :sub="`返点 − 物流 ${money2(sum.totals.logistics_cny)} − 佣金 ${money2(sum.totals.commission_cny)}`" :tone="num(sum.totals.est_profit_cny) < 0 ? 'danger' : 'success'" money :precision="2" />
+          <StatCard label="不计利润的明细行" :value="num(sum.totals.unmapped_items)" sub="没配到品牌返点率 → 整行排除在收入与利润之外" :tone="num(sum.totals.unmapped_items) > 0 ? 'danger' : 'info'" />
+        </div>
+        <div class="chart-grid">
+          <ChartCard title="逐日：订单数 / 应收返点 / 贡献毛利" :tip="dayTip" :span="7" :empty="!dayRows.length" empty-text="所选条件下没有订单">
+            <div ref="dayEl" class="chart-host" />
+          </ChartCard>
+          <ChartCard title="分店：品牌的生意 vs 我们的钱" tip="三根柱子分别是净带货 GMV、我们应得的返点、扣完物流与佣金后的贡献毛利 —— 差距就是代运营的真实留存" :span="5" :empty="!shopRows.length" empty-text="没有分店数据">
+            <div ref="shopEl" class="chart-host" />
+          </ChartCard>
+        </div>
+        <el-alert v-if="sumError" type="warning" :closable="false" show-icon class="page-tip" :title="`订单合计加载失败：${sumError}`" description="合计与图取 /orders/summary；下面的分页表不受影响。" />
+      </template>
       <template #toolbar="{ query }">
         <ExportButton url="/orders/export" name="orders" :params="query" />
       </template>
@@ -35,11 +55,17 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
-import { ORDER_STATUS_LABEL } from '@tk/shared';
+import { ORDER_STATUS_LABEL, num, round2 } from '@tk/shared';
+import { apiGet, errMsg } from '@/api/client';
 import ResourcePage from '@/components/ResourcePage.vue';
+import ChartCard from '@/components/ChartCard.vue';
 import ExportButton from '@/components/ExportButton.vue';
+import StatCard from '@/components/StatCard.vue';
 import type { ColumnDef, OptionDef, SearchDef } from '@/components/ResourcePage.vue';
 import { useDictStore } from '@/stores/dict';
+import { useChart } from '@/composables/useChart';
+import type { ChartOption } from '@/utils/echarts';
+import { chartColor, motion } from '@/utils/theme';
 
 const router = useRouter();
 const dict = useDictStore();
@@ -165,6 +191,100 @@ function onDomClick(e: MouseEvent) {
   const row = (rp.value?.rows ?? [])[idx];
   if (row) goDetail(row);
 }
+
+/* ---------- 合计与图表（/orders/summary 与列表同一套 orderQ 筛选） ---------- */
+interface Agg {
+  orders: number;
+  cancelled_orders: number;
+  sample_orders: number;
+  unmapped_items: number;
+  gmv_cny: number;
+  refund_cny: number;
+  net_gmv_cny: number;
+  rebate_cny: number;
+  logistics_cny: number;
+  commission_cny: number;
+  est_profit_cny: number;
+  refund_rate: number;
+}
+interface OrderSummary {
+  totals: Agg;
+  by_shop: (Agg & { shop_id: number; shop_name: string; region: string; currency: string })[];
+  by_day: (Agg & { stat_date: string })[];
+  note?: string;
+}
+
+const sum = ref<OrderSummary | null>(null);
+const sumError = ref('');
+const dayEl = ref<HTMLDivElement>();
+const shopEl = ref<HTMLDivElement>();
+const dayRows = computed(() => sum.value?.by_day ?? []);
+const shopRows = computed(() => [...(sum.value?.by_shop ?? [])].sort((a, b) => num(b.net_gmv_cny) - num(a.net_gmv_cny)).slice(0, 8));
+
+const money2 = (v: unknown) => round2(num(v)).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const share = (v: unknown, base: unknown) => (num(base) > 0 ? `${((num(v) / num(base)) * 100).toFixed(1)}%` : '—');
+
+const dayTip = '按站点时区自然日；GMV 含未配返点率的行（品牌的生意），返点与贡献毛利只算已配返点率的行 —— 与下方表格同一口径';
+
+async function onLoaded(p: { params: Record<string, unknown> }): Promise<void> {
+  const { page: _p, pageSize: _ps, sortBy: _s, sortOrder: _o, ...filter } = p.params;
+  try {
+    sum.value = await apiGet<OrderSummary>('/orders/summary', filter);
+    sumError.value = '';
+  } catch (e) {
+    sum.value = null;
+    sumError.value = errMsg(e);
+  }
+}
+
+function dayOption(): ChartOption | null {
+  const list = dayRows.value;
+  if (!list.length) return null;
+  return {
+    ...motion(),
+    tooltip: { trigger: 'axis' },
+    legend: { top: 0, itemWidth: 10, itemHeight: 8, textStyle: { fontSize: 11 } },
+    grid: { left: 62, right: 46, top: 34, bottom: 26 },
+    xAxis: { type: 'category', data: list.map((r) => String(r.stat_date ?? '').slice(5)) },
+    yAxis: [
+      { type: 'value', name: '金额(CNY)', nameTextStyle: { fontSize: 11, color: chartColor.muted() }, axisLabel: { formatter: (v: number) => `${round2(num(v) / 10000)}万` } },
+      { type: 'value', name: '订单', splitLine: { show: false } },
+    ],
+    series: [
+      { name: '订单数', type: 'bar', yAxisIndex: 1, barMaxWidth: 16, itemStyle: { color: chartColor.success(), opacity: 0.55, borderRadius: [3, 3, 0, 0] }, data: list.map((r) => num(r.orders)) },
+      { name: '应收返点', type: 'line', smooth: true, showSymbol: false, lineStyle: { color: chartColor.primary(), width: 2 }, itemStyle: { color: chartColor.primary() }, data: list.map((r) => round2(num(r.rebate_cny))) },
+      { name: '贡献毛利', type: 'line', smooth: true, showSymbol: false, areaStyle: { opacity: 0.1 }, lineStyle: { color: chartColor.warning(), width: 2 }, itemStyle: { color: chartColor.warning() }, data: list.map((r) => round2(num(r.est_profit_cny))) },
+    ],
+  };
+}
+
+function shopOption(): ChartOption | null {
+  const list = shopRows.value;
+  if (!list.length) return null;
+  const mk = (name: string, pick: (r: (typeof list)[number]) => number, color: string) => ({
+    name,
+    type: 'bar',
+    barMaxWidth: 14,
+    itemStyle: { color, borderRadius: [0, 3, 3, 0] },
+    data: list.map((r) => round2(num(pick(r)))),
+  });
+  return {
+    ...motion(),
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    legend: { bottom: 0, itemWidth: 10, itemHeight: 8, textStyle: { fontSize: 11 } },
+    grid: { left: 96, right: 26, top: 12, bottom: 38 },
+    xAxis: { type: 'value', axisLabel: { formatter: (v: number) => `${round2(num(v) / 10000)}万` } },
+    yAxis: { type: 'category', data: list.map((r) => r.shop_name).reverse(), axisLabel: { width: 88, overflow: 'truncate', fontSize: 11 } },
+    series: [
+      mk('净带货 GMV', (r) => r.net_gmv_cny, '#c8dcf5'),
+      mk('应收返点', (r) => r.rebate_cny, chartColor.primary()),
+      mk('贡献毛利', (r) => r.est_profit_cny, chartColor.success()),
+    ].map((s) => ({ ...s, data: [...s.data].reverse() })),
+  };
+}
+
+useChart(dayEl, dayOption, [sum]);
+useChart(shopEl, shopOption, [sum]);
 
 onMounted(async () => {
   await Promise.all([dict.shopOptions().catch(() => undefined), dict.dict('region').catch(() => undefined)]);

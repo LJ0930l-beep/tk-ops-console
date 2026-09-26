@@ -1,13 +1,32 @@
 <template>
   <div class="page" v-loading="loading">
-    <!-- 顶部：状态计数 + 优先级概览 -->
-    <div class="stat-grid">
-      <el-card v-for="c in countCards" :key="c.label" shadow="never" class="kpi" :class="c.cls">
-        <div class="kpi-head"><span class="kpi-label">{{ c.label }}</span></div>
-        <div class="kpi-value" :style="{ color: c.color }">{{ c.value }}</div>
-        <div class="kpi-sub">{{ c.sub }}</div>
-      </el-card>
+    <PageHeader title="今日行动中心" sub="规则引擎每天 02:40 评估一次，这里只列还没闭环的命中；引擎只提建议，不会替你改任何数据">
+      <template #tag>
+        <el-tag v-if="totalOpen" size="small" :type="data.p0.length ? 'danger' : 'warning'">{{ totalOpen }} 条待处理</el-tag>
+        <el-tag v-else size="small" type="success">今日已清空</el-tag>
+      </template>
+      <template #actions>
+        <el-button size="small" :icon="Refresh" :loading="loading" @click="() => void load()">刷新</el-button>
+        <el-button v-if="canRunRules" size="small" :icon="SetUp" @click="goto('/system/rules')">规则中心</el-button>
+      </template>
+    </PageHeader>
+
+    <!-- 顶部：状态计数 -->
+    <div class="stat-grid tk-in">
+      <StatCard v-for="c in countCards" :key="c.label" :label="c.label" :value="c.value" :sub="c.sub" :tone="c.tone" />
     </div>
+
+    <!-- 优先级构成：一条堆叠带就够，不值得为它把 echarts 拉进首屏（这页是登录后的落地页） -->
+    <el-card v-if="totalOpen" class="page-card" shadow="never">
+      <div class="prio-bar">
+        <div v-for="s in prioSegments" :key="s.label" class="prio-seg" :class="s.cls" :style="{ width: s.pct + '%' }">
+          <span v-if="s.pct >= 14">{{ s.label }} {{ s.n }}</span>
+        </div>
+      </div>
+      <div class="prio-legend">
+        <span v-for="s in prioSegments" :key="s.label"><i :class="s.cls" />{{ s.label }} {{ s.n }} 条（{{ s.pct.toFixed(0) }}%）</span>
+      </div>
+    </el-card>
 
     <el-alert
       v-if="!loading && totalOpen === 0"
@@ -20,7 +39,7 @@
     />
 
     <!-- P0 今日必处理 -->
-    <el-card v-if="data.p0.length" class="page-card prio-card p0" shadow="never">
+    <el-card v-if="data.p0.length" class="page-card prio-card p0 tk-in" shadow="never">
       <template #header>
         <b><el-tag type="danger" effect="dark" size="small">P0</el-tag> 今日必处理</b>
         <span class="head-tip">{{ data.p0.length }} 条 · 24 小时内闭环</span>
@@ -29,7 +48,7 @@
     </el-card>
 
     <!-- P1 本周观察 -->
-    <el-card v-if="data.p1.length" class="page-card prio-card p1" shadow="never">
+    <el-card v-if="data.p1.length" class="page-card prio-card p1 tk-in" shadow="never">
       <template #header>
         <b><el-tag type="warning" effect="dark" size="small">P1</el-tag> 本周观察</b>
         <span class="head-tip">{{ data.p1.length }} 条 · 7 天内跟进</span>
@@ -38,7 +57,7 @@
     </el-card>
 
     <!-- P2 趋势参考 -->
-    <el-card v-if="data.p2.length" class="page-card prio-card p2" shadow="never">
+    <el-card v-if="data.p2.length" class="page-card prio-card p2 tk-in" shadow="never">
       <template #header>
         <b><el-tag type="info" effect="dark" size="small">P2</el-tag> 趋势参考</b>
         <span class="head-tip">{{ data.p2.length }} 条 · 不强制处理</span>
@@ -166,9 +185,13 @@
 import { computed, onActivated, onMounted, reactive, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
+import { Refresh, SetUp } from '@element-plus/icons-vue';
 import { ACTION_TYPE_LABELS, ALERT_EVENT_STATUS_LABELS, num } from '@tk/shared';
 import { apiGet, apiPost, errMsg } from '@/api/client';
 import { formatUtcTimestamp } from '@/utils/date';
+import { useAuthStore } from '@/stores/auth';
+import PageHeader from '@/components/PageHeader.vue';
+import StatCard from '@/components/StatCard.vue';
 import EventList from './action-center/EventList.vue';
 
 interface ApiEvent {
@@ -209,16 +232,30 @@ interface DetailEvent extends ApiEvent {
 
 const router = useRouter();
 const route = useRoute();
+const auth = useAuthStore();
 const loading = ref(false);
 const data = reactive<TodayData>({ p0: [], p1: [], p2: [], mine: [], counts: {}, recent_results: [] });
 
+/** 规则中心入口只给看得到 system 菜单的人 —— 否则点了只会撞一次 403 */
+const canRunRules = computed(() => auth.user?.role_key === 'boss' || auth.user?.menu_perms.includes('system') === true);
+
 const totalOpen = computed(() => data.p0.length + data.p1.length + data.p2.length);
 const countCards = computed(() => [
-  { label: 'P0 今日必处理', value: data.p0.length, sub: '24 小时内闭环', color: '#f56c6c', cls: 'c-danger' },
-  { label: 'P1 本周观察', value: data.p1.length, sub: '7 天内跟进', color: '#e6a23c', cls: 'c-warn' },
-  { label: 'P2 趋势参考', value: data.p2.length, sub: '不强制处理', color: '#909399', cls: '' },
-  { label: '待处理总数', value: totalOpen.value, sub: `已处理 ${data.counts['2'] ?? 0} · 已忽略 ${data.counts['3'] ?? 0}`, color: '#409eff', cls: '' },
+  { label: 'P0 今日必处理', value: data.p0.length, sub: '24 小时内闭环', tone: 'danger' as const },
+  { label: 'P1 本周观察', value: data.p1.length, sub: '7 天内跟进', tone: 'warning' as const },
+  { label: 'P2 趋势参考', value: data.p2.length, sub: '不强制处理', tone: 'info' as const },
+  { label: '待处理总数', value: totalOpen.value, sub: `已处理 ${data.counts['2'] ?? 0} · 已忽略 ${data.counts['3'] ?? 0}`, tone: 'primary' as const },
 ]);
+
+/** 构成带：宽度按条数占比，段太窄就不写字（写了也是互相压着） */
+const prioSegments = computed(() => {
+  const total = totalOpen.value || 1;
+  return [
+    { label: 'P0', n: data.p0.length, pct: (data.p0.length / total) * 100, cls: 'seg-p0' },
+    { label: 'P1', n: data.p1.length, pct: (data.p1.length / total) * 100, cls: 'seg-p1' },
+    { label: 'P2', n: data.p2.length, pct: (data.p2.length / total) * 100, cls: 'seg-p2' },
+  ].filter((s) => s.n > 0);
+});
 
 const prioType = (p: number) => (p === 0 ? 'danger' : p === 1 ? 'warning' : 'info') as 'danger' | 'warning' | 'info';
 const resultType = (r: string) => (r === 'improved' ? 'success' : r === 'worse' ? 'danger' : r === 'unchanged' ? 'info' : 'warning') as 'success' | 'danger' | 'info' | 'warning';
@@ -361,26 +398,126 @@ onActivated(() => {
 </script>
 
 <style scoped>
-.kpi { border-left: 3px solid #dcdfe6; }
-.kpi.c-danger { border-left-color: #f56c6c; }
-.kpi.c-warn { border-left-color: #e6a23c; }
-.kpi-head { display: flex; justify-content: space-between; align-items: center; }
-.kpi-label { color: #909399; font-size: 13px; }
-.kpi-value { font-size: 30px; font-weight: 700; line-height: 1.3; }
-.kpi-sub { color: #a8abb2; font-size: 12px; margin-top: 2px; }
-.head-tip { color: #909399; font-size: 12px; margin-left: 10px; font-weight: 400; }
-.prio-card.p0 :deep(.el-card__header) { background: #fef0f0; }
-.prio-card.p1 :deep(.el-card__header) { background: #fdf6ec; }
-.prio-card.p2 :deep(.el-card__header) { background: #f4f4f5; }
-.mine-list { display: flex; flex-direction: column; gap: 8px; }
-.mine-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid #ebeef5; border-radius: 6px; cursor: pointer; }
-.mine-item:hover { border-color: #409eff; background: #f5f9ff; }
-.mine-name { font-weight: 600; }
-.mine-rule { color: #909399; font-size: 12px; margin-left: auto; }
-.sec { margin: 16px 0 8px; font-size: 14px; }
-.ev-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
-.ev-item { display: flex; justify-content: space-between; background: #f7f8fa; border-radius: 4px; padding: 4px 8px; font-size: 12px; }
-.ev-k { color: #909399; }
-.ev-v { font-weight: 600; word-break: break-all; text-align: right; }
-.act-note { color: #606266; font-size: 13px; margin-top: 2px; }
+.prio-bar {
+  display: flex;
+  height: 22px;
+  border-radius: var(--tk-r-sm);
+  overflow: hidden;
+  background: var(--tk-line);
+}
+.prio-seg {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 12px;
+  white-space: nowrap;
+  transition: flex-basis var(--tk-dur-slow) var(--tk-ease);
+}
+.seg-p0 {
+  background: var(--tk-danger);
+}
+.seg-p1 {
+  background: var(--tk-warning);
+}
+.seg-p2 {
+  background: var(--tk-faint);
+}
+.prio-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--tk-s4);
+  margin-top: var(--tk-s2);
+  font-size: 12px;
+  color: var(--tk-muted);
+}
+.prio-legend i {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  margin-right: 5px;
+}
+.prio-legend .seg-p0 {
+  background: var(--tk-danger);
+}
+.prio-legend .seg-p1 {
+  background: var(--tk-warning);
+}
+.prio-legend .seg-p2 {
+  background: var(--tk-faint);
+}
+.head-tip {
+  color: var(--tk-muted);
+  font-size: 12px;
+  margin-left: 10px;
+  font-weight: 400;
+}
+.prio-card.p0 :deep(.el-card__header) {
+  background: #fef0f0;
+}
+.prio-card.p1 :deep(.el-card__header) {
+  background: #fdf6ec;
+}
+.prio-card.p2 :deep(.el-card__header) {
+  background: #f4f4f5;
+}
+.mine-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tk-s2);
+}
+.mine-item {
+  display: flex;
+  align-items: center;
+  gap: var(--tk-s2);
+  padding: 8px 10px;
+  border: 1px solid var(--tk-line);
+  border-radius: var(--tk-r-md);
+  cursor: pointer;
+  transition: border-color var(--tk-dur) var(--tk-ease), background var(--tk-dur) var(--tk-ease), transform var(--tk-dur) var(--tk-ease);
+}
+.mine-item:hover {
+  border-color: var(--tk-primary);
+  background: #f5f9ff;
+  transform: translateX(2px);
+}
+.mine-name {
+  font-weight: 600;
+}
+.mine-rule {
+  color: var(--tk-muted);
+  font-size: 12px;
+  margin-left: auto;
+}
+.sec {
+  margin: var(--tk-s4) 0 var(--tk-s2);
+  font-size: 14px;
+}
+.ev-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+}
+.ev-item {
+  display: flex;
+  justify-content: space-between;
+  background: var(--tk-surface-2);
+  border-radius: var(--tk-r-sm);
+  padding: 4px 8px;
+  font-size: 12px;
+}
+.ev-k {
+  color: var(--tk-muted);
+}
+.ev-v {
+  font-weight: 600;
+  word-break: break-all;
+  text-align: right;
+}
+.act-note {
+  color: var(--tk-ink-2);
+  font-size: 13px;
+  margin-top: 2px;
+}
 </style>

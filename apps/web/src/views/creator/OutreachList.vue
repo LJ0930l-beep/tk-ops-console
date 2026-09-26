@@ -61,6 +61,9 @@
       :row-class-name="rowClass"
       :default-page-size="20"
     >
+      <template #stats>
+        <CreatorStats variant="outreach" />
+      </template>
       <template #toolbar>
         <el-button type="primary" plain :icon="Plus" @click="openDialog">补录跟进</el-button>
       </template>
@@ -95,6 +98,7 @@ import { Check, Plus } from '@element-plus/icons-vue';
 import { OUTREACH_RESULT } from '@tk/shared';
 import { apiGet, apiPost, errMsg } from '@/api/client';
 import ResourcePage from '@/components/ResourcePage.vue';
+import CreatorStats from './CreatorStats.vue';
 import type { ColumnDef, FormFieldDef, OptionDef, SearchDef } from '@/components/ResourcePage.vue';
 import { useAuthStore } from '@/stores/auth';
 

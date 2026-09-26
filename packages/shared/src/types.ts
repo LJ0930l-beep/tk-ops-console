@@ -417,8 +417,8 @@ export interface DashboardSummary {
   live_today: number;
   gmv_trend: { date: string; gmv: number; orders: number; profit: number }[];
   shop_rank: { shop_id: number; shop_name: string; gmv: number; orders: number; profit: number }[];
-  /** `rebate` 是我们从该达人带货里应得的返点；`roi` = 返点 ÷（物流+佣金+广告+费用） */
-  creator_rank: { creator_id: number; handle: string; gmv: number; orders: number; rebate: number; roi: number | null }[];
+  /** `rebate` 是我们从该达人带货里应得的返点。投产比只有一个出处：/api/creators/roi/rank（PRD C9 的四项分母） */
+  creator_rank: { creator_id: number; handle: string; gmv: number; orders: number; rebate: number }[];
   content_type_split: { type: string; gmv: number; orders: number }[];
   bd_rank: { user_id: number; real_name: string; outreach: number; agreed: number; gmv: number }[];
   can_see_cost: boolean;

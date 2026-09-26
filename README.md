@@ -3,7 +3,10 @@
 TikTok Shop 选品流水线 / 多店铺 / 达人建联 / 短视频与直播 / 广告投放 / 返点与利润核算 一体化运营后台。
 收入口径是**品牌服务方**：货是品牌的，我们按实收 GMV 拿品牌返点，系统里没有采购价。
 
-详细需求见 docs/prd.md，开发规范见 docs/development-standards.md，Epic 拆分见 docs/epics.md。
+详细需求见 docs/prd.md，开发规范见 docs/development-standards.md（前端界面约定在其 §14），Epic 拆分见 docs/epics.md。
+
+界面是令牌化的一套公共件：`StatCard`（指标卡，数字补间到位）/ `ChartCard`（图表卡，标题 + 口径说明 + 空态）/ `PageHeader`（页头，口径说明有固定位置）/ `useChart`（echarts 生命周期，ResizeObserver 盯容器、没尺寸不 init）。
+图表只画接口已经算好的全量聚合（趋势 / 热力日历 / 漏斗 / 盈亏平衡仪表 / 利润瀑布 / 构成堆叠），不拿分页表当前那一页当总体；动效全部一次播完并在 `prefers-reduced-motion` 下关闭。
 
 后续可选的开发方向（限流、导出、契约生成、e2e、库迁移、任务队列、真实店铺联调等 12 项，含现状证据、做法、工作量与验收标准）见 **docs/dev-options.md**。
 

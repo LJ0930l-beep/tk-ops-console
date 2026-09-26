@@ -41,6 +41,10 @@ apps/server/src/
 apps/web/src/
   api/client.ts  router/index.ts  stores/*.ts  layouts/MainLayout.vue
   components/ResourcePage.vue  # 通用 CRUD 页，能用它就不要手写表格
+  components/{StatCard,ChartCard,PageHeader}.vue  # 指标卡 / 图表卡 / 页头，见 §14
+  composables/useChart.ts      # echarts 生命周期（ResizeObserver + 无尺寸不 init）
+  utils/{echarts,theme}.ts     # echarts 按需注册表 / 把 --tk-* 令牌读给图表
+  styles/main.css              # 全站唯一样式入口：设计令牌 + 动效都放这里
   views/<menu>/<Page>.vue
 apps/data/tk_ops.db            # 演示库（跟随仓库，便于验收）
 scripts/{copy-assets.mjs,github-import.md}
@@ -345,3 +349,37 @@ sendAlert({ title: '订单同步失败', detail: `shop=1 ${msg}`, level: 'error'
 8. **错误与日志**：`catch` 后吞异常不写 `sync_log`？把凭证/明文密码写进 `error_msg` 或日志 `after`？
 9. **重复实现**：又写了第二套利润/汇率/汇总（D11 的前兆）？前端复制粘贴 `<Page>.vue` 而不用 `ResourcePage`？
 10. **契约漂移**：改了字段/枚举/路由却没同步 `types.ts`、PRD §3、Issue 契约与 `changes-vs-plan.md`？
+
+---
+
+## 14. 前端界面规范（组件、图表、动效）
+
+**令牌优先**：颜色/间距/圆角/阴影一律取 `styles/main.css` 的 `--tk-*`，页面 scoped 里不许再写 `#409eff` 这类字面色。
+图表要颜色时走 `utils/theme.ts` 的 `chartColor.*`（运行时把同一个令牌读给 echarts），否则改主色会出现"卡片是新色、图里是旧色"。
+
+**四个公共件，别再各写一份**：
+
+| 用途 | 组件 | 为什么必须有它 |
+| --- | --- | --- |
+| 指标卡 | `components/StatCard.vue` | 数字补间到位（0.5s，`prefers-reduced-motion` 下直接落终值）；一屏同时刷新时眼睛才知道哪个变了 |
+| 图表卡 | `components/ChartCard.vue` | 标题 + 口径说明 + 操作 + 空态 + **容器高度只在这一处定义**；`span` 走 12 栏 |
+| 页头 | `components/PageHeader.vue` | 口径说明有固定位置（标题下一行 + 悬停看全），不必再塞进卡片的灰字里 |
+| 图表生命周期 | `composables/useChart.ts` | 盯容器自身的 ResizeObserver；**容器没有尺寸就不 init** |
+
+`useChart` 存在的理由写死在它的注释里，这里再记一次现象：只监听 `window.resize` 的图表，在折叠侧边栏 / 拉抽屉 / 开弹窗之后会停在旧宽度；
+而卡片的空态把容器 `display:none` 时 init，echarts 只留一句 `Can't get DOM width or height` 并画一张白图。两者都由这个 composable 兜掉。
+
+**图表只画"全量聚合"**：图的数据必须来自接口已经算好的合计（`/orders/summary`、`/ads/trend`、`/finance/settlement/summary`、`/creators/stats`、`/selection/funnel`、`/dashboard/summary`），
+**绝不拿分页表当前那一页（20/50 行）当总体**。列表页要挂图，走 `ResourcePage` 的 `#stats` 插槽 + `@loaded` 回吐的同一套筛选条件，
+接口不支持的筛选维度就在卡片 `tip` 里写明白（广告日报的图不受"广告类型/计划"筛选影响，就是这么标的）。
+
+**首屏不引 echarts**：`/actions`（登录落地页）与它之后的路由才允许画图；行动中心要表达构成就用 CSS 堆叠带。
+`utils/echarts.ts` 是按需注册表，新增图表类型在那儿补一行 —— 漏注册的表现是"图不画"而不是静默出错（本轮的圆心 `TitleComponent` 就是这么被抓到的）。
+
+**动效尺度**：切页淡入上移、卡片 hover 抬起、数字滚动、图表首绘，全部一次播完不循环；
+所有 `animation`/`transition` 时长取 `--tk-dur*`，并在 `prefers-reduced-motion` 下统一压到 0.001ms（CSS 层）+ `motion()` 返回 `animation:false`（canvas 层）。
+表格行不排队进场 —— 20 行逐条淡入只会拖慢"读第一行"。
+
+**改界面会撞到的断言**：`router-contract.spec.ts` 把每个懒加载页面真的编译一遍（模板写错立刻红）；
+`e2e/pages.spec.ts` 要求每页渲染出 `.el-table/.el-card/.el-form/.el-descriptions/canvas/.el-empty` 之一且零 console error；
+`e2e/action-center.spec.ts` 依赖 `.page-card/.stat-grid/.ev-row/.ev-chips`；`e2e/selection.spec.ts` 硬依赖 `.board .col` 恰好 5 列、`.scard`、表单 label 文案与 `.ro`。

@@ -29,22 +29,10 @@
       </el-alert>
     </el-card>
 
-    <div class="stat-grid">
-      <el-card shadow="never">
-        <div class="kpi-label">SKU × 仓库 组合</div>
-        <div class="kpi-value">{{ int(total) }}</div>
-        <div class="kpi-sub">本页 {{ int(totalCombos) }} 行</div>
-      </el-card>
-      <el-card shadow="never">
-        <div class="kpi-label">在库总量</div>
-        <div class="kpi-value">{{ int(sumQty) }}</div>
-        <div class="kpi-sub">本页汇总（含零库存行）</div>
-      </el-card>
-      <el-card shadow="never">
-        <div class="kpi-label">低库存 / 断货</div>
-        <div class="kpi-value" :class="lowCount ? 'danger' : ''">{{ int(lowCount) }} / {{ int(zeroCount) }}</div>
-        <div class="kpi-sub">本页需补货或核对流水</div>
-      </el-card>
+    <div class="stat-grid tk-in">
+      <StatCard label="SKU × 仓库 组合" :value="num(total)" :sub="`本页 ${int(totalCombos)} 行`" tone="primary" />
+      <StatCard label="在库总量" :value="num(sumQty)" sub="本页汇总（含零库存行）" tone="info" />
+      <StatCard label="低库存 / 断货" :value="`${int(lowCount)} / ${int(zeroCount)}`" sub="本页需补货或核对流水" :tone="lowCount > 0 ? 'danger' : 'success'" />
     </div>
 
     <el-card shadow="never">
@@ -120,6 +108,7 @@ import { RefreshLeft, Search } from '@element-plus/icons-vue';
 import type { PageResult } from '@tk/shared';
 import { num } from '@tk/shared';
 import { apiGet, errMsg } from '@/api/client';
+import StatCard from '@/components/StatCard.vue';
 import type { RowLike } from '@/types/row';
 
 /** 行结构由后端聚合返回：{ warehouse_id, warehouse_name, sku_id, sku_code, spec, spu_code, qty, safety_stock? } */

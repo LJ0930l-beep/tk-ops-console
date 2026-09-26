@@ -1,7 +1,7 @@
 <template>
   <el-container style="height: 100vh">
-    <el-aside :width="collapsed ? '64px' : '220px'" style="background: #1d2b3a; transition: width 0.2s">
-      <div style="height: 56px; display: flex; align-items: center; color: #fff; padding: 0 16px; white-space: nowrap; overflow: hidden">
+    <el-aside :width="collapsed ? '64px' : '220px'" class="side">
+      <div class="brand">
         <el-icon size="20" style="margin-right: 8px"><Promotion /></el-icon>
         <b v-show="!collapsed">TikTok 运营后台</b>
       </div>
@@ -29,12 +29,16 @@
       </el-menu>
     </el-aside>
     <el-container>
-      <el-header style="display: flex; align-items: center; justify-content: space-between; background: #fff; border-bottom: 1px solid #e4e7ed; height: 56px">
-        <div style="display: flex; align-items: center; gap: 12px">
+      <el-header class="bar">
+        <div class="bar-left">
           <el-icon style="cursor: pointer" size="18" @click="collapsed = !collapsed">
             <component :is="collapsed ? Expand : Fold" />
           </el-icon>
-          <span style="font-size: 15px; font-weight: 600">{{ routeTitle }}</span>
+          <!-- 顶栏只报「在哪一组」，页面自己的标题交给页头：两处都写同一个标题会显得重复 -->
+          <el-breadcrumb separator="/">
+            <el-breadcrumb-item v-if="routeGroup">{{ routeGroup }}</el-breadcrumb-item>
+            <el-breadcrumb-item>{{ routeTitle }}</el-breadcrumb-item>
+          </el-breadcrumb>
         </div>
         <div style="display: flex; align-items: center; gap: 14px">
           <el-popover
@@ -83,9 +87,11 @@
           </el-dropdown>
         </div>
       </el-header>
-      <el-main style="padding: 0; overflow-y: auto">
+      <el-main class="body">
         <router-view v-slot="{ Component }">
-          <keep-alive :max="10"><component :is="Component" :key="route.path" /></keep-alive>
+          <transition name="tk-route" mode="out-in">
+            <keep-alive :max="10"><component :is="Component" :key="route.path" /></keep-alive>
+          </transition>
         </router-view>
       </el-main>
     </el-container>
@@ -142,6 +148,7 @@ const visibleMenus = computed(() =>
 );
 const activeMenu = computed(() => route.path);
 const routeTitle = computed(() => String(route.meta.title ?? ''));
+const routeGroup = computed(() => MENUS.find((m) => m.key === route.meta.menu)?.title ?? '');
 const canSeeActions = computed(() => auth.user?.role_key === 'boss' || auth.user?.menu_perms.includes('dashboard') === true);
 
 const pwdVisible = ref(false);
@@ -225,11 +232,79 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.side {
+  background: var(--tk-navy);
+  transition: width var(--tk-dur) var(--tk-ease);
+}
+.brand {
+  height: 56px;
+  display: flex;
+  align-items: center;
+  color: #fff;
+  padding: 0 var(--tk-s4);
+  white-space: nowrap;
+  overflow: hidden;
+}
+/* 当前菜单项：EP 默认只换个字色，一屏 37 项里很难一眼找到自己在哪 */
+.side :deep(.el-menu-item.is-active) {
+  background: #16222e !important;
+  position: relative;
+}
+.side :deep(.el-menu-item.is-active)::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--tk-navy-active);
+}
+.side :deep(.el-menu-item:hover),
+.side :deep(.el-sub-menu__title:hover) {
+  background: #223444 !important;
+}
+.side :deep(.el-menu) {
+  border-right: none;
+}
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--tk-surface);
+  border-bottom: 1px solid var(--tk-border);
+  height: 56px;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+.bar-left {
+  display: flex;
+  align-items: center;
+  gap: var(--tk-s3);
+}
+.bar-left :deep(.el-breadcrumb) {
+  font-size: 14px;
+  line-height: 1;
+}
+.bar-left :deep(.el-breadcrumb__inner) {
+  color: var(--tk-muted);
+  font-weight: 400;
+}
+.bar-left :deep(.el-breadcrumb__item:last-child .el-breadcrumb__inner) {
+  color: var(--tk-ink);
+  font-weight: 600;
+}
+.body {
+  padding: 0;
+  overflow-y: auto;
+  background: var(--tk-canvas);
+}
 .notification-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
-.notification-head span, .notification-sub { color: #909399; font-size: 12px; }
-.notification-row { display: flex; align-items: center; gap: 8px; padding: 9px 4px; border-top: 1px solid #f0f2f5; }
+.notification-head span, .notification-sub { color: var(--tk-muted); font-size: 12px; }
+.notification-row { display: flex; align-items: center; gap: var(--tk-s2); padding: 9px 4px; border-top: 1px solid var(--tk-line); transition: background var(--tk-dur) var(--tk-ease); }
+.notification-row:hover { background: var(--tk-surface-2); }
 .notification-row.unread .notification-title { font-weight: 600; }
 .notification-link { display: flex; flex: 1; min-width: 0; flex-direction: column; align-items: flex-start; gap: 3px; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
 .notification-title, .notification-sub { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.notification-link:hover .notification-title { color: #409eff; }
+.notification-link:hover .notification-title { color: var(--tk-primary); }
 </style>

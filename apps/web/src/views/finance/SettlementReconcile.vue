@@ -13,7 +13,27 @@
       :default-page-size="20"
       :row-class-name="rowClass"
       :map-row="mapRow"
+      @loaded="onLoaded"
     >
+      <template #stats="{ query }">
+        <div v-if="sum" class="stat-grid tk-in">
+          <StatCard label="流水笔数" :value="num(sum.rows)" :sub="`${sum.statements} 份账单`" tone="primary" />
+          <StatCard label="收入类合计" :value="num(sum.income_cny)" sub="订单收入等正向流水（折 CNY）" tone="success" money :precision="2" />
+          <StatCard label="扣减类合计" :value="num(sum.deduction_cny)" sub="退款 + 佣金 + 平台费 + 运费等" tone="warning" :precision="2" />
+          <StatCard label="应得净额" :value="num(sum.net_cny)" sub="收入 − 扣减；这是我们找品牌结算的基数之一" tone="primary" money :precision="2" />
+          <StatCard label="已打款" :value="num(sum.paid_cny)" :sub="`${num(sum.paid_count)} 笔已到账`" tone="success" money :precision="2" />
+          <StatCard label="待打款" :value="num(sum.pending_cny)" :sub="`处理中 ${num(sum.processing_count)} 笔 · 失败 ${num(sum.failed_count)} 笔`" :tone="num(sum.failed_cny) > 0 ? 'danger' : 'info'" money :precision="2" />
+        </div>
+        <div class="chart-grid">
+          <ChartCard title="钱按科目拆开" tip="正数（绿）是平台记给我们的，负数（红）是扣掉的；这张图就是「带货实付 → 实际打款」之间发生的事" :span="7" :empty="!typeRows.length" empty-text="所选条件下没有流水">
+            <div ref="typeEl" class="chart-host" />
+          </ChartCard>
+          <ChartCard title="各店到账进度" tip="已打款 / 待打款 / 失败 堆叠；灰红段越长，说明这家店的钱还压在平台" :span="5" :empty="!shopRows.length" empty-text="没有分店数据">
+            <div ref="shopEl" class="chart-host" />
+          </ChartCard>
+        </div>
+        <el-alert v-if="sumError" type="warning" :closable="false" show-icon class="page-tip" :title="`结算合计加载失败：${sumError}`" description="合计与图取的是 /finance/settlement/summary；下面的逐单表不受影响。" />
+      </template>
       <template #toolbar-extra>
         <el-alert type="info" :closable="false" show-icon class="page-tip">
           <template #title>
@@ -68,10 +88,17 @@ import { ElMessage } from 'element-plus';
 import { MASK, num, round2 } from '@tk/shared';
 import { apiGet, errMsg, type Paged } from '@/api/client';
 import ResourcePage, { type ColumnDef, type OptionDef, type SearchDef } from '@/components/ResourcePage.vue';
+import ChartCard from '@/components/ChartCard.vue';
 import ExportButton from '@/components/ExportButton.vue';
+import StatCard from '@/components/StatCard.vue';
+import { useChart } from '@/composables/useChart';
+import type { ChartOption } from '@/utils/echarts';
+import { chartColor, motion } from '@/utils/theme';
 
 const router = useRouter();
 const rp = ref();
+
+const money = (v: unknown) => (v === MASK ? MASK : num(v).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
 
 const ONLY_OPTIONS: OptionDef[] = [
   { value: 'diff', label: '只看有差异' },
@@ -124,6 +151,109 @@ function rowClass(row: Record<string, unknown>): string {
   if (String(row.excluded_reason ?? '')) return 'row-muted';
   return Math.abs(num(row.diff_rate)) > 0.05 ? 'row-danger' : '';
 }
+
+/* ---------- 合计与两张图（跟着同一套筛选条件走） ---------- */
+interface TxnTypeRow {
+  txn_type: number;
+  txn_name: string;
+  count: number;
+  amount_cny: number;
+}
+interface ShopRow {
+  shop_id: number;
+  shop_name: string | null;
+  rows: number;
+  net_cny: number;
+  paid_cny: number;
+  pending_cny: number;
+  failed_cny: number;
+}
+interface SettleSummary {
+  rows: number;
+  income_cny: number;
+  deduction_cny: number;
+  net_cny: number;
+  paid_cny: number;
+  pending_cny: number;
+  statements: number;
+  paid_count: number;
+  processing_count: number;
+  failed_count: number;
+  failed_cny: number;
+  by_txn_type: TxnTypeRow[];
+  by_shop: ShopRow[];
+}
+
+const sum = ref<SettleSummary | null>(null);
+const sumError = ref('');
+const typeEl = ref<HTMLDivElement>();
+const shopEl = ref<HTMLDivElement>();
+
+const typeRows = computed(() => sum.value?.by_txn_type ?? []);
+const shopRows = computed(() => [...(sum.value?.by_shop ?? [])].sort((a, b) => num(b.net_cny) - num(a.net_cny)).slice(0, 8));
+
+/** ResourcePage 每次拉到数据后把真正发出去的筛选条件回吐到这里，合计与图就永远和下面那张表同口径 */
+async function onLoaded(p: { params: Record<string, unknown> }): Promise<void> {
+  const { page: _p, pageSize: _ps, sortBy: _s, sortOrder: _o, ...filter } = p.params;
+  try {
+    sum.value = await apiGet<SettleSummary>('/finance/settlement/summary', filter);
+    sumError.value = '';
+  } catch (e) {
+    sum.value = null;
+    sumError.value = errMsg(e);
+  }
+}
+
+function typeOption(): ChartOption | null {
+  const list = typeRows.value;
+  if (!list.length) return null;
+  return {
+    ...motion(),
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: (p: { name: string; value: number }[]) => `${p[0]?.name ?? ''}<br/>${money(Number(p[0]?.value ?? 0))}` },
+    grid: { left: 92, right: 70, top: 10, bottom: 22 },
+    xAxis: { type: 'value', axisLabel: { formatter: (v: number) => `${round2(num(v) / 10000)}万` } },
+    yAxis: { type: 'category', data: list.map((r) => r.txn_name).reverse(), axisLabel: { fontSize: 11 } },
+    series: [
+      {
+        type: 'bar',
+        barMaxWidth: 16,
+        data: list
+          .map((r) => ({ value: round2(num(r.amount_cny)), itemStyle: { color: num(r.amount_cny) < 0 ? chartColor.danger() : chartColor.success(), borderRadius: [0, 3, 3, 0] } }))
+          .reverse(),
+        label: { show: true, position: 'right', fontSize: 10, formatter: (p: { value: number }) => `${round2(num(p.value) / 10000)}万` },
+      },
+    ],
+  };
+}
+
+function shopOption(): ChartOption | null {
+  const list = shopRows.value;
+  if (!list.length) return null;
+  const mk = (name: string, pick: (r: ShopRow) => number, color: string) => ({
+    name,
+    type: 'bar',
+    stack: 's',
+    barMaxWidth: 20,
+    itemStyle: { color },
+    data: list.map((r) => round2(num(pick(r)))),
+  });
+  return {
+    ...motion(),
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    legend: { bottom: 0, itemWidth: 10, itemHeight: 8, textStyle: { fontSize: 11 } },
+    grid: { left: 60, right: 16, top: 12, bottom: 40 },
+    xAxis: { type: 'category', data: list.map((r) => r.shop_name ?? `#${r.shop_id}`), axisLabel: { fontSize: 10, interval: 0, rotate: 20, width: 76, overflow: 'truncate' } },
+    yAxis: { type: 'value', axisLabel: { formatter: (v: number) => `${round2(num(v) / 10000)}万` } },
+    series: [
+      mk('已打款', (r) => num(r.paid_cny), chartColor.success()),
+      mk('待打款', (r) => num(r.pending_cny), chartColor.warning()),
+      mk('失败', (r) => num(r.failed_cny), chartColor.danger()),
+    ],
+  };
+}
+
+useChart(typeEl, typeOption, [sum]);
+useChart(shopEl, shopOption, [sum]);
 
 /* ---------- 下钻：某单的全部结算流水 ---------- */
 const drawer = ref(false);

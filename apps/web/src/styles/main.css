@@ -1,14 +1,277 @@
-html, body, #app { height: 100%; margin: 0; }
-body { font-family: 'Helvetica Neue', Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif; background: #f5f7fa; }
-.page { padding: 16px; }
-.page-card { margin-bottom: 16px; }
-.stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-bottom: 16px; }
-.chart-box { height: 300px; }
-.money-cny { color: #c45656; }
-.mask { color: #909399; }
-.el-table .unmapped-row { background: #fef0f0; }
-.todo-badge { margin-left: 4px; }
+/**
+ * 全站唯一样式入口。
+ *
+ * 这一轮之前的问题不是"没样式"，是每个页面各自写死 hex：#409eff / #c45656 / #909399
+ * 散在二十多个 scoped 段里，同一个"金额红"有三种深浅，改一处配色要全站 grep。
+ * 所以下面先立令牌（--tk-*），再谈动效；页面级 scoped 样式只允许引用令牌，不允许再写死色值。
+ */
+:root {
+  /* 面与线 */
+  --tk-canvas: #f5f7fa;
+  --tk-surface: #fff;
+  --tk-surface-2: #fafbfc;
+  --tk-line: #ebeef5;
+  --tk-border: #e4e7ed;
+  /* 字 */
+  --tk-ink: #303133;
+  --tk-ink-2: #606266;
+  --tk-muted: #909399;
+  --tk-faint: #a8abb2;
+  /* 语义色：跟 Element Plus 的色板取值，不自己发明 */
+  --tk-primary: #409eff;
+  --tk-success: #67c23a;
+  --tk-warning: #e6a23c;
+  --tk-danger: #f56c6c;
+  --tk-info: #909399;
+  /* 金额与侧边栏：这两个是产品的辨识色，别随便调 */
+  --tk-money: #c45656;
+  --tk-navy: #1d2b3a;
+  --tk-navy-ink: #a9b7c6;
+  --tk-navy-active: #ffd04b;
+  /* 间距阶梯（4 的倍数，别再出现 13px/18px 这种手抖值） */
+  --tk-s1: 4px;
+  --tk-s2: 8px;
+  --tk-s3: 12px;
+  --tk-s4: 16px;
+  --tk-s5: 20px;
+  --tk-s6: 24px;
+  --tk-gap: var(--tk-s3);
+  --tk-page-pad: var(--tk-s4);
+  /* 圆角与阴影 */
+  --tk-r-sm: 4px;
+  --tk-r-md: 8px;
+  --tk-r-lg: 12px;
+  --tk-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --tk-shadow-2: 0 4px 16px rgba(0, 0, 0, 0.08);
+  --tk-shadow-3: 0 8px 28px rgba(0, 0, 0, 0.12);
+  /* 动效：短、一次、不循环。后台系统天天看，长动画只会变成等待 */
+  --tk-dur: 0.22s;
+  --tk-dur-slow: 0.4s;
+  --tk-ease: cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+body {
+  font-family: 'Helvetica Neue', Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: var(--tk-canvas);
+  color: var(--tk-ink);
+}
+
+/* ---------- 版面 ---------- */
+.page {
+  padding: var(--tk-page-pad);
+}
+.page-card {
+  margin-bottom: var(--tk-s4);
+}
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--tk-gap);
+  margin-bottom: var(--tk-s4);
+}
+.chart-grid {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: var(--tk-gap);
+  margin-bottom: var(--tk-s4);
+}
+.chart-box {
+  height: 300px;
+}
+/* 图表宿主：ChartCard 的 .cc-body 给了高度，里面的 div 必须自己撑满，
+   否则 echarts 拿到 0 尺寸只会警告一句"Can't get DOM width or height"并画成空白。
+   写成全局工具类而不是 ChartCard 的 scoped 规则 —— 插槽内容带着调用方的 scope id，
+   子组件的 scoped 选择器根本选不中它。 */
+.chart-host {
+  width: 100%;
+  height: 100%;
+}
+
+/* ---------- 卡片 ---------- */
+.el-card {
+  --el-card-border-color: var(--tk-line);
+  border-radius: var(--tk-r-md);
+  box-shadow: var(--tk-shadow-1);
+  transition: box-shadow var(--tk-dur) var(--tk-ease), transform var(--tk-dur) var(--tk-ease);
+}
+.el-card__header {
+  padding: 10px var(--tk-s4);
+  border-bottom: 1px solid var(--tk-line);
+  background: var(--tk-surface-2);
+  border-radius: var(--tk-r-md) var(--tk-r-md) 0 0;
+}
+.el-card__header b {
+  font-size: 14px;
+  letter-spacing: 0.2px;
+}
+.head-tip {
+  font-size: 12px;
+  color: var(--tk-muted);
+  margin-left: var(--tk-s2);
+  font-weight: 400;
+}
+/* 只有"可点"的卡才抬起 —— 给整张表格卡加 hover 位移只会让人以为点了会跳页 */
+.tk-lift {
+  cursor: pointer;
+}
+.tk-lift:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--tk-shadow-2);
+}
+
+/* ---------- 数字排版：金额列必须等宽，否则一屏数字对不齐 ---------- */
+.money-cny {
+  color: var(--tk-money);
+}
+.tk-num {
+  font-variant-numeric: tabular-nums;
+}
+.mask {
+  color: var(--tk-muted);
+}
+.el-table {
+  font-variant-numeric: tabular-nums;
+}
+.el-table .unmapped-row {
+  background: #fef0f0;
+}
+.todo-badge {
+  margin-left: var(--tk-s1);
+}
+
+/* ---------- 动效 ---------- */
+@keyframes tk-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes tk-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes tk-slide-in {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: none;
+  }
+}
+/* 进场用：卡片列表依次出现，比一整块同时闪出来好读，但最多排到第 8 个 ——
+   再往后延迟只会让长列表看起来"卡了一下" */
+.tk-in {
+  animation: tk-fade-up var(--tk-dur-slow) var(--tk-ease) both;
+}
+.tk-in > * {
+  animation: tk-fade-up var(--tk-dur-slow) var(--tk-ease) both;
+}
+.tk-in > *:nth-child(1),
+.tk-in:nth-child(1) {
+  animation-delay: 0s;
+}
+.tk-in > *:nth-child(2),
+.tk-in:nth-child(2) {
+  animation-delay: 0.04s;
+}
+.tk-in > *:nth-child(3),
+.tk-in:nth-child(3) {
+  animation-delay: 0.08s;
+}
+.tk-in > *:nth-child(4),
+.tk-in:nth-child(4) {
+  animation-delay: 0.12s;
+}
+.tk-in > *:nth-child(5),
+.tk-in:nth-child(5) {
+  animation-delay: 0.16s;
+}
+.tk-in > *:nth-child(6),
+.tk-in:nth-child(6) {
+  animation-delay: 0.2s;
+}
+.tk-in > *:nth-child(n + 7),
+.tk-in:nth-child(n + 7) {
+  animation-delay: 0.24s;
+}
+
+/* 路由切换：淡入 + 轻微上移。用 transition 而不是 animation，配合 mode="out-in"
+   —— 前一页没走干净就让下一页占位，会把内容区撑出一次滚动条跳动 */
+.tk-route-enter-active {
+  transition: opacity var(--tk-dur) var(--tk-ease), transform var(--tk-dur) var(--tk-ease);
+}
+.tk-route-enter-from {
+  opacity: 0;
+  transform: translateY(6px);
+}
+.tk-route-leave-active {
+  transition: opacity 0.1s linear;
+}
+.tk-route-leave-to {
+  opacity: 0;
+}
+
+.el-dialog {
+  animation: tk-pop var(--tk-dur) var(--tk-ease) both;
+  border-radius: var(--tk-r-lg);
+}
+.el-drawer__body {
+  animation: tk-slide-in var(--tk-dur) var(--tk-ease) both;
+}
+
+/* 滚动条：默认那条又宽又灰，数据密集页面里很抢注意力 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: #d4d7de;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #b6bac2;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
 @media (max-width: 768px) {
-  .stat-grid { grid-template-columns: 1fr 1fr; }
-  .page { padding: 8px; }
+  .stat-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+  .chart-grid {
+    grid-template-columns: 1fr;
+  }
+  .page {
+    padding: var(--tk-s2);
+  }
+}
+
+/* 系统级"减少动态效果"必须排在最后一条：它要赢过上面所有 animation/transition。
+   后台系统一天看八小时，动画对一部分人是生理性不适，不是审美问题。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-delay: 0s !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
 }

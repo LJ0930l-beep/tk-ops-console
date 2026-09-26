@@ -1,5 +1,11 @@
 <template>
   <div class="page">
+    <PageHeader title="达人 ROI" sub="投产比 = 应收返点 ÷（物流 + 寄样运费 + 坑位费 + 达人佣金），全人民币；分子是我们自己的收入，不是带货 GMV">
+      <template #tag>
+        <el-tag v-if="rows.length" size="small" type="info">{{ rows.length }} 行 · {{ dimLabel }}</el-tag>
+      </template>
+    </PageHeader>
+
     <el-card class="page-card" shadow="never">
       <div class="filter-bar">
         <el-radio-group v-model="dim" @change="() => load()">
@@ -26,8 +32,7 @@
         <el-button :icon="RefreshLeft" @click="reset">重置</el-button>
       </div>
       <div class="tip">
-        投产比 = <b>应收返点</b> ÷（寄样运费 + 坑位费 + 达人佣金），全部人民币口径；分母为 0 显示「—」且不参与榜首。
-        分子是我们自己的收入，不是带货 GMV —— 带货 GMV 是品牌的生意规模，只看它会把一个亏钱的达人排到第一。
+        分母为 0 显示「—」且不参与榜首。
         净带货 GMV 已扣除已完成退款、排除样品单（PRD §5.3 / §5.7）；样品货值由品牌承担，不再进我们的投入。
       </div>
       <el-alert v-if="!auth.canSeeCost" type="warning" show-icon :closable="false" class="page-tip"
@@ -35,6 +40,29 @@
       <el-alert v-else-if="!hasRebateCol" type="warning" show-icon :closable="false" class="page-tip"
         title="这个维度接口没有下发「应收返点」列，合计投产比一律显示「—」（宁可不给数，也不会拿带货 GMV 冒充我们的收入）。" />
     </el-card>
+
+    <!-- 合计 + 两张图：先看这批人整体赚不赚钱，再看是谁在赚 -->
+    <div v-if="auth.canSeeCost && rows.length" class="stat-grid tk-in">
+      <StatCard label="应收返点合计" :value="totals.rebate" :sub="`${dimLabel} ${rows.length} 个`" tone="success" money :precision="2" />
+      <StatCard label="投入合计" :value="totals.cost" sub="物流 + 寄样运费 + 坑位费 + 佣金（不含广告）" tone="warning" :precision="2" />
+      <StatCard
+        label="整体投产比"
+        :value="totals.roi ?? '—'"
+        :sub="totals.roi === null ? '投入为 0，没有分母' : totals.roi >= 1 ? '每投 1 元换回 ' + totals.roi.toFixed(2) + ' 元返点' : '每投 1 元只换回 ' + (totals.roi ?? 0).toFixed(2) + ' 元返点'"
+        :tone="totals.roi !== null && totals.roi < 1 ? 'danger' : 'primary'"
+        :precision="2"
+      />
+      <StatCard label="亏钱的" :value="totals.losers" :sub="`投产比 < 1 的行数（共 ${totals.roiRows} 行有投产比）`" :tone="totals.losers > 0 ? 'danger' : 'info'" />
+    </div>
+
+    <div v-if="auth.canSeeCost && rows.length" class="chart-grid">
+      <ChartCard title="投产比 Top 榜" tip="绿条 ≥ 1（换回的返点盖得住投入），红条 < 1（带得越多亏得越多）" :span="6" :empty="roiRows.length < 2" empty-text="有投产比的行不足两行">
+        <div ref="roiEl" class="chart-host" />
+      </ChartCard>
+      <ChartCard title="返点 vs 投入（按规模 Top 10）" tip="两根柱子差多少，就是这个人给我们赚多少；红比蓝长就是亏" :span="6" :empty="scaleRows.length < 1">
+        <div ref="scaleEl" class="chart-host" />
+      </ChartCard>
+    </div>
 
     <el-card shadow="never">
       <el-table
@@ -74,6 +102,12 @@ import { COLLAB_STATUS, MASK, collabRoi, num, round2 } from '@tk/shared';
 import { apiGet, errMsg } from '@/api/client';
 import { useAuthStore } from '@/stores/auth';
 import { useDictStore } from '@/stores/dict';
+import { useChart } from '@/composables/useChart';
+import type { ChartOption } from '@/utils/echarts';
+import { chartColor, motion } from '@/utils/theme';
+import ChartCard from '@/components/ChartCard.vue';
+import PageHeader from '@/components/PageHeader.vue';
+import StatCard from '@/components/StatCard.vue';
 
 type Row = Record<string, unknown>;
 type Kind = 'text' | 'money' | 'int' | 'roi' | 'pct';
@@ -152,6 +186,79 @@ const COLLAB_COLS: Col[] = [
 ];
 
 const cols = computed<Col[]>(() => (dim.value === 'bd' ? BD_COLS : dim.value === 'collab' ? COLLAB_COLS : CREATOR_COLS));
+const dimLabel = computed(() => (dim.value === 'bd' ? '按 BD' : dim.value === 'collab' ? '按合作单' : '按达人'));
+
+/* ---------- 合计与两张图 ---------- */
+const roiEl = ref<HTMLDivElement>();
+const scaleEl = ref<HTMLDivElement>();
+
+/** 投入列的键名两个维度不一样：达人/合作单是 cost，BD 是 cost_cny */
+const costOf = (r: Row): number => num(r.cost ?? r.cost_cny ?? 0);
+const roiOf = (r: Row): number | null => (r.roi === null || r.roi === undefined || r.roi === MASK ? null : num(r.roi));
+const nameOf = (r: Row): string => String(r.handle || r.real_name || r.collab_no || r.dim_name || '—');
+
+const totals = computed(() => {
+  const rebate = round2(rows.value.reduce((a, r) => a + num(r.rebate_cny), 0));
+  const cost = round2(rows.value.reduce((a, r) => a + costOf(r), 0));
+  const withRoi = rows.value.filter((r) => roiOf(r) !== null);
+  return {
+    rebate,
+    cost,
+    roi: cost > 0 ? round2(rebate / cost) : null,
+    roiRows: withRoi.length,
+    losers: withRoi.filter((r) => (roiOf(r) ?? 0) < 1).length,
+  };
+});
+const roiRows = computed(() =>
+  rows.value
+    .filter((r) => roiOf(r) !== null)
+    .sort((a, b) => (roiOf(b) ?? 0) - (roiOf(a) ?? 0))
+    .slice(0, 12),
+);
+const scaleRows = computed(() => [...rows.value].sort((a, b) => num(b.rebate_cny) - num(a.rebate_cny)).slice(0, 10));
+
+function roiChartOption(): ChartOption | null {
+  const list = roiRows.value;
+  if (list.length < 2) return null;
+  return {
+    ...motion(),
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: (p: { name: string; value: number }[]) => `${p[0]?.name ?? ''}<br/>投产比 ${Number(p[0]?.value ?? 0).toFixed(2)}` },
+    grid: { left: 120, right: 56, top: 14, bottom: 24 },
+    xAxis: { type: 'value', name: '投产比', nameTextStyle: { fontSize: 11, color: chartColor.muted() } },
+    yAxis: { type: 'category', data: list.map(nameOf).reverse(), axisLabel: { width: 110, overflow: 'truncate', fontSize: 11 } },
+    series: [
+      {
+        type: 'bar',
+        barMaxWidth: 14,
+        data: list
+          .map((r) => ({ value: roiOf(r) ?? 0, itemStyle: { color: (roiOf(r) ?? 0) >= 1 ? chartColor.success() : chartColor.danger(), borderRadius: [0, 3, 3, 0] } }))
+          .reverse(),
+        label: { show: true, position: 'right', fontSize: 10, formatter: (p: { value: number }) => Number(p.value).toFixed(2) },
+        markLine: { silent: true, symbol: 'none', label: { formatter: '打平线 1.0', fontSize: 10, color: chartColor.muted() }, lineStyle: { type: 'dashed', color: chartColor.muted() }, data: [{ xAxis: 1 }] },
+      },
+    ],
+  };
+}
+
+function scaleChartOption(): ChartOption | null {
+  const list = scaleRows.value;
+  if (!list.length) return null;
+  return {
+    ...motion(),
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    legend: { bottom: 0, itemWidth: 10, itemHeight: 8, textStyle: { fontSize: 11 } },
+    grid: { left: 56, right: 16, top: 16, bottom: 40 },
+    xAxis: { type: 'category', data: list.map(nameOf), axisLabel: { fontSize: 10, interval: 0, rotate: 28, width: 78, overflow: 'truncate' } },
+    yAxis: { type: 'value', axisLabel: { formatter: (v: number) => `${round2(num(v) / 10000)}万` } },
+    series: [
+      { name: '应收返点', type: 'bar', barMaxWidth: 16, itemStyle: { color: chartColor.success(), borderRadius: [3, 3, 0, 0] }, data: list.map((r) => round2(num(r.rebate_cny))) },
+      { name: '投入', type: 'bar', barMaxWidth: 16, itemStyle: { color: chartColor.danger(), borderRadius: [3, 3, 0, 0] }, data: list.map((r) => round2(costOf(r))) },
+    ],
+  };
+}
+
+useChart(roiEl, roiChartOption, [rows, dim]);
+useChart(scaleEl, scaleChartOption, [rows, dim]);
 
 /* ---------- 渲染（后端无权限时值为 ***，直接展示） ---------- */
 /** 这个维度到底有没有「应收返点」这一列：没有就不给合计投产比，绝不拿带货 GMV 凑分子 */

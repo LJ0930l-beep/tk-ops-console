@@ -43,33 +43,24 @@
       </div>
     </el-card>
 
-    <!-- 方案 11.3 顶部漏斗：纯 DOM 条形，不为四根柱子引 echarts（首屏不涨） -->
-    <el-card class="page-card" shadow="never">
-      <div class="head">
-        <div>
-          <span class="title">选品漏斗</span>
-          <span class="tip">登记 → 进入测试 → 测试通过 → 上架销售；比率为相邻两级之比</span>
-        </div>
-        <div class="summary">
-          总通过率 <b>{{ pctOf(funnel?.pass_rate) }}</b>
-          <span class="sep">｜</span>淘汰 <b>{{ num(funnel?.eliminated) }}</b> 个
-          <span class="sep">｜</span>在办
-          <b>{{ num(funnel?.levels?.stage_1) }}</b>/登记
-          <b>{{ num(funnel?.levels?.stage_2) }}</b>/测试
-          <b>{{ num(funnel?.levels?.stage_3) }}</b>/反馈
-          <b>{{ num(funnel?.levels?.stage_4) }}</b>/准备
-        </div>
-      </div>
-      <el-alert v-if="funnelError" type="error" :closable="false" show-icon :title="`漏斗加载失败：${funnelError}`" />
-      <div v-else v-loading="funnelLoading" class="funnel">
-        <div v-for="(s, i) in funnelSteps" :key="s.key" class="fstep">
-          <div class="frow"><span class="flabel">{{ s.label }}</span><span class="fvalue">{{ s.value }}</span></div>
-          <div class="fbar"><i :style="{ width: `${s.bar}%` }" /></div>
-          <div class="frate">{{ i === 0 ? '漏斗起点' : `相邻转化 ${pctOf(s.rate)}` }}</div>
-        </div>
-        <el-empty v-if="!funnelLoading && !funnelSteps.length" description="一个候选品都没有：点右上「登记候选品」开始跑流水线" :image-size="52" />
-      </div>
-    </el-card>
+    <!-- 方案 11.3 顶部漏斗：这页不是登录落地页，值得用真的漏斗图（DOM 条形摆不出"漏"的形状） -->
+    <el-alert v-if="funnelError" type="error" :closable="false" show-icon :title="`漏斗加载失败：${funnelError}`" class="page-card" />
+    <div v-else class="chart-grid" v-loading="funnelLoading">
+      <ChartCard title="选品漏斗" tip="登记 → 进入测试 → 测试通过 → 上架销售；段间标注的是相邻两级之比" :span="7" :empty="!funnelSteps.length" empty-text="一个候选品都没有：点右上「登记候选品」开始跑流水线">
+        <template #actions>
+          <span class="funnel-sum">
+            总通过率 <b>{{ pctOf(funnel?.pass_rate) }}</b>
+            <span class="sep">｜</span>淘汰 <b>{{ num(funnel?.eliminated) }}</b> 个
+            <span class="sep">｜</span>在办
+            <b>{{ num(funnel?.levels?.stage_1) }}</b>/<b>{{ num(funnel?.levels?.stage_2) }}</b>/<b>{{ num(funnel?.levels?.stage_3) }}</b>/<b>{{ num(funnel?.levels?.stage_4) }}</b>
+          </span>
+        </template>
+        <div ref="funnelEl" class="chart-host" />
+      </ChartCard>
+      <ChartCard title="各阶段卡了多久" tip="柱子＝该阶段在办卡片的平均 / 最长停留；虚线＝后端下发的超时红线。柱子压过红线就是要出结论了还没出" :span="5" :empty="!dwellRows.length" empty-text="看板上还没有在办候选品">
+        <div ref="dwellEl" class="chart-host" />
+      </ChartCard>
+    </div>
 
     <el-card shadow="never">
       <el-tabs v-model="tab">
@@ -423,11 +414,15 @@ import {
 } from '@tk/shared';
 import { apiGet, apiPost, apiPut, errMsg } from '@/api/client';
 import ResourcePage, { type ColumnDef, type OptionDef } from '@/components/ResourcePage.vue';
+import ChartCard from '@/components/ChartCard.vue';
 import ExportButton from '@/components/ExportButton.vue';
 import { useAuthStore } from '@/stores/auth';
 import { useDictStore } from '@/stores/dict';
 import type { RowLike } from '@/types/row';
 import { formatUtcTimestamp } from '@/utils/date';
+import { useChart } from '@/composables/useChart';
+import type { ChartOption } from '@/utils/echarts';
+import { chartColor, motion } from '@/utils/theme';
 
 type Card = SelectionBoardCard;
 type Level = Card['overdue_level'];
@@ -615,6 +610,81 @@ const funnelSteps = computed(() => {
   const max = Math.max(1, ...steps.map((s) => num(s.value)));
   return steps.map((s) => ({ key: s.key, label: s.label, value: num(s.value), rate: s.rate, bar: round2((num(s.value) / max) * 100) }));
 });
+
+/* ---------- 漏斗图 / 阶段停留图 ---------- */
+const funnelEl = ref<HTMLDivElement>();
+const dwellEl = ref<HTMLDivElement>();
+
+/** 每个在办阶段：平均停留、最长停留、后端给的超时线 */
+const dwellRows = computed(() =>
+  columns.value
+    .filter((col) => col.cards.length > 0)
+    .map((col) => {
+      const dwell = col.cards.map((c) => num(c.dwell_days));
+      const due = col.cards.map((c) => num(c.due_days)).filter((d) => d > 0);
+      return {
+        stage: col.title,
+        avg: round2(dwell.reduce((a, b) => a + b, 0) / dwell.length),
+        max: Math.max(...dwell),
+        due: due.length ? due[0] : 0,
+      };
+    }),
+);
+
+function funnelOption(): ChartOption | null {
+  const steps = funnelSteps.value;
+  if (!steps.length) return null;
+  return {
+    ...motion(),
+    tooltip: { formatter: (p: { name: string; value: number; dataIndex: number }) => `${p.name} ${p.value} 个${p.dataIndex ? ` ｜ 相邻转化 ${pctOf(steps[p.dataIndex].rate)}` : ' ｜ 漏斗起点'}` },
+    color: [chartColor.primary(), '#5a8ee6', '#83aee9', '#a7c4ee', '#c8dcf5'],
+    series: [
+      {
+        type: 'funnel',
+        left: '4%',
+        right: '4%',
+        top: 8,
+        bottom: 8,
+        minSize: '28%',
+        gap: 3,
+        label: { position: 'inside', color: '#fff', fontSize: 12, formatter: (p: { name: string; value: number; dataIndex: number }) => `${p.name} ${p.value}${p.dataIndex ? ` ｜ 转化 ${pctOf(steps[p.dataIndex].rate)}` : ''}` },
+        labelLine: { show: false },
+        itemStyle: { borderWidth: 0 },
+        emphasis: { label: { fontSize: 13, fontWeight: 700 } },
+        data: steps.map((s) => ({ name: s.label, value: s.value })),
+      },
+    ],
+  };
+}
+
+function dwellOption(): ChartOption | null {
+  const rows = dwellRows.value;
+  if (!rows.length) return null;
+  return {
+    ...motion(),
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    legend: { bottom: 0, itemWidth: 10, itemHeight: 8, textStyle: { fontSize: 11 } },
+    grid: { left: 40, right: 16, top: 18, bottom: 46 },
+    xAxis: { type: 'category', data: rows.map((r) => r.stage), axisLabel: { fontSize: 11, interval: 0, width: 56, overflow: 'truncate' } },
+    yAxis: { type: 'value', name: '天', nameTextStyle: { fontSize: 11, color: chartColor.muted() } },
+    series: [
+      { name: '平均停留', type: 'bar', barMaxWidth: 18, itemStyle: { color: chartColor.primary(), borderRadius: [3, 3, 0, 0] }, data: rows.map((r) => r.avg) },
+      { name: '最长停留', type: 'bar', barMaxWidth: 18, itemStyle: { color: chartColor.warning(), borderRadius: [3, 3, 0, 0] }, data: rows.map((r) => r.max) },
+      {
+        name: '超时线',
+        type: 'line',
+        symbol: 'rect',
+        symbolSize: 12,
+        lineStyle: { type: 'dashed', color: chartColor.danger(), width: 1.5 },
+        itemStyle: { color: chartColor.danger() },
+        data: rows.map((r) => r.due || null),
+      },
+    ],
+  };
+}
+
+useChart(funnelEl, funnelOption, [funnel]);
+useChart(dwellEl, dwellOption, [columns]);
 
 const thresholdTip = computed(() => {
   const t = thresholds.value;
@@ -1285,51 +1355,22 @@ onMounted(async () => {
   color: #dcdfe6;
   margin: 0 4px;
 }
-.funnel {
-  display: flex;
-  gap: 12px;
-  align-items: stretch;
-  min-height: 74px;
-  flex-wrap: wrap;
-}
-.fstep {
-  flex: 1 1 170px;
-  border: 1px solid #ebeef5;
-  border-radius: 4px;
-  padding: 6px 10px;
-  background: #fff;
-}
-.frow {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  font-size: 13px;
-}
-.flabel {
-  color: #606266;
-}
-.fvalue {
-  font-size: 19px;
-  font-weight: 600;
-}
-.fbar {
-  height: 6px;
-  background: #f0f2f5;
-  border-radius: 3px;
-  margin: 6px 0 4px;
-  overflow: hidden;
-}
-.fbar i {
-  display: block;
-  height: 100%;
-  background: linear-gradient(90deg, #409eff, #79bbff);
-}
-.frate {
+.funnel-sum {
   font-size: 12px;
-  color: #909399;
+  color: var(--tk-muted);
+  white-space: nowrap;
+}
+.funnel-sum b {
+  color: var(--tk-ink);
+}
+.funnel-sum .sep {
+  color: var(--tk-line);
+  margin: 0 4px;
 }
 .levels {
   margin-top: 6px;
+  font-size: 12px;
+  color: var(--tk-muted);
 }
 .board {
   display: grid;

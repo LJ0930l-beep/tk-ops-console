@@ -1771,12 +1771,13 @@ export function dashboardMetrics(user: CurrentUser, range: { start?: string; end
         handle: r.dim_name,
         gmv: r.gmv,
         orders: r.orders,
-        // 达人投产比：我们应得的返点 ÷ 我们掏的全部钱（物流 + 佣金 + 广告 + 费用）。
-        // 分子不用带货 GMV —— 那是品牌的生意；拿 GMV 做分子会让一个亏钱的达人排到榜首。
+        /**
+         * 这里**不给** roi。达人投产比的分母按 PRD C9 严格是「物流 + 寄样运费 + 坑位费 + 达人佣金」，
+         * 不含广告与公共费用；而利润引擎的达人维度只有物流与佣金，寄样运费/坑位费在合作单侧。
+         * 用能拿到的四项之外的一堆成本硬算，会得到和「达人 ROI」页对不上的第二个"投产比"
+         * （演示库上同一个人 0.02 对 1.90）—— 同名不同分母就是口径事故，宁可让前端去那一页读。
+         */
         rebate: canCost ? r.rebate : (null as unknown as number),
-        roi: canCost
-          ? adRoi(r.logistics + r.commission + r.ad_spend + r.expense, r.rebate)
-          : (null as unknown as number),
       })),
     content_type_split: Object.entries(CONTENT_TYPE_LABEL).map(([t, label]) => {
       const r = contentRows.get(`T${t}`);

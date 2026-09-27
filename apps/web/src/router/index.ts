@@ -111,8 +111,15 @@ router.onError((error) => {
   window.location.reload();
 });
 
-router.afterEach((to) => {
+router.afterEach(() => {
+  /**
+   * 标题取"当前真正停下来的那条路由"，而不是钩子传进来的 `to`。
+   * vue-router 对**被取消/被后一条导航取代**的导航同样会触发 afterEach，此时 `to` 是用户根本没到的那一页 ——
+   * 用 `to` 写标题的现场症状：连着切两个菜单（或脚本连发两次 hash 跳转）后，界面已经是 AI 对话，
+   * 标签页还写着「模型服务商」。currentRoute 只在导航成功时更新，所以它永远和屏幕上的一致。
+   */
+  const to = router.currentRoute.value;
   document.title = `${String(to.meta.title ?? '')} · TikTok 运营管理后台`;
-  // 这次导航成功了，就把「只重载一次」的闸门重新打开
+  // 走到这里说明这条导航落地了（或被取代后重写成当前页），把「只重载一次」的闸门重新打开
   sessionStorage.removeItem(CHUNK_RELOAD_KEY);
 });

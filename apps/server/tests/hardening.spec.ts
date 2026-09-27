@@ -286,6 +286,23 @@ describe('D6 异常原文只进服务端日志', () => {
     spy.mockRestore();
   });
 
+  it('请求体本身不合法是 400，不是"服务器内部错误"（调用方要能自己看出是哪的问题）', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const r = mockRes();
+    const syntax = Object.assign(new SyntaxError('Bad escaped character in JSON at position 47'), { type: 'entity.parse.failed', status: 400 });
+    errorHandler(syntax, {} as never, r as never, (() => undefined) as never);
+    expect(r.res.statusCode).toBe(400);
+    expect((r.res.body as { message: string }).message).toMatch(/合法 JSON/);
+    // 客户端报文错误不该刷服务端日志
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+
+    // 走一遍真 HTTP：确认 body-parser 抛的就是这个类型，而不是我们臆想的
+    const res = await http.post('/api/ai/chat').set(auth(token.boss)).set('content-type', 'application/json').send('{"content":"hi","model":"D:\\x"}');
+    expect(res.status).toBe(400);
+    expect((res.body as { message: string }).message).toMatch(/合法 JSON/);
+  });
+
   it('唯一约束冲突返回 409，AppError 原样透传状态码与文案', () => {
     const dup = mockRes();
     errorHandler(new Error('UNIQUE constraint failed: tk_shop.tk_shop_id'), {} as never, dup as never, (() => undefined) as never);

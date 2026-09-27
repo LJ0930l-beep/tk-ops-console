@@ -108,6 +108,16 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
     return;
   }
   const msg = err instanceof Error ? err.message : String(err);
+  // 请求体本身就没过 body-parser：这是调用方的报文问题，报 500 会把人引去翻服务端日志找一个不存在的 bug
+  const parseFail = (err as { type?: string } | undefined)?.type;
+  if (parseFail === 'entity.parse.failed' || parseFail === 'entity.too.large') {
+    res.status(400).json({
+      code: 40000,
+      message: parseFail === 'entity.too.large' ? '请求体超过 2MB 上限，请拆分后重试' : '请求体不是合法 JSON，请检查引号与转义',
+      data: null,
+    });
+    return;
+  }
   if (/UNIQUE constraint failed|ER_DUP_ENTRY|Duplicate entry/i.test(msg)) {
     res.status(409).json({ code: 40900, message: '编号/唯一标识重复，请检查后重试', data: null });
     return;

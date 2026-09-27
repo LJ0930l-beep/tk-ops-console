@@ -5,7 +5,7 @@ title: AI 助手（模型服务商接入 + 对话 + 白名单工具写入）
 labels: [backend, frontend, phase-3, ai]
 blocked-by: [EPIC-9-01]
 estimate: 4d
-status: 已交付（2026-09-26）
+status: 已交付（2026-09-26；反代多模型 2026-09-27）
 ---
 
 ## 背景
@@ -40,15 +40,28 @@ status: 已交付（2026-09-26）
    AI 也查不到、更处理不了"。
 4. 对话编排 `services/ai/chat.ts`：会话归属、历史裁剪（系统提示与本轮提问永不裁）、多轮工具循环、
    三处落库（`ai_message` / `ai_call_log` / `ai_action_log`）、轮数用完必须留说明。
-5. 后端 `modules/ai.routes.ts` 15 个端点，整段 `requireMenu('ai')`；`npm run openapi` 重生成契约与 `ApiPath`。
+5. 后端 `modules/ai.routes.ts` 16 个端点，整段 `requireMenu('ai')`；`npm run openapi` 重生成契约与 `ApiPath`。
 6. 前端三页：`views/ai/ChatView.vue`（会话列表 + 消息流 + 工具卡片 + 用量；未配置时把入口指到配置页并禁用输入）、
-   `ProviderList.vue`（ResourcePage CRUD + 厂商预设联动 + 测活）、`AiAudit.vue`（用量卡 + 出网调用/AI 写入两页签）。
-7. 测试：`tests/ai.spec.ts` 15 例（注入桩 transport 离线对拍两家协议报文、工具循环与写库留痕、
+   `ProviderList.vue`（ResourcePage CRUD + 厂商预设联动 + 测活 + 拉模型）、`AiAudit.vue`（用量卡 + 出网调用/AI 写入两页签）。
+7. 测试：`tests/ai.spec.ts` 21 例（注入桩 transport 离线对拍两家协议报文、工具循环与写库留痕、
    白名单外工具不执行、越权写入被拒且留痕、密钥不出接口也不出错误文案、连不上服务商时文案要指向 base_url、
    Gemini 用 400 报密钥错误时也不能把原始 JSON 甩到页面上、
-   问"本月"要按自然月取数而不是近 30 天、处置预警的审计行指向被改的那条预警、轮数上限）；
+   问"本月"要按自然月取数而不是近 30 天、处置预警的审计行指向被改的那条预警、轮数上限、
+   一家服务商带一串模型：两家协议的 `/models` 报文对拍 / 并集不覆盖手填 / 上限截断 / 按次选的模型只认清单）；
    `e2e/ai.spec.ts` 3 例（未配置报错面、新建服务商后密钥读不回来、测活失败要回原因）；
    `e2e/pages.spec.ts` 纳入 3 个新页面。
+
+## 追加轮次：一家服务商带多个模型（2026-09-27）
+
+用户实际用的是 **Antigravity Tools 反代出来的 Google 接口** —— 一个地址背后是几十个模型名，
+"一行服务商只有一个 `model`" 逼着人为每个模型建一行（同名还要绕唯一约束），因此补：
+
+- `ai_provider.models`（可选清单，逗号分隔）+ 老库原地 `addColumnIfMissing`，两份方言 DDL 同步；
+- `GET {apiRoot}/models`：两家协议各认自己的清单形状（Gemini 滤掉不支持生成的模型、剥 `models/` 前缀），
+  密钥只回头部；新端点 `POST /api/ai/providers/:id/models`（前端「拉模型」）；
+- `POST /api/ai/chat` 收可选 `model`，**必须命中这家清单**，并把最终用的模型同步进 `ai_conversation.model`；
+- 接口回 `model_list` / `model_count`（口径只在 `parseModels()` 一处），前端两处界面：配置页的清单 textarea +
+  模型数、对话页的按次模型下拉。
 
 ## 验收
 
@@ -64,4 +77,6 @@ status: 已交付（2026-09-26）
 - 流式输出（SSE）：`EventSource` 带不上 `Authorization` 头，要先改鉴权方式，另开工单。
 - 更多写工具（费用登记、候选品登记、寄样单）：都要先把 route 里的内联写入抽成 service，再进名单。
 - 花费预算与限流（按人按天封顶）：目前只有 `ai_call_log` 可查，没有硬闸门。
-- 真实服务商联调：与 TikTok real 模式同一类阻塞 —— 需要用户提供 key，CI 里不配。
+- 真实服务商联调：公网厂商与 TikTok real 模式同一类阻塞 —— 需要用户提供 key，CI 里不配。
+  已经做过的是**本机离线真实往返**（`llama.cpp` 的 OpenAI 兼容服务填 `http://127.0.0.1:8080/v1`，回环允许 http），
+  拉模型与按次选模型同样可以在这个口子上手工验，不需要等公网 key。

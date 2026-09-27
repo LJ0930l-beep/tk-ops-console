@@ -454,7 +454,7 @@
 
 | 子页 | key / path | 表 | 后端 | 前端 |
 | --- | --- | --- | --- | --- |
-| AI 对话 | `ai:chat` → `/ai/chat` | `ai_conversation` + `ai_message` + `ai_call_log` + `ai_action_log` | `ai.routes.ts`（15 端点） | `views/ai/ChatView.vue` |
+| AI 对话 | `ai:chat` → `/ai/chat` | `ai_conversation` + `ai_message` + `ai_call_log` + `ai_action_log` | `ai.routes.ts`（16 端点） | `views/ai/ChatView.vue` |
 | 模型服务商 | `ai:provider` → `/ai/providers` | `ai_provider` | 同上 | `views/ai/ProviderList.vue` |
 | AI 调用审计 | `ai:audit` → `/ai/audit` | `ai_call_log` + `ai_action_log` | 同上 | `views/ai/AiAudit.vue` |
 
@@ -468,11 +468,17 @@
 | --- | --- | --- |
 | `GET/POST /api/ai/providers`、`PUT/DELETE /:id` | 服务商 CRUD | 读取走字段白名单，**密文列 `api_key_enc` 与明文 key 都不出接口**（只回 `has_key`）；`base_url` 必须 https（本机回环例外）且命中 `AI_ALLOWED_HOSTS`（配了才校验）；编辑时 key 留空＝保持原值 |
 | `POST /api/ai/providers/:id/test` | 测活：一次最小往返 | 结果与失败原因（`maskError` 后）落到该行上，界面上看得见"上次测活：失败 + 为什么" |
+| `POST /api/ai/providers/:id/models` | 拉模型：问服务商"你背后有哪几个模型" | `GET {apiRoot}/models`，两家协议各自的清单形状都认（`data[]` / `models[]`，Gemini 滤掉 `embed`/`image` 这类不能生成的）；**只往清单里加，不覆盖手工填的名字**；超过 `MAX_MODELS`(60) 截断并在响应里说明；这一步用 `resolveRow` 而不是 `resolveProvider`（新加的网关常常还没模型，正是这一步要解决的） |
 | `GET /api/ai/tools` | 工具清单（名称/中文标签/是否写入） | 前端把"AI 能干什么"显示出来，不让人猜 |
-| `POST /api/ai/chat` | 一轮对话（非流式） | `AI_ENABLED=false` → 503；没可用服务商 → 409；单条 >8000 字 → 400；工具轮数上限 `AI_MAX_TOOL_ROUNDS`，用完必须留一条说明而不是空回复 |
+| `POST /api/ai/chat` | 一轮对话（非流式） | 可带 `model`（这家清单里的名字，不带就用服务商的默认模型）；`AI_ENABLED=false` → 503；没可用服务商 → 409；单条 >8000 字 → 400；工具轮数上限 `AI_MAX_TOOL_ROUNDS`，用完必须留一条说明而不是空回复 |
 | `GET /api/ai/conversations`、`/:id`、`DELETE /:id` | 会话 | 只能看/删自己的会话；别人的会话一律 404（不区分 403/404，免得被拿来探测 ID） |
 | `GET /api/ai/calls`、`/calls/usage`、`/actions` | 审计与用量 | SELF 角色只看到自己发起的调用与花费，主管/老板看全部 |
 
+- **一家服务商 = 一串模型**（反代/网关场景，如 Antigravity Tools 后面挂着 2.5 pro / flash / 一堆别的名字）：
+  `ai_provider.model` 是**默认模型**，`ai_provider.models` 是**除默认之外的可选清单**（逗号分隔，`parseModels()` 一处解析，换行/逗号/分号/顿号都算分隔符）。
+  界面上点「拉模型」让服务商自己报清单，对话页再按**这一次问答**挑一个 —— 不必为几十个模型建几十行，也不用改一次地址就重配一遍。
+  按次挑的模型**只认这家清单里的名字**（认不到就 400 并回可选项），否则这个入参就把内部系统变成了任意上游的转发器。
+  挑中的模型会同步进 `ai_conversation.model`，会话与 `ai_call_log` 记的都是它，事后能查出"这句是哪个模型说的"。
 - **为什么非流式**：内部系统一问一答够用，而 `EventSource` 带不上 `Authorization` 头 —— 要上流式得先改鉴权方式（cookie 或短期票据），那是另一整件事。
 - **前端超时必须单独放宽**：服务端出网给模型最多 `AI_HTTP_TIMEOUT_MS`（默认 45s），跟着 axios 默认的 30s 会先把请求掐掉，表现是"AI 明明在算，界面报了个网络错误"。
 - **审计三张表各司其职**：`ai_call_log` 记每次出网（token/耗时/估算花费/失败原因），`ai_message` 记对话原文（含 `tool_calls`），`ai_action_log` 只记写工具，字段是"哪条消息、哪个工具、改了哪张表哪一行、被拒还是失败"。
@@ -622,7 +628,7 @@
 | 24 | `sys_op_log` | 操作日志（不可改）| 1 | `user_id, op_time, module, action, target_table, target_id, before_after(JSON), ip` | — | `[已实现]` |
 | 25 | `sync_log` | 同步日志 | 1 | `task_type, shop_id, window_start, window_end, fetched, inserted, updated, failed, status, error_msg, started_at, finished_at` | — | `[已实现]` 查询侧 |
 | 26 | `sys_dict` | 数据字典 | 1 | `dict_type, dict_value, dict_label, sort, status` | `ux_dict(dict_type,dict_value)` | `[已实现]` |
-| 27 | `ai_provider` | 模型服务商 | 13 AI | `name, vendor, protocol, base_url, model, api_key_enc, temperature, max_output_tokens, price_in/out_per_1k, supports_tools, enabled, is_default, last_test_*` | `name` UNIQUE(软删过滤) | `[已实现]` |
+| 27 | `ai_provider` | 模型服务商 | 13 AI | `name, vendor, protocol, base_url, model, models, api_key_enc, temperature, max_output_tokens, price_in/out_per_1k, supports_tools, enabled, is_default, last_test_*` | `name` UNIQUE(软删过滤) | `[已实现]` |
 | 28 | `ai_conversation` | AI 会话头 | 13 | `user_id, title, provider_id, model, message_count, last_message_at` | `ix_ai_conv_user(user_id,id)` | `[已实现]` |
 | 29 | `ai_message` | AI 消息 | 13 | `conversation_id, role, content, tool_calls(JSON), tool_name, call_id, prompt/completion_tokens, latency_ms` | `ix_ai_msg_conv(conversation_id,id)` | `[已实现]` |
 | 30 | `ai_call_log` | AI 出网调用审计 | 13 | `user_id, provider_id, conversation_id, model, status, tokens, latency_ms, cost_cny, tool_count, error_msg` | `ix_ai_call_user`、`ix_ai_call_time` | `[已实现]` |

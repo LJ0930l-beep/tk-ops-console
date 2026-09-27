@@ -1,6 +1,6 @@
 <template>
   <div class="page">
-    <PageHeader title="模型服务商" sub="一家服务商 = 一个模型入口。API Key 用 AES-256-GCM 加密存库，任何读接口都不会回传它，界面上只看「已配置」">
+    <PageHeader title="模型服务商" sub="一家服务商可以带一串模型：反代/网关后面挂几十个名字，配一次地址就能全部选到。API Key 用 AES-256-GCM 加密存库，任何读接口都不会回传它，界面上只看「已配置」">
       <template #tag>
         <el-tag size="small" :type="allowedHosts.length ? 'success' : 'warning'">
           {{ allowedHosts.length ? `出网白名单 ${allowedHosts.length} 个域` : '未设置 AI_ALLOWED_HOSTS：任何 https 地址都能配' }}
@@ -16,10 +16,11 @@
       :search-fields="searchFields"
       :form-fields="formFields"
       :default-page-size="20"
-      :action-width="210"
+      :action-width="260"
       dialog-width="720px"
     >
       <template #actions="{ row, reload }">
+        <el-button link type="primary" size="small" :loading="pulling === Number(row.id)" @click="pull(row, reload)">拉模型</el-button>
         <el-button link type="primary" size="small" :loading="testing === Number(row.id)" @click="test(row, reload)">测活</el-button>
       </template>
     </ResourcePage>
@@ -42,19 +43,23 @@ import PageHeader from '@/components/PageHeader.vue';
 
 const rp = ref();
 const testing = ref(0);
+const pulling = ref(0);
 const allowedHosts = ref<string[]>([]);
 
 const vendorOptions = Object.entries(AI_VENDOR_LABELS).map(([value, label]) => ({ value, label }));
 const protocolOptions = Object.values(AI_PROTOCOL).map((v) => ({ value: v, label: v === 'openai' ? 'OpenAI 兼容（GPT / DeepSeek / 网关）' : 'Google Gemini 原生' }));
 const yesNo = [{ value: 1, label: '是' }, { value: 0, label: '否' }];
+/** has_key 是接口算出来的布尔值，不是 1/0 列：套用 yesNo 会匹配不上，单元格里直接印出 "true" */
+const keyState = [{ value: 'true', label: '已配置', type: 'success' as const }, { value: 'false', label: '未配置', type: 'warning' as const }];
 
 const columns = computed<ColumnDef[]>(() => [
   { prop: 'name', label: '名称', width: 150 },
   { prop: 'vendor', label: '厂商', width: 110 },
   { prop: 'protocol', label: '协议', width: 90 },
-  { prop: 'model', label: '模型', width: 170 },
+  { prop: 'model', label: '默认模型', width: 170 },
+  { prop: 'model_count', label: '模型数', width: 90, align: 'center' },
   { prop: 'base_url', label: '接口地址', minWidth: 230 },
-  { prop: 'has_key', label: 'API Key', width: 96, type: 'tag', options: yesNo },
+  { prop: 'has_key', label: 'API Key', width: 96, type: 'tag', options: keyState },
   { prop: 'supports_tools', label: '支持函数调用', width: 120, type: 'tag', options: yesNo },
   { prop: 'enabled', label: '启用', width: 80, type: 'tag', options: yesNo },
   { prop: 'is_default', label: '默认', width: 80, type: 'tag', options: yesNo },
@@ -63,7 +68,7 @@ const columns = computed<ColumnDef[]>(() => [
 ]);
 
 const searchFields = computed<SearchDef[]>(() => [
-  { key: 'keyword', label: '名称/模型', placeholder: '模糊' },
+  { key: 'keyword', label: '名称/模型', placeholder: '模糊，清单里的也算' },
   { key: 'vendor', label: '厂商', type: 'select', options: vendorOptions },
   { key: 'enabled', label: '启用', type: 'select', options: yesNo },
 ]);
@@ -90,7 +95,21 @@ const formFields = computed<FormFieldDef[]>(() => [
   },
   { key: 'protocol', label: '报文协议', type: 'select', required: true, span: 12, options: protocolOptions, default: AI_PROTOCOL.OPENAI },
   { key: 'base_url', label: '接口地址', required: true, span: 12, placeholder: 'https://api.openai.com/v1', default: AI_VENDOR_PRESETS.openai.base_url },
-  { key: 'model', label: '模型名', required: true, span: 12, placeholder: 'gpt-4o-mini / deepseek-chat / gemini-2.5-flash', default: AI_VENDOR_PRESETS.openai.model },
+  {
+    key: 'model',
+    label: '默认模型',
+    span: 12,
+    placeholder: '不确定的话先留空，保存后点「拉模型」',
+    default: AI_VENDOR_PRESETS.openai.model,
+  },
+  {
+    key: 'models',
+    label: '可选模型清单',
+    type: 'textarea',
+    span: 24,
+    placeholder:
+      '反代 / 自建网关一家后面常挂几十个模型：一行一个（或逗号分隔）粘在这里，或者直接保存后点列表里的「拉模型」让服务商自己报。对话时可以逐条挑，不必为一堆模型建很多行。',
+  },
   { key: 'api_key', label: 'API Key', span: 12, placeholder: '编辑时留空＝保持原密钥不变；填 null 才清空' },
   { key: 'temperature', label: 'temperature', type: 'number', span: 6, precision: 2, min: 0, max: 2, default: 0.3 },
   { key: 'max_output_tokens', label: '最大输出 token', type: 'number', span: 6, min: 64, max: 32000, default: 1024 },
@@ -100,6 +119,34 @@ const formFields = computed<FormFieldDef[]>(() => [
   { key: 'enabled', label: '启用', type: 'switch', span: 8, default: 1 },
   { key: 'is_default', label: '设为默认', type: 'switch', span: 8, default: 0 },
 ]);
+
+interface PullResult {
+  models: string[];
+  default_model: string;
+  fetched_total: number;
+  added: number;
+  truncated: boolean;
+}
+
+/**
+ * 拉模型：让服务商自己报"我这里有哪几个模型"。
+ * 反代/网关的模型名是人抄不全的，而这一步的失败原因（地址不对 / 密钥不对 / 没开 /models）
+ * 都直接决定下一步做什么，所以把服务端的原文案原样显示出来，不压成一句"拉取失败"。
+ */
+async function pull(row: Record<string, unknown>, reload: () => void): Promise<void> {
+  const id = Number(row.id);
+  pulling.value = id;
+  try {
+    const res = await apiPost<PullResult>(`/ai/providers/${id}/models`, {});
+    const cut = res.truncated ? `（网关报了 ${res.fetched_total} 个，只存前 ${res.models.length} 个）` : '';
+    ElMessage.success(`取到 ${res.models.length} 个模型，新增 ${res.added} 个${cut}；默认 ${res.default_model || '（未设）'}`);
+  } catch (e) {
+    ElMessage.error(`拉模型失败：${errMsg(e)}`);
+  } finally {
+    pulling.value = 0;
+    reload();
+  }
+}
 
 async function test(row: Record<string, unknown>, reload: () => void): Promise<void> {
   const id = Number(row.id);

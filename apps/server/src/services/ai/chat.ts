@@ -69,6 +69,8 @@ export async function runChat(input: {
   content: string;
   conversationId?: number;
   providerId?: number;
+  /** 本轮改用哪个模型：只能是该服务商清单里的名字，由 resolveProvider 把关 */
+  model?: string;
   /** 只给测试注入桩 transport 用；生产不传，走真实 fetch */
   transport?: Transport;
 }): Promise<ChatResult> {
@@ -77,11 +79,16 @@ export async function runChat(input: {
   if (!content) throw badRequest('消息不能为空');
   if (content.length > 8000) throw badRequest('单条消息最长 8000 字，请先精简或分几条问');
 
-  const { provider, client, cfg } = providerClient(input.providerId, input.transport);
+  const { provider, client, cfg } = providerClient(input.providerId, input.transport, input.model);
 
   let conv: ConversationRow;
   if (input.conversationId) {
     conv = loadConversation(input.conversationId, input.user);
+    // 会话里换模型就记成新的一次：审计与"这条回答是哪个模型说的"要对得上
+    if (conv.model !== cfg.model) {
+      update('ai_conversation', conv.id, { model: cfg.model, provider_id: provider.id });
+      conv.model = cfg.model;
+    }
   } else {
     const id = insert('ai_conversation', {
       user_id: input.user.id,

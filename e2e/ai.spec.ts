@@ -64,7 +64,9 @@ test.describe('AI 助手', () => {
     await expect(dialog).toBeVisible();
     await field(page, '名称').locator('input').fill(PROVIDER_NAME);
     await field(page, '接口地址').locator('input').fill('https://api.e2e.invalid/v1');
-    await field(page, '模型名').locator('input').fill('gpt-4o-mini');
+    await field(page, '默认模型').locator('input').fill('gpt-4o-mini');
+    // 反代/网关一家挂一串模型：清单粘进去要去重、并把个数摆在列表上（不为一堆模型建很多行）
+    await field(page, '可选模型清单').locator('textarea').fill('gpt-4o\ngpt-4o-mini，gpt-4o-2024-08-06');
     await field(page, 'API Key').locator('input').fill(KEY);
     await clearMessages(page);
     await dialog.getByRole('button', { name: '保存' }).click();
@@ -72,6 +74,8 @@ test.describe('AI 助手', () => {
 
     const row = page.locator('.el-table__body tr').filter({ hasText: PROVIDER_NAME });
     await expect(row).toBeVisible();
+    // 清单里的 gpt-4o-mini 与默认模型重复，去重后这一行应该是 3 个可用模型
+    await expect(row.getByText('3', { exact: true })).toBeVisible();
     // 整页文本里找密钥：`.page` 会同时命中页面根节点与 ResourcePage 的根节点（strict mode 直接报错），
     // 所以取 #app 的全文。
     const visible = await page.locator('#app').innerText();

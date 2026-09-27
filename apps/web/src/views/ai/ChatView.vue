@@ -2,12 +2,15 @@
   <div class="page">
     <PageHeader title="AI 对话" :sub="headSub">
       <template #tag>
-        <el-tag v-if="current" size="small" type="info">{{ current.name }} · {{ current.model }}</el-tag>
+        <el-tag v-if="current" size="small" type="info">{{ current.name }} · {{ activeModel || '未选模型' }}</el-tag>
         <el-tag v-else size="small" type="warning">未选择服务商</el-tag>
       </template>
       <template #actions>
         <el-select v-model="providerId" placeholder="默认服务商" clearable style="width: 220px" :loading="loadingProviders">
-          <el-option v-for="p in providers" :key="p.id" :label="`${p.name}（${p.model}）`" :value="p.id" />
+          <el-option v-for="p in providers" :key="p.id" :label="providerLabel(p)" :value="p.id" />
+        </el-select>
+        <el-select v-if="showModelPicker" v-model="modelName" :placeholder="`默认：${current?.model || '未设'}`" filterable style="width: 240px">
+          <el-option v-for="m in modelOptions" :key="m" :label="m === current?.model ? `${m}（默认）` : m" :value="m" />
         </el-select>
         <el-button :icon="Plus" @click="newChat">新对话</el-button>
       </template>
@@ -111,7 +114,7 @@
  *  - 超时必须单独放宽：出网给模型的超时是服务端 45s，前端 axios 默认 30s 会先把请求掐了，
  *    表现为"AI 明明在算，界面报了个网络错误"。
  */
-import { computed, nextTick, onMounted, ref } from 'vue';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { Plus } from '@element-plus/icons-vue';
@@ -127,7 +130,13 @@ interface ChatMessage {
   latency_ms?: number;
   ok?: boolean;
 }
-interface Provider { id: number; name: string; model: string }
+interface Provider {
+  id: number;
+  name: string;
+  model: string;
+  /** 该服务商可用的模型清单（默认模型排第一）：反代一家能拉到几十个 */
+  model_list?: string[];
+}
 interface Conversation { id: number; title: string; message_count: number; last_message_at?: string | null; created_at?: string }
 
 const HINTS = [
@@ -146,17 +155,32 @@ const conversationId = ref<number | undefined>();
 const messages = ref<ChatMessage[]>([]);
 const draft = ref('');
 const sending = ref(false);
+/** 本轮要用的模型：空串 = 用该服务商的默认模型 */
+const modelName = ref('');
 const tools = ref<{ name: string; label: string; write: boolean }[]>([]);
-const usage = ref<{ prompt_tokens?: number; completion_tokens?: number; cost_cny?: number; rounds?: number; provider?: string }>({});
+const usage = ref<{ prompt_tokens?: number; completion_tokens?: number; cost_cny?: number; rounds?: number; provider?: string; model?: string }>({});
 const scrollerRef = ref();
 
 const current = computed(() => providers.value.find((p) => p.id === providerId.value) ?? (providers.value.length === 1 ? providers.value[0] : null));
+/** 一家服务商的可选模型：清单只有一个时下拉就没必要出现，否则反代拉回的几十个名字会挤在按钮旁边 */
+const modelOptions = computed(() => (current.value?.model_list?.length ? current.value.model_list : []));
+const showModelPicker = computed(() => modelOptions.value.length > 1);
+/** 这一枪实际会打到哪个模型：没挑就是服务商的默认模型 */
+const activeModel = computed(() => modelName.value || current.value?.model || '');
 const headSub = 'AI 不凭记忆报数：要数字必须调工具现取；写入只认白名单，且落库的"操作人"是你本人';
 const toolNames = computed(() => tools.value.map((t) => t.label).join(' / ') || '（还没加载到工具清单）');
 const usageText = computed(() => {
   const u = usage.value;
   if (!u.prompt_tokens) return '本轮还没有用量统计';
-  return `${u.provider ?? ''} · 输入 ${u.prompt_tokens} / 输出 ${u.completion_tokens} token · ${u.rounds} 轮${u.cost_cny ? ` · 估算 ¥${u.cost_cny}` : ''}`;
+  return `${u.provider ?? ''}${u.model ? ` / ${u.model}` : ''} · 输入 ${u.prompt_tokens} / 输出 ${u.completion_tokens} token · ${u.rounds} 轮${u.cost_cny ? ` · 估算 ¥${u.cost_cny}` : ''}`;
+});
+
+/** 一家服务商在列表里叫什么：多个模型时把个数摆出来，不然人以为这家只有一个模型 */
+const providerLabel = (p: Provider) => (p.model_list && p.model_list.length > 1 ? `${p.name}（${p.model_list.length} 个模型）` : `${p.name}（${p.model || '未设模型'}）`);
+
+/** 换服务商就把模型选择作废：上一家的名字不在这一家的清单里，带着发只会换回一句报错 */
+watch(providerId, () => {
+  modelName.value = '';
 });
 
 const roleLabel = (r: string) => (r === 'user' ? '我' : r === 'tool' ? '工具返回' : '助手');
@@ -194,7 +218,10 @@ async function openConversation(id: number): Promise<void> {
   conversationId.value = id;
   usage.value = {};
   try {
-    const res = await apiGet<{ messages: ChatMessage[] }>(`/ai/conversations/${id}`);
+    const res = await apiGet<{ conversation?: { model?: string | null }; messages: ChatMessage[] }>(`/ai/conversations/${id}`);
+    /** 把选择器对到这条会话上次实际用的模型上（不在当前这家清单里就不动，别摆一个发不出去的选择） */
+    const used = String(res.conversation?.model ?? '');
+    if (used && (current.value?.model_list ?? []).includes(used)) modelName.value = used;
     messages.value = (res.messages ?? []).map((m) => ({
       role: m.role,
       content: m.content,
@@ -239,11 +266,15 @@ async function send(): Promise<void> {
   try {
     const res = payload<{ conversation_id: number; provider: Provider; messages: ChatMessage[]; usage: { prompt_tokens: number; completion_tokens: number; cost_cny: number; rounds: number } }>(
       // 单独放宽超时：服务端出网给模型最多 45s，跟着 axios 默认的 30s 会先把这一枪掐掉
-      await http.post('/ai/chat', { content, conversation_id: conversationId.value, provider_id: current.value?.id }, { timeout: 60_000 }),
+      await http.post(
+        '/ai/chat',
+        { content, conversation_id: conversationId.value, provider_id: current.value?.id, model: activeModel.value || undefined },
+        { timeout: 60_000 },
+      ),
     );
     conversationId.value = res.conversation_id;
     messages.value.push(...(res.messages ?? []));
-    usage.value = { ...res.usage, provider: res.provider?.name };
+    usage.value = { ...res.usage, provider: res.provider?.name, model: res.provider?.model };
     await loadConversations();
   } catch (e) {
     const msg = errMsg(e);

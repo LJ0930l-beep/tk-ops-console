@@ -2042,6 +2042,57 @@
         }
       }
     },
+    "/api/ai/providers/:id/models": {
+      "post": {
+        "tags": [
+          "ai"
+        ],
+        "operationId": "post_ai_providers_id_models",
+        "description": "拉模型：问服务商\"你这里有哪些模型\"，把清单并进这一行。\n反代/网关（如自建 Gemini 代理）后面挂了哪些模型只有它自己知道，让人手抄不现实。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "统一信封",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "x-router": "ai.routes.ts#aiRouter",
+        "x-menu": [
+          "ai"
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ai/providers/:id/test": {
       "post": {
         "tags": [

@@ -5,19 +5,22 @@
  * 全部**注入桩 transport**：桩只替掉 fetch 这一层，报文形态、工具循环、落库、脱敏
  * 走的都是生产代码。这样 CI 不需要任何真实 key，也不会因为网络抖动变 flaky。
  *
- * 六件必须钉死的事：
+ * 八件必须钉死的事：
  *  1. 没配服务商 → 明确可读的 409，不是一句 undefined；
  *  2. API Key 永不出接口、永不出错误文案（含服务商把 key 回显在 401 body 里的情况）；
  *  3. 工具白名单之外的名字不执行；
  *  4. 写工具真的写进业务表，并且 op_log + ai_action_log 两处留痕、操作人是发起对话的人；
  *  5. 没有对应菜单的人，AI 也替他写不了（越权返回被拒且留痕）；
- *  6. 两家协议的报文形状各自对拍（systemInstruction / functionDeclarations / x-goog-api-key）。
+ *  6. 两家协议的报文形状各自对拍（systemInstruction / functionDeclarations / x-goog-api-key）；
+ *  7. 一家服务商能带一串模型：/models 拉回来的清单按协议各自解析，密钥仍旧只在头里；
+ *  8. 按次选的模型只认这家清单里的名字 —— 放开它就等于让本系统替任何人打任意模型。
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { all, get, insert } from '../src/core/db.js';
 import { encryptSecret, loadUser } from '../src/core/auth.js';
 import type { RawResponse, Transport } from '../src/services/tiktok/realClient.js';
 import { runChat } from '../src/services/ai/chat.js';
+import { MAX_MODELS, normalizeModelInput, parseModels, pullModels } from '../src/services/ai/registry.js';
 import { ACCOUNTS, auth, boot, DEFAULT_PASSWORD, login } from './helper.js';
 
 let ctx: ReturnType<typeof boot>;
@@ -313,6 +316,100 @@ describe('Gemini 协议对拍', () => {
     const second = JSON.stringify(calls[1].body.contents);
     expect(second).toContain('functionResponse');
     expect(out.messages[out.messages.length - 1].role).toBe('assistant');
+  });
+});
+
+describe('一家服务商带多个模型（反代 / 自建网关）', () => {
+  /** 记录每一次出网的方法 + URL + 头，用来对"拉模型"这一枪打在哪 */
+  function probeStub(reply: unknown): { transport: Transport; sent: { method: string; url: string; headers: Record<string, string> }[] } {
+    const sent: { method: string; url: string; headers: Record<string, string> }[] = [];
+    const transport: Transport = async (url, init) => {
+      sent.push({ method: String(init.method ?? 'GET'), url, headers: init.headers });
+      return { status: 200, headers: { get: () => null }, text: async () => JSON.stringify(reply) };
+    };
+    return { transport, sent };
+  }
+
+  it('Gemini 原生协议拉模型：打 /v1beta/models、密钥在头里、只留能对话的模型', async () => {
+    const id = addProvider('反代 Gemini', {
+      vendor: 'custom', protocol: 'gemini', base_url: 'https://gw.unit-test.invalid/v1beta', model: 'gemini-2.5-flash',
+    });
+    const { transport, sent } = probeStub({
+      models: [
+        { name: 'models/gemini-2.5-flash', supportedGenerationMethods: ['generateContent', 'streamGenerateContent'] },
+        { name: 'models/gemini-2.5-pro', supportedGenerationMethods: ['generateContent'] },
+        { name: 'models/text-embedding-004', supportedGenerationMethods: ['embedContent'] },
+      ],
+    });
+    const out = await pullModels(id, transport);
+
+    expect(sent[0].method).toBe('GET');
+    expect(sent[0].url).toBe('https://gw.unit-test.invalid/v1beta/models');
+    expect(sent[0].headers['x-goog-api-key']).toBe(KEY);
+    // 前缀剥成模型名（对话端点要拼进 URL），embed 这类挑不到对话上
+    expect(out.models).toEqual(['gemini-2.5-flash', 'gemini-2.5-pro']);
+    expect(out.default_model).toBe('gemini-2.5-flash');
+    const row = get<{ model: string; models: string }>(`SELECT model, models FROM ai_provider WHERE id = ?`, id)!;
+    // 存储口径：默认模型只在 model 列，清单列不重复存它
+    expect(row.model).toBe('gemini-2.5-flash');
+    expect(row.models).toBe('gemini-2.5-pro');
+  });
+
+  it('OpenAI 兼容网关没写 /v1 时补上，重复拉取不会把清单越拉越长', async () => {
+    const id = addProvider('反代 OpenAI', { vendor: 'custom', base_url: 'http://127.0.0.1:9999' });
+    const { transport, sent } = probeStub({ data: [{ id: 'deepseek-chat' }, { id: 'kimi-k2' }] });
+    const first = await pullModels(id, transport);
+    expect(sent[0].url).toBe('http://127.0.0.1:9999/v1/models');
+    expect(first.added).toBe(2);
+    const second = await pullModels(id, transport);
+    expect(second.models).toEqual(first.models);
+    expect(second.added).toBe(0);
+    expect(sent[1].headers.authorization).toBe(`Bearer ${KEY}`);
+  });
+
+  it('网关报几十个模型时按上限截断，并如实告诉调用方截了', async () => {
+    const id = addProvider('大网关', { vendor: 'custom', base_url: 'http://127.0.0.1:9998' });
+    const { transport } = probeStub({ data: Array.from({ length: MAX_MODELS + 20 }, (_, i) => ({ id: `model-${i}` })) });
+    const out = await pullModels(id, transport);
+    expect(out.fetched_total).toBe(MAX_MODELS + 20);
+    expect(out.models).toHaveLength(MAX_MODELS);
+    expect(out.truncated).toBe(true);
+  });
+
+  it('清单里的模型确实按次生效，清单外的连网都不出（不许把本系统当代理）', async () => {
+    const id = addProvider('按次选模型', { models: 'gpt-4o-test' });
+    // 服务商回包里带自己实际用的模型名（两家都会把请求里那个名字带回来），所以按请求体回显
+    const echo = (b: Record<string, unknown>) => ({ ...oaReply('换了这个模型回答。'), model: String(b.model) });
+    const { transport, calls } = stubTransport([echo]);
+    const out = await runChat({ user: loadUser(1)!, content: '用另一个模型再答一次', providerId: id, model: 'gpt-4o-test', transport });
+    expect(calls[0].body.model).toBe('gpt-4o-test');
+    expect(out.provider.model).toBe('gpt-4o-test');
+    expect(get<{ model: string }>(`SELECT model FROM ai_conversation WHERE id = ?`, out.conversation_id)?.model).toBe('gpt-4o-test');
+    expect(get<{ model: string }>(`SELECT model FROM ai_call_log WHERE provider_id = ? ORDER BY id DESC LIMIT 1`, id)?.model).toBe('gpt-4o-test');
+
+    await expect(
+      runChat({ user: loadUser(1)!, content: '换个模型', providerId: id, model: 'gpt-5-evil', transport }),
+    ).rejects.toThrow(/清单里没有/);
+    // 第二次没有再出网：拒绝发生在拼 URL 之前
+    expect(calls).toHaveLength(1);
+  });
+
+  it('新增时可以只给清单不给默认模型，接口把清单摊平成 model_list 给前端', async () => {
+    const res = await ctx.http
+      .post('/api/ai/providers')
+      .set(auth(token.boss))
+      .send({ name: '只给清单', vendor: 'custom', base_url: 'https://gw.unit-test.invalid/v1', models: 'a-pro\na-flash，a-flash；a-mini' });
+    expect(res.status).toBe(200);
+    const detail = await ctx.http.get(`/api/ai/providers/${res.body.data.id}`).set(auth(token.boss));
+    expect(detail.body.data.model_list).toEqual(['a-pro', 'a-flash', 'a-mini']);
+    expect(detail.body.data.model).toBe('a-pro');
+    expect(detail.body.data.model_count).toBe(3);
+  });
+
+  it('模型清单的拆法是同一份：换行/逗号/分号/顿号都吃、去重、不掺空白', () => {
+    const list = parseModels({ model: ' x ', models: 'y,z\n z ;  w、y' });
+    expect(list).toEqual(['x', 'y', 'z', 'w']);
+    expect(normalizeModelInput({ model: '', models: null }, { models: 'a,b,a' }).model).toBe('a');
   });
 });
 

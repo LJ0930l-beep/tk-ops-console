@@ -52,8 +52,9 @@ interface PostResult {
   json: Record<string, unknown>;
 }
 
-/** 一次 POST：超时、退避重试、非 2xx 翻译、失败文案脱敏。返回已解析的 JSON */
-async function postJson(
+/** 一次出网：超时、退避重试、非 2xx 翻译、失败文案脱敏。GET（列模型）与 POST（对话）共用这一份 */
+async function requestJson(
+  method: 'GET' | 'POST',
   url: string,
   headers: Record<string, string>,
   payload: unknown,
@@ -67,9 +68,9 @@ async function postJson(
     if (i > 0) await sleep(Math.min(5000, 500 * 2 ** (i - 1)));
     try {
       const res = await transport(url, {
-        method: 'POST',
+        method,
         headers: { 'content-type': 'application/json', ...headers },
-        body: JSON.stringify(payload),
+        ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
         signal: AbortSignal.timeout(config.aiTimeoutMs),
       });
       const raw = await res.text();
@@ -120,6 +121,52 @@ function errorMessage(json: Record<string, unknown>): string {
   return '';
 }
 
+/**
+ * base_url 归一到"接口根"：界面上允许写 `https://api.deepseek.com`、
+ * `https://api.deepseek.com/v1`、`https://gw.example.com/v1/chat/completions` 三种，
+ * 全都归到去掉尾路径的那一层。根路径（没有任何路径段）补 `/v1` ——
+ * DeepSeek / 大多数 OpenAI 兼容网关都在 /v1 下，少了它会被回一个语义含糊的 401。
+ */
+function apiRoot(baseUrl: string): string {
+  const base = baseUrl.replace(/\/+$/, '').replace(/\/chat\/completions$/, '');
+  const { pathname } = new URL(base);
+  return pathname === '' || pathname === '/' ? `${base}/v1` : base;
+}
+
+/**
+ * 模型清单的两种返回形状都收：Google 用 `models:[{name:"models/xxx", supportedGenerationMethods:[…]}]`，
+ * OpenAI 兼容网关用 `data:[{id:"xxx"}]`，反代常常只对齐其中一半，所以按字段有无依次尝试。
+ * 带 supportedGenerationMethods 却不含 generateContent 的（embed / streamingTts）挑不到，过滤掉。
+ */
+function readModelItems(json: Record<string, unknown>): string[] {
+  const items = Array.isArray(json.models) ? json.models : Array.isArray(json.data) ? json.data : [];
+  const out: string[] = [];
+  for (const raw of items) {
+    if (typeof raw === 'string') {
+      if (raw) out.push(raw.replace(/^models\//, ''));
+      continue;
+    }
+    if (!raw || typeof raw !== 'object') continue;
+    const m = raw as Record<string, unknown>;
+    const ways = Array.isArray(m.supportedGenerationMethods) ? m.supportedGenerationMethods.map(String) : [];
+    if (ways.length && !ways.includes('generateContent')) continue;
+    const name = String(m.id ?? m.name ?? '').replace(/^models\//, '');
+    if (name) out.push(name);
+  }
+  return [...new Set(out)];
+}
+
+/** 服务商/网关列模型：一次 GET /models，两家协议只差认证头 */
+export async function listModelNames(cfg: AiProviderConfig, transport: Transport = httpTransport): Promise<string[]> {
+  const secrets = [cfg.apiKey];
+  // Gemini 的密钥只走头，不走 query（写进 URL 会落到访问日志里）
+  const headers: Record<string, string> = cfg.protocol === 'gemini' ? { 'x-goog-api-key': cfg.apiKey } : { authorization: `Bearer ${cfg.apiKey}` };
+  const { json } = await requestJson('GET', `${apiRoot(cfg.baseUrl)}/models`, headers, undefined, secrets, cfg.name, transport);
+  const err = errorMessage(json);
+  if (err) throw new AiApiError(cfg.name, 200, safe(err, secrets).slice(0, 240));
+  return readModelItems(json);
+}
+
 /* ---------------- OpenAI 兼容协议（GPT / DeepSeek / 网关） ---------------- */
 
 export class OpenAiProvider implements AiProviderClient {
@@ -128,9 +175,7 @@ export class OpenAiProvider implements AiProviderClient {
   constructor(private readonly cfg: AiProviderConfig, private readonly transport: Transport = httpTransport) {}
 
   private get endpoint(): string {
-    // base_url 允许带或不带 /v1：统一在这里补齐，避免"DeepSeek 要 /v1、自建网关已经自带"两种写法各配一份
-    const base = this.cfg.baseUrl.replace(/\/+$/, '');
-    return /\/chat\/completions$/.test(base) ? base : `${base}/chat/completions`;
+    return `${apiRoot(this.cfg.baseUrl)}/chat/completions`;
   }
 
   private toWire(messages: AiMessage[]): Record<string, unknown>[] {
@@ -168,7 +213,7 @@ export class OpenAiProvider implements AiProviderClient {
       body.tools = tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } }));
       body.tool_choice = 'auto';
     }
-    const { json } = await postJson(this.endpoint, { authorization: `Bearer ${this.cfg.apiKey}` }, body, [this.cfg.apiKey], this.cfg.name, this.transport);
+    const { json } = await requestJson('POST', this.endpoint, { authorization: `Bearer ${this.cfg.apiKey}` }, body, [this.cfg.apiKey], this.cfg.name, this.transport);
     const err = errorMessage(json);
     if (err) throw new AiApiError(this.cfg.name, 200, safe(err, [this.cfg.apiKey]).slice(0, 240));
     const choice = (Array.isArray(json.choices) ? (json.choices as Record<string, unknown>[])[0] : undefined) ?? {};
@@ -197,8 +242,7 @@ export class GeminiProvider implements AiProviderClient {
   constructor(private readonly cfg: AiProviderConfig, private readonly transport: Transport = httpTransport) {}
 
   private get endpoint(): string {
-    const base = this.cfg.baseUrl.replace(/\/+$/, '');
-    return `${base}/models/${encodeURIComponent(this.cfg.model)}:generateContent`;
+    return `${apiRoot(this.cfg.baseUrl)}/models/${encodeURIComponent(this.cfg.model)}:generateContent`;
   }
 
   /**
@@ -240,7 +284,7 @@ export class GeminiProvider implements AiProviderClient {
       body.tools = [{ functionDeclarations: tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters })) }];
       body.toolConfig = { functionCallingConfig: { mode: 'AUTO' } };
     }
-    const { json } = await postJson(this.endpoint, { 'x-goog-api-key': this.cfg.apiKey }, body, [this.cfg.apiKey], this.cfg.name, this.transport);
+    const { json } = await requestJson('POST', this.endpoint, { 'x-goog-api-key': this.cfg.apiKey }, body, [this.cfg.apiKey], this.cfg.name, this.transport);
     const err = errorMessage(json);
     if (err) throw new AiApiError(this.cfg.name, 200, safe(err, [this.cfg.apiKey]).slice(0, 240));
     const candidate = (Array.isArray(json.candidates) ? (json.candidates as Record<string, unknown>[])[0] : undefined) ?? {};

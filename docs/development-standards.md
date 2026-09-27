@@ -392,6 +392,15 @@ sendAlert({ title: '订单同步失败', detail: `shop=1 ${msg}`, level: 'error'
 
 **协议两种，厂商可扩**：`openai` 兼容（GPT / DeepSeek / 自建网关）与 `gemini` 原生。加一家新厂商只在 `AI_VENDOR_PRESETS` 加一行（协议 + base_url + 默认模型），**不许**再写第三个适配器或第三套报文。
 
+**一家服务商是一串模型，不是一个**：`ai_provider.model` 只是**默认模型**，可选清单存在 `ai_provider.models`（逗号分隔，不含默认那个）。
+解析与回写只有一个口径 —— `parseModels()`（分隔符 `/[\n,;，；、]/`、去重、上限 `MAX_MODELS` 截断）与 `modelsColumn()`（从清单里剔掉默认），
+接口对前端只暴露算好的 `model_list` / `model_count`；**不要**在前端再解析一遍字符串，那就是本项目一直在防的"同名不同实现"。
+拉模型（`pullModels`）走 `resolveRow` 而不是 `resolveProvider`：新建的网关常常一个模型都还没填，而那正是这一步要解决的，
+按"必须有默认模型"去拦就成了死锁。清单是**并集**（已有 + 拉回来的），网关没开 `/models` 时明确报错并提示手工填，不许静默清空。
+按次传上来的 `model` 必须命中这家清单，否则 400 —— 少这一步，这个入参就把内部系统变成了任意上游的转发器。
+走反代/网关时 `base_url` 填的是**反代自己的地址**，不是厂商官方地址：预设值只是起步抄作业，密钥是谁发的就发给谁，
+填成官方地址的现场表现是"密钥明明没错却一直被拒"（Google 收到第三方 `sk-` key 只会回 400 `API key not valid`）。
+
 **密钥的三条死规矩**（照 `tk_shop` 凭证那套来，一条都不能省）：
 
 1. 落库前 `encryptSecret()`（AES-256-GCM，密钥来自 `CRED_ENC_KEY`），列名以 `_enc` 结尾；

@@ -105,6 +105,8 @@ function migrateRebateCaliber(db: DatabaseSync): void {
 export function migrate(db: DatabaseSync): void {
   db.exec(readSchema());
   addColumnIfMissing(db, 'tk_shop', 'access_token_enc', 'TEXT');
+  // 反代网关（如 Antigravity Tools）一家背后是几十个模型，单列 model 撑不住；老库补上清单列
+  addColumnIfMissing(db, 'ai_provider', 'models', "TEXT NOT NULL DEFAULT ''");
   migrateDueNotificationIndexes(db);
   migrateLegacyRateSources(db);
   migrateNotificationDedupeIncludesSoftDelete(db);

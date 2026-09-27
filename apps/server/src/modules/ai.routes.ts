@@ -15,7 +15,7 @@ import { Q, queryPage } from '../core/query.js';
 import { encryptSecret, requireMenu, type AuthedRequest } from '../core/auth.js';
 import { writeOpLog } from '../core/oplog.js';
 import { config } from '../config.js';
-import { PROVIDER_COLUMNS, assertBaseUrlAllowed, enabledProviders, providerView, probeProvider, usageSummary } from '../services/ai/registry.js';
+import { PROVIDER_COLUMNS, assertBaseUrlAllowed, enabledProviders, normalizeModelInput, probeProvider, pullModels, providerView, usageSummary } from '../services/ai/registry.js';
 import { AI_TOOLS } from '../services/ai/tools.js';
 import { runChat } from '../services/ai/chat.js';
 import { maskError } from '../core/redact.js';
@@ -33,7 +33,10 @@ const providerBody = z.object({
   vendor: z.enum([AI_VENDOR.OPENAI, AI_VENDOR.DEEPSEEK, AI_VENDOR.GEMINI, AI_VENDOR.CUSTOM]).default(AI_VENDOR.CUSTOM),
   protocol: z.enum([AI_PROTOCOL.OPENAI, AI_PROTOCOL.GEMINI]).optional(),
   base_url: z.string().min(8).max(255),
-  model: z.string().min(1).max(96),
+  /** 默认模型；反代/网关可以先留空，靠「拉模型」从服务商那里取一份清单再定 */
+  model: z.string().max(96).default(''),
+  /** 除默认模型外的可选清单原文（换行/逗号/分号分隔），落库前统一成逗号分隔 */
+  models: z.string().max(8000).optional(),
   /** 只在写入时出现；读接口永远不回传 */
   api_key: z.string().max(400).nullish(),
   temperature: z.number().min(0).max(2).default(0.3),
@@ -49,6 +52,8 @@ const chatBody = z.object({
   content: z.string().min(1).max(8000),
   conversation_id: z.number().int().positive().optional(),
   provider_id: z.number().int().positive().optional(),
+  /** 本轮用哪个模型：只能是所选服务商清单里的名字（registry 把关），不传就用该服务商的默认模型 */
+  model: z.string().max(96).optional(),
 });
 
 const providerRow = (id: number): Record<string, unknown> | undefined =>
@@ -59,7 +64,7 @@ aiRouter.get(
   '/providers',
   wrap((req, res) => {
     const q = new Q('p.is_deleted = 0')
-      .like('p.name LIKE ? OR p.model LIKE ?', req.query.keyword)
+      .like('(p.name LIKE ? OR p.model LIKE ? OR p.models LIKE ?)', req.query.keyword)
       .eq('p.vendor', req.query.vendor)
       .eq('p.enabled', req.query.enabled);
     const page = queryPage(req, { from: 'ai_provider p', q, select: `${PROVIDER_COLUMNS}, api_key_enc`, orderBy: 'p.is_default DESC, p.id ASC' });
@@ -93,12 +98,15 @@ aiRouter.post(
      */
     const vendor = body.vendor ?? AI_VENDOR.CUSTOM;
     const preset = AI_VENDOR_PRESETS[vendor];
+    /** 厂商预设带模型名（openai/deepseek/gemini），没填就按预设；custom 网关没有预设，留空等「拉模型」 */
+    const models = normalizeModelInput({ model: '', models: null }, { model: body.model || preset.model, models: body.models });
     const data = {
       name: body.name,
       vendor,
       protocol: body.protocol ?? preset.protocol,
       base_url: body.base_url,
-      model: body.model,
+      model: models.model,
+      models: models.models,
       temperature: body.temperature ?? 0.3,
       max_output_tokens: body.max_output_tokens ?? 1024,
       price_in_per_1k: body.price_in_per_1k ?? 0,
@@ -125,6 +133,13 @@ aiRouter.put(
     const body = parseBody(providerBody.partial(), req.body ?? {});
     if (body.base_url) assertBaseUrlAllowed(body.base_url);
     const patch: Record<string, unknown> = { ...body };
+    /** 模型两个字段是一套口径，必须一起归一：只改默认时清单要跟着去重，只改清单时默认不能重复出现在清单里 */
+    if (body.model !== undefined || body.models !== undefined) {
+      Object.assign(
+        patch,
+        normalizeModelInput({ model: String(before.model ?? ''), models: before.models == null ? null : String(before.models) }, body),
+      );
+    }
     /** 空串 = 不动密钥；显式 null = 清空（清空后这条服务商就测不了也问不了，接口会直接报"还没填 key"） */
     if (body.api_key === undefined) delete patch.api_key;
     else if (!body.api_key) patch.api_key_enc = null;
@@ -178,6 +193,30 @@ aiRouter.post(
   }),
 );
 
+/**
+ * 拉模型：问服务商"你这里有哪些模型"，把清单并进这一行。
+ * 反代/网关（如自建 Gemini 代理）后面挂了哪些模型只有它自己知道，让人手抄不现实。
+ */
+aiRouter.post(
+  '/providers/:id/models',
+  wrap(async (req, res) => {
+    const user = current(req);
+    const id = Number(req.params.id);
+    if (!providerRow(id)) throw notFound('服务商不存在');
+    const out = await pullModels(id);
+    writeOpLog({
+      user_id: user.id,
+      module: MODULE,
+      action: 'update',
+      target_table: 'ai_provider',
+      target_id: id,
+      after: { 拉模型: `取回 ${out.fetched_total} 个，清单 ${out.models.length} 个，新增 ${out.added} 个，默认 ${out.default_model || '（无）'}` },
+      ip: req.ip,
+    });
+    ok(res, out);
+  }),
+);
+
 /** 工具清单：前端把"AI 能干什么、哪些是写入"显示出来，不让人猜 */
 aiRouter.get(
   '/tools',
@@ -198,6 +237,7 @@ aiRouter.post(
       content: body.content,
       conversationId: body.conversation_id,
       providerId: body.provider_id,
+      model: body.model,
     });
     ok(res, out);
   }),

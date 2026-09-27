@@ -839,7 +839,8 @@ CREATE TABLE IF NOT EXISTS ai_provider (
   vendor            TEXT    NOT NULL DEFAULT 'custom',      -- openai / deepseek / gemini / custom
   protocol          TEXT    NOT NULL DEFAULT 'openai',      -- 只有两种报文协议：openai 兼容 与 gemini
   base_url          TEXT    NOT NULL,
-  model             TEXT    NOT NULL,
+  model             TEXT    NOT NULL,                       -- 默认模型；反代网关可有多个，空串表示还没选
+  models            TEXT    NOT NULL DEFAULT '',            -- 除默认模型外的可选清单，逗号分隔（反代一次拉回几十条）
   api_key_enc       TEXT,
   temperature       REAL    NOT NULL DEFAULT 0.3,
   max_output_tokens INTEGER NOT NULL DEFAULT 1024,

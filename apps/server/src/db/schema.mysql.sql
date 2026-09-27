@@ -892,7 +892,8 @@ CREATE TABLE IF NOT EXISTS ai_provider (
   vendor            VARCHAR(32)   NOT NULL DEFAULT 'custom',
   protocol          VARCHAR(16)   NOT NULL DEFAULT 'openai',
   base_url          VARCHAR(255)  NOT NULL,
-  model             VARCHAR(96)   NOT NULL,
+  model             VARCHAR(96)   NOT NULL,                 -- 默认模型；空串表示还没选
+  models            TEXT,                                   -- 除默认模型外的可选清单，逗号分隔（sqlite 侧 NOT NULL DEFAULT ''）
   api_key_enc       TEXT,                                   -- AES-256-GCM 密文，读接口不下发
   temperature       DECIMAL(3,2)  NOT NULL DEFAULT 0.30,
   max_output_tokens INT           NOT NULL DEFAULT 1024,

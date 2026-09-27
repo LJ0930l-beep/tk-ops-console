@@ -40,6 +40,7 @@ export const API_PATHS = [
   '/ai/conversations/:id',
   '/ai/providers',
   '/ai/providers/:id',
+  '/ai/providers/:id/models',
   '/ai/providers/:id/test',
   '/ai/providers/all',
   '/ai/tools',
@@ -251,6 +252,7 @@ export type ApiPath =
   | `/ai/conversations/${string}`
   | '/ai/providers'
   | `/ai/providers/${string}`
+  | `/ai/providers/${string}/models`
   | `/ai/providers/${string}/test`
   | '/ai/providers/all'
   | '/ai/tools'

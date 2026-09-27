@@ -22,9 +22,20 @@ export class AiApiError extends AppError {
   }
 }
 
+/**
+ * 密钥被拒时各家给的状态码不一样：Google 是 400 + "API key not valid"，OpenAI 是 401 +
+ * "Incorrect API key"，DeepSeek 是 401 + "Authentication Fails"。只看状态码会把 Gemini 的
+ * 密钥错误甩成一整坨原始 JSON 到页面上，所以按报文措辞再认一次。
+ */
+const KEY_REJECTED = /(api[_\s-]?key\s+not\s+valid|api_key_invalid|incorrect\s+api\s+key|invalid\s+api\s+key|no\s+api\s+key|authentication\s+fails|invalid\s+authentication\s+credentials|permission_denied)/i;
+
 /** 把服务商返回翻成人能照着做的下一步（PRD §5.3：错误不许只给一个码） */
 function describeFailure(status: number, body: string): string {
   const text = body.slice(0, 300);
+  if ((status === 400 || status === 401 || status === 403) && KEY_REJECTED.test(body)) {
+    return 'API Key 被服务商拒绝：核对这串密钥是不是这家服务商的、复制是否完整、有没有过期' +
+      '（Gemini 的密钥以 AIza 开头，DeepSeek / OpenAI 以 sk- 开头），改好后重新点测试';
+  }
   if (status === 401 || status === 403) return 'API Key 无效或没有该模型的权限，请到「模型服务商」核对密钥与模型名';
   if (status === 404) return '接口地址或模型名不对（404）：自定义网关请核对 base_url 是否已经包含 /v1 这类前缀';
   if (status === 429) return '触发限流或额度用尽（429），稍后重试或换一家服务商';

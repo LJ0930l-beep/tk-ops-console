@@ -129,6 +129,28 @@ describe('服务商配置与密钥边界', () => {
     expect(err).toMatch(/ENOTFOUND/);
     expect(err).not.toContain(KEY);
   });
+
+  it('Gemini 用 400 报密钥错误，也不能把整坨原始 JSON 甩到页面上', async () => {
+    const id = addProvider('密钥填错家', {
+      vendor: 'gemini', protocol: 'gemini', base_url: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-2.5-flash',
+    });
+    const googleBody = JSON.stringify({
+      error: {
+        code: 400,
+        message: 'API key not valid. Please pass a valid API key.',
+        status: 'INVALID_ARGUMENT',
+        details: [{ '@type': 'type.googleapis.com/google.rpc.ErrorInfo', reason: 'API_KEY_INVALID', domain: 'googleapis.com' }],
+      },
+    });
+    const transport: Transport = async () => ({ status: 400, headers: { get: () => null }, text: async () => googleBody });
+    await expect(runChat({ user: loadUser(1)!, content: 'hi', providerId: id, transport }))
+      .rejects.toThrow(/API Key 被服务商拒绝/);
+    const err = String(all<Record<string, unknown>>(`SELECT error_msg FROM ai_call_log WHERE provider_id = ? ORDER BY id DESC`, id)[0]?.error_msg ?? '');
+    // 文案要给出可执行的下一步（密钥是不是这一家的、格式长什么样），而不是让用户去读报文
+    expect(err).toMatch(/AIza/);
+    expect(err).not.toMatch(/type\.googleapis\.com|INVALID_ARGUMENT/);
+    expect(err).not.toContain(KEY);
+  });
 });
 
 describe('对话与工具循环（OpenAI 兼容协议）', () => {

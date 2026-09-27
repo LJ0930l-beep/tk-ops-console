@@ -430,3 +430,9 @@ sendAlert({ title: '订单同步失败', detail: `shop=1 ${msg}`, level: 'error'
 429 → 限流）；传输层失败没有状态码，undici 只抛一句 `fetch failed`，真正的原因（ENOTFOUND / ECONNREFUSED / 证书）
 在 `error.cause` 里，必须带出来并指向"核对 base_url 能否从本机访问"，否则用户拿到的是一句无法照做的英文。
 两类文案都同样过 `safe()`。
+
+**密钥被拒不能只看状态码**：同一件事各家写法不同 —— Google/Gemini 是 `400 + "API key not valid"`，
+OpenAI 是 `401 + "Incorrect API key"`，DeepSeek 是 `401 + "Authentication Fails"`。只按状态码分支，
+Gemini 的密钥错误就会退化成 `HTTP 400：{整坨原始 JSON}` 贴到服务商列表上。所以 `describeFailure()` 先用
+`KEY_REJECTED` 匹配报文措辞（400/401/403 都算），命中就回一句"密钥是不是这家服务商的、复制是否完整、
+有没有过期"并给出两家的密钥长相（Gemini `AIza…`、DeepSeek/OpenAI `sk-…`）。

@@ -313,6 +313,8 @@ aiRouter.get(
       scope: mineOnly ? '本人' : '全部',
       enabled: config.aiEnabled,
       allowed_hosts: config.aiAllowedHosts,
+      /** 被显式允许走明文的服务商地址：界面上要能看出这条例外存不存在，它关系到密钥是否明文过网 */
+      plain_http_hosts: config.aiPlainHttpHosts,
       max_tool_rounds: config.aiMaxToolRounds,
     });
   }),

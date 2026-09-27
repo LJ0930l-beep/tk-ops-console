@@ -150,6 +150,17 @@ export const config = {
     .split(',')
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean),
+  /**
+   * 允许以明文 http 访问的服务商地址（逗号分隔，每条写 `主机` 或 `主机:端口`；空 = 一律不许，本机回环除外）。
+   * 唯一的用途是"反代/网关跑在局域网另一台电脑上"：那种地址只有内网 IP、没有证书，
+   * 而回环例外救不了它 —— 127.0.0.1 指的是运行本后台的这台机器。
+   * 代价必须写明白：密钥在这种地址上是明文过网的，所以只按主机逐条放行，
+   * 绝不做"整个网段/所有 http 都放开"。
+   */
+  aiPlainHttpHosts: (process.env.AI_ALLOW_HTTP_HOSTS ?? '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean),
   /** 单次调用允许送进模型的最大字符数（提示词 + 工具返回都算），超了就截断并说明 */
   aiMaxPromptChars: num('AI_MAX_PROMPT_CHARS', 24_000),
   enableScheduler: process.env.ENABLE_SCHEDULER !== 'false',

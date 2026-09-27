@@ -406,8 +406,11 @@ sendAlert({ title: '订单同步失败', detail: `shop=1 ${msg}`, level: 'error'
 1. 落库前 `encryptSecret()`（AES-256-GCM，密钥来自 `CRED_ENC_KEY`），列名以 `_enc` 结尾；
 2. 读接口一律走**字段白名单**（`PROVIDER_COLUMNS`），只回 `has_key` 布尔，密文与明文都不出接口；
 3. 出网失败/服务商回显的文案必须过 `safe()` + `maskError()` 才允许进 `error_msg`、`ai_call_log`、日志与响应。
-   `base_url` 是界面上可写的，所以还要过 `assertBaseUrlAllowed()`（强制 https + 可选 `AI_ALLOWED_HOSTS` 主机白名单）——
+   `base_url` 是界面上可写的，所以还要过 `assertBaseUrlAllowed()`（先要求解析得出来 —— 解析不了是 400，不是 500；再强制 https，本机回环例外，
+   其余明文按主机/主机:端口逐条写进 `AI_ALLOW_HTTP_HOSTS` 才吃；最后才是可选的 `AI_ALLOWED_HOSTS` 主机白名单）——
    否则被盗用的管理员账号只要点一次"测活"，就能把 key 送到别人的服务器。
+   两道闸各管各的：放行明文不等于放弃域名白名单。**别为了"内网反正没外人"把整段网段列进 `AI_ALLOW_HTTP_HOSTS`**，
+   那等于把这台机器的整个内网变成合法的密钥接收方。
 
 **没有 mock**：产品代码里不存在假数据分支，没配服务商就是 409 一句可读提示。要测真实链路就在测试里注入桩 `transport`
 （`runChat({ transport })`，与 `services/tiktok/realClient.ts` 的注入点同一套路），桩只替掉 `fetch` 这一层，

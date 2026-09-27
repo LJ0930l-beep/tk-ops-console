@@ -16,11 +16,12 @@
  *  8. 按次选的模型只认这家清单里的名字 —— 放开它就等于让本系统替任何人打任意模型。
  */
 import { describe, it, expect, beforeAll } from 'vitest';
+import { config } from '../src/config.js';
 import { all, get, insert } from '../src/core/db.js';
 import { encryptSecret, loadUser } from '../src/core/auth.js';
 import type { RawResponse, Transport } from '../src/services/tiktok/realClient.js';
 import { runChat } from '../src/services/ai/chat.js';
-import { MAX_MODELS, normalizeModelInput, parseModels, pullModels } from '../src/services/ai/registry.js';
+import { MAX_MODELS, assertBaseUrlAllowed, normalizeModelInput, parseModels, pullModels } from '../src/services/ai/registry.js';
 import { ACCOUNTS, auth, boot, DEFAULT_PASSWORD, login } from './helper.js';
 
 let ctx: ReturnType<typeof boot>;
@@ -131,6 +132,15 @@ describe('服务商配置与密钥边界', () => {
     const err = String(all<Record<string, unknown>>(`SELECT error_msg FROM ai_call_log WHERE provider_id = ? ORDER BY id DESC`, id)[0]?.error_msg ?? '');
     expect(err).toMatch(/ENOTFOUND/);
     expect(err).not.toContain(KEY);
+  });
+
+  it('反代在另一台电脑上时，本机 127.0.0.1 必然拒连 —— 文案要点破这件事', async () => {
+    const id = addProvider('打错了的回环', { vendor: 'custom', base_url: 'http://127.0.0.1:7900/v1', model: 'gemini-2.5-flash' });
+    const transport: Transport = async () => {
+      throw new TypeError('fetch failed', { cause: new Error('connect ECONNREFUSED 127.0.0.1:7900') });
+    };
+    await expect(runChat({ user: loadUser(1)!, content: 'hi', providerId: id, transport }))
+      .rejects.toThrow(/另一台/);
   });
 
   it('Gemini 用 400 报密钥错误，也不能把整坨原始 JSON 甩到页面上', async () => {
@@ -410,6 +420,48 @@ describe('一家服务商带多个模型（反代 / 自建网关）', () => {
     const list = parseModels({ model: ' x ', models: 'y,z\n z ;  w、y' });
     expect(list).toEqual(['x', 'y', 'z', 'w']);
     expect(normalizeModelInput({ model: '', models: null }, { models: 'a,b,a' }).model).toBe('a');
+  });
+});
+
+describe('base_url 这道出网关', () => {
+  /** config 是导入时算好的对象，改它必须还原：同进程后面的用例会以为白名单还开着 */
+  const withConfig = async (patch: Partial<typeof config>, run: () => void): Promise<void> => {
+    const before = { aiAllowedHosts: config.aiAllowedHosts, aiPlainHttpHosts: config.aiPlainHttpHosts };
+    Object.assign(config, patch);
+    try {
+      run();
+    } finally {
+      Object.assign(config, before);
+    }
+  };
+
+  it('地址压根解析不了是 400，不是"服务器内部错误"（填错格式的人不该去翻服务端日志）', async () => {
+    const res = await ctx.http.post('/api/ai/providers').set(auth(token.boss)).send({
+      name: '手抄的地址', vendor: 'custom', base_url: 'not-a-valid-url', model: 'x', api_key: KEY,
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/无法解析/);
+    expect(res.body.message).not.toMatch(/内部错误/);
+  });
+
+  it('局域网 http 默认一律拒；只有 AI_ALLOW_HTTP_HOSTS 逐条放行才吃，且放行不吃域名白名单', async () => {
+    await withConfig({ aiPlainHttpHosts: ['192.168.0.30:7900'] }, () => {
+      expect(() => assertBaseUrlAllowed('http://192.168.0.30/v1')).toThrow(/https/);
+      expect(() => assertBaseUrlAllowed('http://192.168.0.31:7900/v1')).toThrow(/https/);
+      expect(assertBaseUrlAllowed('http://192.168.0.30:7900/v1').protocol).toBe('http:');
+      // 放行明文不等于放弃主机白名单：两道闸各自独立
+      config.aiAllowedHosts = ['api.openai.com'];
+      expect(() => assertBaseUrlAllowed('http://192.168.0.30:7900/v1')).toThrow(/AI_ALLOWED_HOSTS/);
+    });
+    await withConfig({ aiAllowedHosts: ['192.168.0.30'] }, () => {
+      expect(() => assertBaseUrlAllowed('http://192.168.0.30:7900/v1')).toThrow(/https/);
+    });
+  });
+
+  it('回环始终可用（本机网关/反代是常态），但只认回环这几个名字', async () => {
+    expect(assertBaseUrlAllowed('http://127.0.0.1:8080/v1').protocol).toBe('http:');
+    expect(assertBaseUrlAllowed('http://localhost:8080/v1').protocol).toBe('http:');
+    expect(() => assertBaseUrlAllowed('http://0.0.0.0:8080/v1')).toThrow(/https/);
   });
 });
 

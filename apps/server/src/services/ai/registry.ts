@@ -96,17 +96,40 @@ export function providerView(row: ProviderRow & { api_key_enc?: string | null })
 }
 
 /**
- * base_url 校验：只允许 https（本机回环例外，方便对着本地代理/自建网关调），
- * 且当 AI_ALLOWED_HOSTS 配置了就必须命中白名单。
+ * base_url 出网前的三道检查，顺序不能换：
+ *  1. 地址能不能解析 —— 解析不了是填的人写错了，报 400 让人自己改，不是服务端坏了；
+ *  2. 协议：只允许 https。本机回环例外（它不出网卡，调试用的就是本机网关）；
+ *     其余明文必须由 AI_ALLOW_HTTP_HOSTS 按主机/主机:端口逐条放行，
+ *     因为界面上可写的地址 + 一次"测活"就足以把 API Key 送到别人的服务器；
+ *  3. 主机白名单 AI_ALLOWED_HOSTS（配了才生效），命中协议之外的域名照样拦。
  */
 export function assertBaseUrlAllowed(rawUrl: string): URL {
-  const url = new URL(rawUrl);
-  const local = url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '::1';
-  if (url.protocol !== 'https:' && !local) throw badRequest(`服务商地址必须是 https（当前 ${url.protocol}//${url.host}）；本机调试可用 127.0.0.1`);
+  let url: URL;
+  try {
+    url = new URL(String(rawUrl).trim());
+  } catch {
+    throw badRequest(`base_url 无法解析：${String(rawUrl).slice(0, 80)}（要写成 http(s)://主机[:端口][/前缀]）`);
+  }
+  if (url.protocol !== 'https:' && !plainHttpAllowed(url)) {
+    throw badRequest(
+      `服务商地址必须是 https（当前 ${url.protocol}//${url.host}）。` +
+        '本机的网关/代理直接用 127.0.0.1 即可；反代跑在另一台电脑上时，' +
+        '要么把那台机器的地址加进服务端的 AI_ALLOW_HTTP_HOSTS（明文过网，密钥会一起暴露，只在可信内网这么干），' +
+        '要么在本机做端口转发后继续用 127.0.0.1',
+    );
+  }
   if (config.aiAllowedHosts.length && !config.aiAllowedHosts.includes(url.hostname.toLowerCase())) {
     throw badRequest(`服务商域名 ${url.hostname} 不在 AI_ALLOWED_HOSTS 白名单内（当前允许：${config.aiAllowedHosts.join(' / ')}）`);
   }
   return url;
+}
+
+/** 明文 http 放行判定：回环无条件可行，其余只看 AI_ALLOW_HTTP_HOSTS 里逐条写出来的主机（可带端口） */
+function plainHttpAllowed(url: URL): boolean {
+  const host = url.hostname.toLowerCase();
+  if (host === '127.0.0.1' || host === 'localhost' || host === '::1') return true;
+  const port = url.port || (url.protocol === 'https:' ? '443' : '80');
+  return config.aiPlainHttpHosts.includes(host) || config.aiPlainHttpHosts.includes(`${host}:${port}`);
 }
 
 function rowToConfig(row: ProviderRow, apiKey: string): AiProviderConfig {

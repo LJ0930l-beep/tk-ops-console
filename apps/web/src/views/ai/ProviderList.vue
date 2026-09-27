@@ -5,6 +5,9 @@
         <el-tag size="small" :type="allowedHosts.length ? 'success' : 'warning'">
           {{ allowedHosts.length ? `出网白名单 ${allowedHosts.length} 个域` : '未设置 AI_ALLOWED_HOSTS：任何 https 地址都能配' }}
         </el-tag>
+        <el-tag v-if="plainHttpHosts.length" size="small" type="danger" effect="plain">
+          明文放行 {{ plainHttpHosts.length }} 个地址：{{ plainHttpHosts.join(' / ') }}
+        </el-tag>
       </template>
     </PageHeader>
 
@@ -45,6 +48,8 @@ const rp = ref();
 const testing = ref(0);
 const pulling = ref(0);
 const allowedHosts = ref<string[]>([]);
+/** 服务端设了 AI_ALLOW_HTTP_HOSTS 才非空：这几条内网地址允许明文，密钥会跟着明文过网，必须在界面上看得见 */
+const plainHttpHosts = ref<string[]>([]);
 
 const vendorOptions = Object.entries(AI_VENDOR_LABELS).map(([value, label]) => ({ value, label }));
 const protocolOptions = Object.values(AI_PROTOCOL).map((v) => ({ value: v, label: v === 'openai' ? 'OpenAI 兼容（GPT / DeepSeek / 网关）' : 'Google Gemini 原生' }));
@@ -165,8 +170,9 @@ async function test(row: Record<string, unknown>, reload: () => void): Promise<v
 
 onMounted(async () => {
   try {
-    const u = await apiGet<{ allowed_hosts?: string[] }>('/ai/calls/usage');
+    const u = await apiGet<{ allowed_hosts?: string[]; plain_http_hosts?: string[] }>('/ai/calls/usage');
     allowedHosts.value = u.allowed_hosts ?? [];
+    plainHttpHosts.value = u.plain_http_hosts ?? [];
   } catch {
     /* 拿不到不影响配置 */
   }

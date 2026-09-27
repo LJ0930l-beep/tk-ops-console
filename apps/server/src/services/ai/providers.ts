@@ -95,7 +95,16 @@ async function requestJson(
         // undici 只抛 "fetch failed"，真正的原因（ENOTFOUND / ECONNREFUSED / 证书）在 cause 里；
         // 不给这一层，用户看到的就是一句无法照做的"调用失败：fetch failed"。
         const cause = err.cause instanceof Error ? err.cause.message : '';
-        lastError = safe(`${err.message}${cause ? `（${cause}）` : ''}：请核对 base_url 能否从本机访问`, secrets).slice(0, 200);
+        /**
+         * 回环地址打不通，最常见的不是网关挂了，而是网关跑在**另一台**电脑上 ——
+         * 127.0.0.1 指的是运行本后台的这台机器，而填配置的人以为指的是他那台。
+         */
+        const loopback = /\/\/(127\.0\.0\.1|localhost|\[::1\])/i.test(url);
+        lastError = safe(
+          `${err.message}${cause ? `（${cause}）` : ''}：请核对 base_url 能否从本机访问` +
+            (loopback ? '。注意 127.0.0.1 是"运行本后台的这台电脑"：反代跑在另一台机器时要用它的局域网地址（需在服务端配 AI_ALLOW_HTTP_HOSTS），或在本机做端口转发' : ''),
+          secrets,
+        ).slice(0, 320);
       }
       if (i === attempts - 1) break;
     }

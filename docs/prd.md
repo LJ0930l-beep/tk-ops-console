@@ -466,7 +466,7 @@
 
 | 端点 | 作用 | 硬规则 |
 | --- | --- | --- |
-| `GET/POST /api/ai/providers`、`PUT/DELETE /:id` | 服务商 CRUD | 读取走字段白名单，**密文列 `api_key_enc` 与明文 key 都不出接口**（只回 `has_key`）；`base_url` 必须 https（本机回环例外）且命中 `AI_ALLOWED_HOSTS`（配了才校验）；编辑时 key 留空＝保持原值 |
+| `GET/POST /api/ai/providers`、`PUT/DELETE /:id` | 服务商 CRUD | 读取走字段白名单，**密文列 `api_key_enc` 与明文 key 都不出接口**（只回 `has_key`）；`base_url` 先要求能解析（解析不了是 400，不是 500），再要求 https（本机回环例外；反代在另一台电脑时由 `AI_ALLOW_HTTP_HOSTS` 逐条放行明文），最后命中 `AI_ALLOWED_HOSTS`（配了才校验）；编辑时 key 留空＝保持原值 |
 | `POST /api/ai/providers/:id/test` | 测活：一次最小往返 | 结果与失败原因（`maskError` 后）落到该行上，界面上看得见"上次测活：失败 + 为什么" |
 | `POST /api/ai/providers/:id/models` | 拉模型：问服务商"你背后有哪几个模型" | `GET {apiRoot}/models`，两家协议各自的清单形状都认（`data[]` / `models[]`，Gemini 滤掉 `embed`/`image` 这类不能生成的）；**只往清单里加，不覆盖手工填的名字**；超过 `MAX_MODELS`(60) 截断并在响应里说明；这一步用 `resolveRow` 而不是 `resolveProvider`（新加的网关常常还没模型，正是这一步要解决的） |
 | `GET /api/ai/tools` | 工具清单（名称/中文标签/是否写入） | 前端把"AI 能干什么"显示出来，不让人猜 |
@@ -486,7 +486,11 @@
 - **时间区间只有一个口径**：读工具（看板 / 利润报表）收 `days`（滚动 N 天）或 `month`（自然月 `YYYY-MM`，两端都含，没过完的月截到今天）。
   系统提示里写死了"今天是哪天"、"本月/上月必须换成 `month` 参数"、"引用数字要复述工具返回的区间" ——
   近 30 天冒充本月就是本项目反复在防的"同名不同分母"，第一次真实模型联调就是这么暴露出来的。
-- **配置项**（全部 env 可覆盖，见 `config.ts`）：`AI_ENABLED`、`AI_HTTP_TIMEOUT_MS`、`AI_MAX_RETRY`、`AI_MAX_TOOL_ROUNDS`、`AI_HISTORY_LIMIT`、`AI_ALLOWED_HOSTS`、`AI_MAX_PROMPT_CHARS`。
+- **地址这一层是"能不能出网"的闸，不是格式化校验**：`base_url` 先过 `new URL()`（抄错的地址报 400 说清该怎么写，绝不退化成"服务器内部错误"），再过协议 —— 只允许 https，本机回环例外；
+  反代跑在局域网另一台电脑上时（那种地址没有证书，而 127.0.0.1 指的是跑本后台的这台机器，救不了它），由 `AI_ALLOW_HTTP_HOSTS` 按 `主机` 或 `主机:端口` **逐条**放行明文，
+  绝不开"整段内网都算可信"这种口子；`AI_ALLOWED_HOSTS` 是第二道独立的闸，放行明文不等于放弃域名白名单。
+  服务商页顶部的标签会把当前生效的白名单显示出来，配置的人不用猜服务端是怎么起的。
+- **配置项**（全部 env 可覆盖，见 `config.ts`）：`AI_ENABLED`、`AI_HTTP_TIMEOUT_MS`、`AI_MAX_RETRY`、`AI_MAX_TOOL_ROUNDS`、`AI_HISTORY_LIMIT`、`AI_ALLOWED_HOSTS`、`AI_ALLOW_HTTP_HOSTS`、`AI_MAX_PROMPT_CHARS`。
 
 ---
 
@@ -654,7 +658,7 @@
 | 返点与物流快照冻结，改协议不回溯 | `tk_order_item.rebate_cny` / `logistics_cny` | 订单写入时按当时 `rebate_rate` 与 `unitLogisticsCny(sku)×quantity` 冻结；改 `product_sku.rebate_rate` **禁止** UPDATE 任何历史明细 | 老订单行 `rebate_cny` 在改返点率前后逐字节不变 |
 | 未配返点率不能按 0 收入 | `rebate_matched=0` | 所有返点/毛利/利润 SQL 必须带 `rebate_matched=1`；GMV 仍计入并显性提示"N 行未配返点率，不计利润" | 把未配返点行的 `rebate_cny` 人为改大 → 毛利/利润数字不变 |
 | 样品单不计 GMV | `tk_order.is_sample_order` | 所有 GMV/订单数/退款率/达人业绩口径 `AND is_sample_order=0`；寄样成本走 ROI 分母 | `/api/dashboard/summary.gmv` 与手算（排除 8 条样品单）一致 |
-| AI 只能走白名单工具写数据 | `ai_provider.api_key_enc` / `ai_action_log` | key 只进不出（AES-256-GCM + 字段白名单 + `maskError`）；`base_url` 必须 https 且可被 `AI_ALLOWED_HOSTS` 锁死；写工具仅限 `AI_WRITE_TOOLS`，执行时用的是**发起对话那个人的权限与数据范围**，并同写 op_log | `tests/ai.spec.ts`：key 不出接口/不出错误文案、白名单外工具不执行、无 creator 菜单者让 AI 写建联被拒且留痕 |
+| AI 只能走白名单工具写数据 | `ai_provider.api_key_enc` / `ai_action_log` | key 只进不出（AES-256-GCM + 字段白名单 + `maskError`）；`base_url` 只允许 https（回环例外，其余明文要 `AI_ALLOW_HTTP_HOSTS` 逐条放行，不整段放开）且可被 `AI_ALLOWED_HOSTS` 锁死；写工具仅限 `AI_WRITE_TOOLS`，执行时用的是**发起对话那个人的权限与数据范围**，并同写 op_log | `tests/ai.spec.ts`：key 不出接口/不出错误文案、地址解析不了报 400、白名单外的明文地址报 400、放行明文仍吃不到域名白名单、白名单外工具不执行、无 creator 菜单者让 AI 写建联被拒且留痕 |
 
 ### 5.4 金额与时间口径
 
